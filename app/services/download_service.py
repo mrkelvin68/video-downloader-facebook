@@ -58,7 +58,7 @@ class DownloadService:
                 folder = Path(work)
                 ffmpeg_loc = self._find_ffmpeg()
                 command = [
-                    sys.executable, "-m", "yt_dlp", "--no-playlist",
+                    *self._yt_dlp_command(), "--no-playlist",
                     "--no-overwrites", "--write-thumbnail", "--convert-thumbnails", "jpg",
                     "-f", "bv*+ba/b", "--merge-output-format", "mp4", "--remux-video", "mp4",
                 ]
@@ -256,7 +256,22 @@ class DownloadService:
             raise DownloadError("MP4 không có video stream hoặc duration không hợp lệ")
 
     @staticmethod
+    def _yt_dlp_command() -> list[str]:
+        if getattr(sys, "frozen", False):
+            bundled = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)) / "yt-dlp.exe"
+            if bundled.is_file():
+                return [str(bundled)]
+            return [sys.executable, "--yt-dlp"]
+        return [sys.executable, "-m", "yt_dlp"]
+
+    @staticmethod
     def _find_ffmpeg() -> str | None:
+        if getattr(sys, "frozen", False):
+            base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+            for candidate in (base / "ffmpeg.exe", base / "static_ffmpeg" / "bin" / "win32" / "ffmpeg.exe"):
+                if candidate.is_file():
+                    return str(candidate)
+            return None
         configured = os.environ.get("FFMPEG") or shutil.which("ffmpeg")
         if configured:
             return configured
@@ -269,6 +284,12 @@ class DownloadService:
 
     @staticmethod
     def _find_ffprobe() -> str | None:
+        if getattr(sys, "frozen", False):
+            base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+            for candidate in (base / "ffprobe.exe", base / "static_ffmpeg" / "bin" / "win32" / "ffprobe.exe"):
+                if candidate.is_file():
+                    return str(candidate)
+            return None
         configured = os.environ.get("FFPROBE") or shutil.which("ffprobe")
         if configured:
             return configured

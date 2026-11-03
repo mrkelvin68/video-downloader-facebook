@@ -21,3 +21,7 @@ logs/
 *.m4v
 *.3gp
 *.part
+build/
+dist/
+*.exe
+*.zip

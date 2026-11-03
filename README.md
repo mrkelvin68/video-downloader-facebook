@@ -26,8 +26,24 @@
 - Python 3.11 trở lên.
 - PySide6, yt-dlp, static-ffmpeg (cài tự động từ `requirements.txt`).
 
-## Cài đặt và khởi chạy nhanh
+## Cài đặt và phát hành Windows
 
+Nhà phát triển cài môi trường bằng:
+
+```text
+py install.py
+py run.py
+```
+
+Tạo bản phát hành onedir (mặc định):
+
+```text
+py build.py
+```
+
+Tùy chọn onefile: `py build.py --onefile`. Bản phát hành nằm trong `dist/`, cùng ZIP `VideoDownloader-Windows-x64.zip`. Người dùng cuối chỉ cần giải nén ZIP và chạy `VideoDownloader.exe`; không cần Python, pip hoặc FFmpeg.
+
+## Cài đặt và khởi chạy nhanh
 Yêu cầu Windows 10/11 và Python 3.11 trở lên có trong `PATH` (Python Launcher `py` được khuyến nghị). Tại thư mục repository, cài lần đầu bằng:
 
 ```powershell
