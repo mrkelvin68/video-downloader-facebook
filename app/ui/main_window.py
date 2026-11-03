@@ -1,6 +1,7 @@
 import sqlite3
 import sys
 from dataclasses import asdict
+from datetime import date
 from pathlib import Path
 
 from PySide6.QtCore import QTimer
@@ -8,6 +9,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -25,11 +27,17 @@ from app.services.csv_service import parse_video_csv, sample_video_csv
 from app.services.project_service import ProjectService
 from app.services.video_service import VideoService
 from app.services.download_queue_service import DownloadQueueService
+from app.services.matrix_service import MatrixService
 from app.ui.dialogs.csv_preview_dialog import CsvPreviewDialog
+from app.ui.dialogs.matrix_configuration_dialog import (
+    MatrixConfigurationDialog,
+    MatrixEntryDialog,
+)
 from app.ui.dialogs.project_dialog import ProjectDialog
 from app.ui.pages.project_detail_page import ProjectDetailPage
 from app.ui.pages.project_page import ProjectPage
 from app.ui.pages.download_queue_page import DownloadQueuePage
+from app.ui.pages.matrix_page import MatrixPage
 from app.ui.widgets.sidebar import Sidebar
 from app.ui.download_worker import DownloadWorker
 
@@ -44,7 +52,9 @@ class MainWindow(QMainWindow):
         self.projects = ProjectService(database)
         self.videos = VideoService(database)
         self.download_queue = DownloadQueueService(database)
+        self.matrices = MatrixService(database)
         self.current_project: Project | None = None
+        self.current_matrix_id: str | None = None
         self.pending_csv_text: str | None = None
         self.pending_csv_rows: list[dict] = []
         self.pending_csv_errors: list[str] = []
@@ -73,15 +83,18 @@ class MainWindow(QMainWindow):
         self.project_page = ProjectPage()
         self.detail_page = ProjectDetailPage()
         self.queue_page = DownloadQueuePage()
+        self.matrix_page = MatrixPage()
         self.pages.addWidget(self.project_page)
         self.pages.addWidget(self.detail_page)
         self.pages.addWidget(self.queue_page)
+        self.pages.addWidget(self.matrix_page)
         workspace_layout.addWidget(self.pages, 1)
         root_layout.addWidget(workspace, 1)
         self.setCentralWidget(root)
         self.project_page.createRequested.connect(self.add_project)
         self.project_page.editRequested.connect(self.edit_project)
         self.project_page.openRequested.connect(self.show_detail)
+        self.project_page.matrixRequested.connect(self.show_matrices)
         self.detail_page.backRequested.connect(self.show_projects)
         self.sidebar.projectsRequested.connect(self.show_projects)
         self.sidebar.queueRequested.connect(self.show_queue)
@@ -105,6 +118,17 @@ class MainWindow(QMainWindow):
         self.queue_page.retryRequested.connect(self.retry_queue_jobs)
         self.queue_page.cancelRequested.connect(self.cancel_queue_jobs)
         self.queue_page.prioritizeRequested.connect(self.prioritize_queue_jobs)
+        self.matrix_page.backRequested.connect(self.show_projects)
+        self.matrix_page.matrixChanged.connect(self._refresh_matrices)
+        self.matrix_page.newMatrixRequested.connect(self._create_matrix)
+        self.matrix_page.configureRequested.connect(self._configure_matrix)
+        self.matrix_page.exportRequested.connect(self._export_matrix)
+        self.matrix_page.regenerateRequested.connect(self._regenerate_matrix)
+        self.matrix_page.undoRequested.connect(self._undo_matrix)
+        self.matrix_page.renameRequested.connect(self._rename_matrix)
+        self.matrix_page.deleteRequested.connect(self._delete_matrix)
+        self.matrix_page.editEntryRequested.connect(self._edit_matrix_entry)
+        self.matrix_page.publishStatusRequested.connect(self._set_matrix_status)
         self.refresh_queue()
         self.refresh()
 
@@ -118,7 +142,7 @@ class MainWindow(QMainWindow):
         crumb.setObjectName("breadcrumb")
         layout.addWidget(crumb)
         layout.addStretch()
-        phase = QLabel("PHASE 1–3.2")
+        phase = QLabel("PHASE 1–4.1")
         phase.setObjectName("phaseTag")
         layout.addWidget(phase)
         return header
@@ -149,6 +173,254 @@ class MainWindow(QMainWindow):
         self.refresh_queue()
         self.pages.setCurrentIndex(2)
         self.sidebar.set_active("queue")
+
+    def show_matrices(self, project: Project) -> None:
+        self.current_project = project
+        self.current_matrix_id = None
+        if self._refresh_matrices():
+            self.pages.setCurrentIndex(3)
+            self.sidebar.set_active("projects")
+
+    def _refresh_matrices(self, matrix_id: str | None = None) -> bool:
+        if self.current_project is None:
+            return False
+        if isinstance(matrix_id, bool):
+            matrix_id = None
+        if matrix_id:
+            self.current_matrix_id = matrix_id
+        try:
+            project_id = self.current_project.uuid
+            matrices = self.matrices.list_matrices(project_id)
+            selected = next(
+                (
+                    item
+                    for item in matrices
+                    if item["matrix_id"] == self.current_matrix_id
+                ),
+                matrices[0] if matrices else None,
+            )
+            self.current_matrix_id = selected["matrix_id"] if selected else None
+            if selected:
+                matrix = self.matrices.get_matrix(
+                    selected["matrix_id"], project_id
+                )
+                configuration = self.matrices.get_configuration(
+                    selected["matrix_id"], project_id
+                )
+                pages = self.matrices.list_pages(selected["matrix_id"], project_id)
+                entries = self.matrices.list_entries(
+                    selected["matrix_id"], project_id
+                )
+                can_undo = self.matrices.can_undo(
+                    selected["matrix_id"], project_id
+                )
+            else:
+                matrix = configuration = None
+                pages = entries = []
+                can_undo = False
+            videos = self.matrices.list_project_videos(project_id)
+            self.matrix_page.set_data(
+                self.current_project,
+                matrices,
+                matrix,
+                configuration,
+                pages,
+                entries,
+                videos,
+                can_undo,
+                self.current_matrix_id,
+            )
+            self.project_page.set_projects(self.projects.list_projects())
+            return True
+        except (ValueError, sqlite3.Error) as exc:
+            QMessageBox.critical(self, "Lỗi ma trận", str(exc))
+            return False
+
+    def _create_matrix(self) -> None:
+        if self.current_project is None:
+            return
+        next_name = f"Ma trận {len(self.matrix_page.matrices) + 1}"
+        initial = {
+            "name": next_name,
+            "start_date": date.today().isoformat(),
+        }
+        dialog = MatrixConfigurationDialog(self, initial)
+        if dialog.exec() != MatrixConfigurationDialog.DialogCode.Accepted:
+            return
+        configuration = dialog.configuration()
+        try:
+            matrix_id = self.matrices.create_matrix(
+                self.current_project.uuid, **configuration
+            )
+        except (ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "Không thể tạo ma trận", str(exc))
+            return
+        self._refresh_matrices(matrix_id)
+
+    def _configure_matrix(self) -> None:
+        if self.current_project is None or self.current_matrix_id is None:
+            return
+        try:
+            configuration = self.matrices.get_configuration(
+                self.current_matrix_id, self.current_project.uuid
+            )
+        except (ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "Không thể đọc cấu hình", str(exc))
+            return
+        dialog = MatrixConfigurationDialog(self, configuration)
+        if dialog.exec() != MatrixConfigurationDialog.DialogCode.Accepted:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Sinh lại ma trận",
+            "Lưu cấu hình sẽ sinh lại lịch. Các ô Đã đăng được giữ nguyên. Tiếp tục?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.matrices.update_configuration(
+                self.current_matrix_id,
+                self.current_project.uuid,
+                **dialog.configuration(),
+            )
+        except (ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "Không thể cập nhật cấu hình", str(exc))
+            return
+        self._refresh_matrices(self.current_matrix_id)
+
+    def _regenerate_matrix(self) -> None:
+        if self.current_project is None or self.current_matrix_id is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Sinh lại ma trận",
+            "Sinh lại sẽ phân bổ video theo cấu hình. Các ô Đã đăng được giữ nguyên; "
+            "bạn có thể Hoàn tác một lần. Tiếp tục?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.matrices.regenerate(
+                self.current_matrix_id, self.current_project.uuid
+            )
+        except (ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "Không thể sinh lịch", str(exc))
+            return
+        self._refresh_matrices(self.current_matrix_id)
+
+    def _undo_matrix(self) -> None:
+        if self.current_project is None or self.current_matrix_id is None:
+            return
+        try:
+            self.matrices.undo_regeneration(
+                self.current_matrix_id, self.current_project.uuid
+            )
+        except (ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "Không thể hoàn tác", str(exc))
+            return
+        self._refresh_matrices(self.current_matrix_id)
+
+    def _rename_matrix(self) -> None:
+        if self.current_project is None or self.current_matrix_id is None:
+            return
+        try:
+            matrix = self.matrices.get_matrix(
+                self.current_matrix_id, self.current_project.uuid
+            )
+        except (ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "Không thể đọc ma trận", str(exc))
+            return
+        name, accepted = QInputDialog.getText(
+            self, "Đổi tên ma trận", "Tên ma trận:", text=matrix["name"]
+        )
+        if not accepted:
+            return
+        try:
+            self.matrices.rename_matrix(
+                self.current_matrix_id, self.current_project.uuid, name
+            )
+        except (ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "Không thể đổi tên", str(exc))
+            return
+        self._refresh_matrices(self.current_matrix_id)
+
+    def _delete_matrix(self) -> None:
+        if self.current_project is None or self.current_matrix_id is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Xóa ma trận",
+            "Xóa ma trận và lịch của nó? Video và file MP4 không bị xóa.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.matrices.delete_matrix(
+                self.current_matrix_id, self.current_project.uuid
+            )
+        except (ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "Không thể xóa ma trận", str(exc))
+            return
+        self.current_matrix_id = None
+        self._refresh_matrices()
+
+    def _edit_matrix_entry(self, entry: dict) -> None:
+        if self.current_project is None or self.current_matrix_id is None:
+            return
+        dialog = MatrixEntryDialog(entry, self.matrix_page.videos, self)
+        if dialog.exec() != MatrixEntryDialog.DialogCode.Accepted:
+            return
+        video_id, caption = dialog.values()
+        try:
+            self.matrices.update_entry(
+                self.current_matrix_id,
+                self.current_project.uuid,
+                entry["entry_id"],
+                video_id,
+                caption,
+            )
+        except (ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "Không thể cập nhật ô lịch", str(exc))
+            return
+        self._refresh_matrices(self.current_matrix_id)
+
+    def _set_matrix_status(self, entry: dict, posted: bool) -> None:
+        if self.current_project is None or self.current_matrix_id is None:
+            return
+        try:
+            self.matrices.set_publish_status(
+                self.current_matrix_id,
+                self.current_project.uuid,
+                entry["entry_id"],
+                posted,
+            )
+        except (ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "Không thể cập nhật trạng thái", str(exc))
+            return
+        self._refresh_matrices(self.current_matrix_id)
+
+    def _export_matrix(self) -> None:
+        if self.current_project is None or self.current_matrix_id is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Xuất lịch đăng CSV", "matrix-schedule.csv", "CSV (*.csv)"
+        )
+        if not path:
+            return
+        try:
+            self.matrices.export_csv(
+                self.current_matrix_id, self.current_project.uuid, path
+            )
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "Không thể xuất CSV", str(exc))
+            return
+        QMessageBox.information(self, "Đã xuất CSV", f"Đã lưu lịch: {path}")
 
     def _refresh_project_videos(self) -> bool:
         if self.current_project is None:

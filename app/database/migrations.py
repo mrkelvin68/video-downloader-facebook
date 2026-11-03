@@ -65,6 +65,129 @@ def _create_download_jobs_table(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_matrices_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS matrices (
+            matrix_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            day_count INTEGER NOT NULL CHECK(day_count BETWEEN 1 AND 365),
+            repeat_mode TEXT NOT NULL CHECK(
+                repeat_mode IN ('no_repeat', 'repeat_between_pages')
+            ),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(uuid) ON DELETE CASCADE,
+            UNIQUE(matrix_id, project_id)
+        )"""
+    )
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS matrix_pages (
+            page_id TEXT PRIMARY KEY,
+            matrix_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            position INTEGER NOT NULL CHECK(position >= 0),
+            is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+            FOREIGN KEY(matrix_id) REFERENCES matrices(matrix_id) ON DELETE CASCADE,
+            UNIQUE(page_id, matrix_id)
+        )"""
+    )
+    connection.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_matrix_pages_active_name
+           ON matrix_pages(matrix_id, name COLLATE NOCASE) WHERE is_active=1"""
+    )
+    connection.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_matrix_pages_active_position
+           ON matrix_pages(matrix_id, position) WHERE is_active=1"""
+    )
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS matrix_slots (
+            slot_id TEXT PRIMARY KEY,
+            matrix_id TEXT NOT NULL,
+            scheduled_time TEXT NOT NULL,
+            position INTEGER NOT NULL CHECK(position >= 0),
+            is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+            FOREIGN KEY(matrix_id) REFERENCES matrices(matrix_id) ON DELETE CASCADE,
+            UNIQUE(slot_id, matrix_id)
+        )"""
+    )
+    connection.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_matrix_slots_active_time
+           ON matrix_slots(matrix_id, scheduled_time) WHERE is_active=1"""
+    )
+    connection.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_matrix_slots_active_position
+           ON matrix_slots(matrix_id, position) WHERE is_active=1"""
+    )
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS matrix_entries (
+            entry_id TEXT PRIMARY KEY,
+            matrix_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            page_id TEXT NOT NULL,
+            video_id TEXT,
+            scheduled_date TEXT NOT NULL,
+            scheduled_time TEXT NOT NULL,
+            caption TEXT NOT NULL DEFAULT '',
+            publish_status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(publish_status IN ('pending', 'posted')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(matrix_id, project_id)
+                REFERENCES matrices(matrix_id, project_id) ON DELETE CASCADE,
+            FOREIGN KEY(page_id, matrix_id)
+                REFERENCES matrix_pages(page_id, matrix_id) ON DELETE CASCADE,
+            FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE SET NULL,
+            UNIQUE(matrix_id, page_id, scheduled_date, scheduled_time)
+        )"""
+    )
+    connection.execute(
+        """CREATE TRIGGER IF NOT EXISTS tr_matrix_entry_video_project_insert
+           BEFORE INSERT ON matrix_entries
+           WHEN NEW.video_id IS NOT NULL AND NOT EXISTS (
+               SELECT 1 FROM videos
+               WHERE id=NEW.video_id AND project_id=NEW.project_id
+           )
+           BEGIN
+               SELECT RAISE(ABORT, 'matrix video must belong to its project');
+           END"""
+    )
+    connection.execute(
+        """CREATE TRIGGER IF NOT EXISTS tr_matrix_entry_video_project_update
+           BEFORE UPDATE OF video_id, project_id ON matrix_entries
+           WHEN NEW.video_id IS NOT NULL AND NOT EXISTS (
+               SELECT 1 FROM videos
+               WHERE id=NEW.video_id AND project_id=NEW.project_id
+           )
+           BEGIN
+               SELECT RAISE(ABORT, 'matrix video must belong to its project');
+           END"""
+    )
+    connection.execute(
+        """CREATE TRIGGER IF NOT EXISTS tr_matrix_video_delete_clear_undo
+           AFTER DELETE ON videos
+           BEGIN
+               DELETE FROM matrix_undo_snapshots
+               WHERE matrix_id IN (
+                   SELECT matrix_id FROM matrices WHERE project_id=OLD.project_id
+               );
+           END"""
+    )
+    connection.execute(
+        """CREATE INDEX IF NOT EXISTS ix_matrix_entries_schedule
+           ON matrix_entries(matrix_id, scheduled_date, scheduled_time, page_id)"""
+    )
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS matrix_undo_snapshots (
+            matrix_id TEXT PRIMARY KEY,
+            snapshot_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(matrix_id) REFERENCES matrices(matrix_id) ON DELETE CASCADE
+        )"""
+    )
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("BEGIN IMMEDIATE")
@@ -122,6 +245,7 @@ def migrate(connection: sqlite3.Connection) -> None:
                 )
             connection.execute("DROP TABLE videos_legacy")
         _create_download_jobs_table(connection)
+        _create_matrices_tables(connection)
         connection.commit()
     except BaseException:
         connection.rollback()

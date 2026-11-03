@@ -24,7 +24,10 @@ class Database:
     def list_projects(self) -> list[sqlite3.Row]:
         return list(
             self.connection.execute(
-                "SELECT * FROM projects ORDER BY name COLLATE NOCASE"
+                """SELECT p.*,
+                          (SELECT COUNT(*) FROM matrices m
+                           WHERE m.project_id=p.uuid) AS matrix_count
+                   FROM projects p ORDER BY p.name COLLATE NOCASE"""
             )
         )
 

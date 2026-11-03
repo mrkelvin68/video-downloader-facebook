@@ -13,10 +13,12 @@
 - Xuất CSV từ dữ liệu SQLite của dự án đang mở.
 - Tải đơn lẻ từng video Facebook (Phase 3.1): tải video chất lượng cao nhất bằng yt-dlp, gom file MP4 và thumbnail vào thư mục riêng theo prefix, kiểm tra hợp lệ bằng FFprobe và cập nhật SQLite.
 - Hàng đợi tuần tự Phase 3.2 với **Chạy ngay**, **Thêm vào hàng đợi**, ưu tiên job, tạm dừng sau video hiện tại, tiếp tục và retry. Tiến độ/tốc độ lấy từ yt-dlp; job lưu trong SQLite và được phục hồi an toàn sau restart.
+- Ma trận lịch đăng local (Phase 4.1): tạo nhiều lịch cho từng dự án, cấu hình Page/khung giờ/ngày, phân bổ video theo quy tắc, sửa video/caption từng ô, đánh dấu trạng thái và xuất CSV UTF-8 BOM. Ma trận chỉ lưu trên máy; không kết nối API hoặc tự động đăng.
 
 ## Chức năng chưa triển khai
 
 - Tải song song (concurrency luôn bằng 1), scheduler hoặc Facebook Publisher.
+- Facebook API/Google Sheets API và tự động đăng video.
 - Dashboard, live logs và cài đặt.
 - Xóa dự án hoặc di chuyển dữ liệu của dự án.
 
@@ -98,6 +100,15 @@ stt,ten_video,url
 5. Queue chạy từng video một. **Tạm dừng sau video hiện tại** không ngắt file đang tải; **Tiếp tục** bắt đầu các job còn chờ.
 6. Job gián đoạn khi ứng dụng đóng bất thường được đánh dấu để người dùng chủ động Retry/tiếp tục. Ứng dụng không tự tải lại job đó. Retry thủ công tối đa 3 lần cho mỗi video; lỗi URL không hợp lệ/không hỗ trợ không được retry.
 7. Xóa job đang chờ chỉ bỏ job khỏi queue, không xóa file video. Job đang tải không thể bị xóa bằng thao tác này.
+
+## Ma trận lịch đăng
+
+1. Từ thẻ dự án, chọn **Ma trận**. Mỗi ma trận chỉ thuộc dự án đó và được lưu trong SQLite.
+2. Tạo ma trận hoặc mở **Cấu hình slot & page** để chỉnh tên, danh sách Page, khung giờ, ngày bắt đầu, số ngày và quy tắc phân bổ. Mặc định là 4 Page, 05:00/10:00/17:00/22:00 và 5 ngày.
+3. Lịch được sinh tuần tự theo ngày, khung giờ rồi Page. Chế độ không lặp dùng mỗi video tối đa một lần; chế độ lặp cho phép dùng video trên Page khác nhưng không lặp cùng Page trong cùng ngày. Video đã tải có MP4 tồn tại được ưu tiên.
+4. Nhấp đúp ô lịch hoặc dùng **Chọn video / sửa caption**. Menu chuột phải và **Copy caption** sao chép caption. Đánh dấu Đã đăng/Chưa đăng là thao tác quản lý thủ công; sinh lại không sửa ô Đã đăng.
+5. Sinh lại và lưu cấu hình yêu cầu xác nhận, có thể hoàn tác một lần. Chỉnh tay hoặc thay đổi trạng thái sẽ xóa lịch sử hoàn tác để tránh mất chỉnh sửa.
+6. **Xuất file CSV** ghi Ngày, Giờ, Page, video, đường dẫn MP4/thumbnail, caption và trạng thái. CSV chỉ là tệp xuất cục bộ; không đồng bộ Sheets hoặc đăng video.
 
 ## Cấu trúc source code
 

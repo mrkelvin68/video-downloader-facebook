@@ -13,12 +13,22 @@ class Project:
     notes: str
     created_at: str
     updated_at: str
+    matrix_count: int = 0
 
     @classmethod
     def from_row(
         cls, row: Mapping[str, object] | sqlite3.Row
     ) -> "Project":
-        return cls(**{key: str(row[key]) for key in cls.__dataclass_fields__})
+        values = {
+            key: str(row[key])
+            for key in cls.__dataclass_fields__
+            if key != "matrix_count"
+        }
+        try:
+            values["matrix_count"] = int(row["matrix_count"])
+        except (IndexError, KeyError):
+            values["matrix_count"] = 0
+        return cls(**values)
 
     @property
     def output_path(self) -> Path:
