@@ -68,7 +68,10 @@ class VideoTableModel(QAbstractTableModel):
                 "Chờ tải",
             ),
             (
-                f"{float(self._value(video, 'queue_progress', 0)):.0f}%"
+                "Đang tải…"
+                if self._value(video, "queue_status") == "downloading"
+                and self._value(video, "queue_total_bytes") is None
+                else f"{float(self._value(video, 'queue_progress', 0)):.0f}%"
                 if self._value(video, "queue_status") == "downloading"
                 else "100%"
                 if self._value(video, "download_status") == "completed"

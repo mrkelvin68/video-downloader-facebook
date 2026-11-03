@@ -1,8 +1,6 @@
 """Runs one persisted queue job on a thread-owned SQLite connection."""
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from PySide6.QtCore import QThread, Signal
 
 from app.database.connection import Database
@@ -44,6 +42,7 @@ class DownloadWorker(QThread):
                     downloaded_bytes=downloaded,
                     total_bytes=total,
                     speed=speed,
+                    eta_seconds=eta,
                 )
                 self.progress.emit(
                     self.job_id, percent, downloaded, total, speed, eta
@@ -63,19 +62,6 @@ class DownloadWorker(QThread):
                     DownloadQueueService(database).finish(
                         self.job_id, status="failed", error_message=error_message
                     )
-                    with database.connection:
-                        database.connection.execute(
-                            """UPDATE videos
-                               SET download_status='failed', updated_at=?
-                               WHERE id=(SELECT video_id FROM download_jobs WHERE job_id=?)
-                                 AND project_id=(SELECT project_id FROM download_jobs WHERE job_id=?)
-                                 AND download_status='downloading'""",
-                            (
-                                datetime.now(UTC).isoformat(timespec="seconds"),
-                                self.job_id,
-                                self.job_id,
-                            ),
-                        )
                 except Exception as status_error:
                     error_message += f"; không lưu được trạng thái lỗi: {status_error}"
             elif database is not None:

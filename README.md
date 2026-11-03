@@ -94,9 +94,9 @@ stt,ten_video,url
 1. Trong trang dự án, chọn một hoặc nhiều video bằng checkbox. Có thể dùng **Chọn tất cả** hoặc **Bỏ chọn tất cả**.
 2. **Chạy ngay** đưa video đã chọn lên đầu hàng đợi và bắt đầu queue. Video đang chạy không bị ngắt.
 3. **Thêm vào hàng đợi** chỉ lưu job, không tự bắt đầu tải.
-4. Mở **Hàng đợi tải video** ở sidebar hoặc **Xem hàng đợi** để theo dõi trạng thái, tiến độ thực, tốc độ, dung lượng, ETA ước tính và lỗi.
+4. Mở **Hàng đợi tải video** ở sidebar hoặc **Xem hàng đợi** để theo dõi trạng thái, progress bar, tốc độ, dung lượng, ETA từ yt-dlp (hoặc ước tính từ tốc độ) và lỗi. Khi yt-dlp chưa cung cấp tổng dung lượng, tiến độ hiển thị không xác định thay vì 0%.
 5. Queue chạy từng video một. **Tạm dừng sau video hiện tại** không ngắt file đang tải; **Tiếp tục** bắt đầu các job còn chờ.
-6. Job gián đoạn khi ứng dụng đóng bất thường được đánh dấu để người dùng chủ động Retry/tiếp tục. Ứng dụng không tự tải lại job đó.
+6. Job gián đoạn khi ứng dụng đóng bất thường được đánh dấu để người dùng chủ động Retry/tiếp tục. Ứng dụng không tự tải lại job đó. Retry thủ công tối đa 3 lần cho mỗi video; lỗi URL không hợp lệ/không hỗ trợ không được retry.
 7. Xóa job đang chờ chỉ bỏ job khỏi queue, không xóa file video. Job đang tải không thể bị xóa bằng thao tác này.
 
 ## Cấu trúc source code

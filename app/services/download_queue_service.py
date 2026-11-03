@@ -8,6 +8,13 @@ from app.database.connection import Database
 
 
 ACTIVE_STATUSES = ("queued", "downloading")
+MAX_RETRIES = 3
+PERMANENT_ERROR_MARKERS = (
+    "invalid url",
+    "unsupported url",
+    "not a valid url",
+    "no suitable extractor",
+)
 
 
 def _now() -> str:
@@ -215,13 +222,22 @@ class DownloadQueueService:
         downloaded_bytes: int,
         total_bytes: int | None,
         speed: float | None,
+        eta_seconds: int | None = None,
     ) -> None:
         with self.database.connection:
             self.database.connection.execute(
                 """UPDATE download_jobs
-                   SET progress=?, downloaded_bytes=?, total_bytes=?, speed=?
+                   SET progress=?, downloaded_bytes=?, total_bytes=?, speed=?,
+                       eta_seconds=?
                    WHERE job_id=? AND status='downloading'""",
-                (progress, downloaded_bytes, total_bytes, speed, job_id),
+                (
+                    progress,
+                    downloaded_bytes,
+                    total_bytes,
+                    speed,
+                    eta_seconds,
+                    job_id,
+                ),
             )
 
     def finish(
@@ -234,22 +250,50 @@ class DownloadQueueService:
         if status not in ("completed", "failed", "interrupted"):
             raise ValueError(f"Trạng thái kết thúc không hợp lệ: {status}")
         now = _now()
-        with self.database.connection:
+        connection = self.database.connection
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = connection.execute(
+                """SELECT project_id, video_id FROM download_jobs
+                   WHERE job_id=? AND status='downloading'""",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return
             if status == "completed":
-                self.database.connection.execute(
+                cursor = connection.execute(
                     """UPDATE download_jobs
                        SET status='completed', progress=100, speed=NULL,
+                           eta_seconds=NULL,
                            error_message=NULL, finished_at=?
                        WHERE job_id=? AND status='downloading'""",
                     (now, job_id),
                 )
             else:
-                self.database.connection.execute(
+                cursor = connection.execute(
                     """UPDATE download_jobs
-                       SET status=?, speed=NULL, error_message=?, finished_at=?
+                       SET status=?, speed=NULL, eta_seconds=NULL,
+                           error_message=?, finished_at=?
                        WHERE job_id=? AND status='downloading'""",
                     (status, error_message, now, job_id),
                 )
+            if cursor.rowcount == 1:
+                video_status = "completed" if status == "completed" else "failed"
+                connection.execute(
+                    """UPDATE videos SET download_status=?, updated_at=?
+                       WHERE id=? AND project_id=?""",
+                    (
+                        video_status,
+                        now,
+                        row["video_id"],
+                        row["project_id"],
+                    ),
+                )
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
 
     def fail_unclaimed(self, job_id: str, message: str) -> bool:
         connection = self.database.connection
@@ -364,13 +408,29 @@ class DownloadQueueService:
         try:
             failed = list(
                 connection.execute(
-                    f"""SELECT project_id, video_id FROM download_jobs
-                        WHERE status IN ('failed', 'interrupted')
-                          AND job_id IN ({placeholders})
-                        ORDER BY queue_order""",
+                    f"""SELECT j.project_id, j.video_id,
+                               (SELECT MAX(history.retry_count)
+                                FROM download_jobs AS history
+                                WHERE history.video_id=j.video_id) AS retry_count,
+                               j.error_message
+                        FROM download_jobs AS j
+                        WHERE j.status IN ('failed', 'interrupted')
+                          AND j.job_id IN ({placeholders})
+                        ORDER BY j.queue_order""",
                     tuple(job_ids),
                 )
             )
+            failed = [
+                row
+                for row in failed
+                if row["retry_count"] < MAX_RETRIES
+                and not self._is_permanent_error(row["error_message"])
+                and connection.execute(
+                    "SELECT download_status FROM videos WHERE id=? AND project_id=?",
+                    (row["video_id"], row["project_id"]),
+                ).fetchone()["download_status"]
+                != "completed"
+            ]
             bounds = connection.execute(
                 """SELECT COALESCE(MAX(queue_order), 0) AS max_order
                    FROM download_jobs WHERE status IN ('queued', 'downloading')"""
@@ -389,13 +449,15 @@ class DownloadQueueService:
                 job_id = str(uuid.uuid4())
                 connection.execute(
                     """INSERT INTO download_jobs
-                       (job_id, project_id, video_id, status, queue_order, created_at)
-                       VALUES (?, ?, ?, 'queued', ?, ?)""",
+                       (job_id, project_id, video_id, status, queue_order,
+                        retry_count, created_at)
+                       VALUES (?, ?, ?, 'queued', ?, ?, ?)""",
                     (
                         job_id,
                         row["project_id"],
                         row["video_id"],
                         bounds["max_order"] + index + 1,
+                        row["retry_count"] + 1,
                         now,
                     ),
                 )
@@ -410,6 +472,11 @@ class DownloadQueueService:
         except BaseException:
             connection.rollback()
             raise
+
+    @staticmethod
+    def _is_permanent_error(message: str | None) -> bool:
+        normalized = (message or "").casefold()
+        return any(marker in normalized for marker in PERMANENT_ERROR_MARKERS)
 
     def recover_interrupted(self) -> int:
         connection = self.database.connection

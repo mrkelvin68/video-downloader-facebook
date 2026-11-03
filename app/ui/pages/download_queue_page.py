@@ -6,15 +6,18 @@ from PySide6.QtCore import (
     QAbstractTableModel,
     QItemSelectionModel,
     QModelIndex,
+    QRect,
     Qt,
     Signal,
 )
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QPushButton,
+    QStyledItemDelegate,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -73,17 +76,55 @@ class DownloadQueueTableModel(QAbstractTableModel):
             return None
         job = self._jobs[index.row()]
         status = str(job["status"])
-        if role == Qt.ItemDataRole.ToolTipRole and index.column() == 8:
-            return job["error_message"] or ""
+        if role == Qt.ItemDataRole.UserRole and index.column() == 4:
+            if status == "downloading" and job["total_bytes"] is None:
+                return {"indeterminate": True, "value": 0, "text": "Đang tải…"}
+            if status == "queued":
+                return {"indeterminate": False, "value": 0, "text": "Đang chờ"}
+            if status in ("failed", "interrupted", "cancelled"):
+                return {
+                    "indeterminate": False,
+                    "value": int(job["progress"] or 0),
+                    "text": "—" if job["total_bytes"] is None else f"{job['progress']:.0f}%",
+                }
+            return {
+                "indeterminate": False,
+                "value": int(job["progress"] or 0),
+                "text": f"{job['progress']:.0f}%",
+            }
+        if role == Qt.ItemDataRole.ToolTipRole:
+            tooltips = (
+                job["project_name"],
+                job["video_code"],
+                job["title"],
+                status,
+                None,
+                None,
+                None,
+                None,
+                job["error_message"] or "",
+            )
+            return tooltips[index.column()]
         if role != Qt.ItemDataRole.DisplayRole:
             return None
         speed = job["speed"]
         total_bytes = job["total_bytes"]
         downloaded = int(job["downloaded_bytes"] or 0)
         eta = "—"
-        if speed and total_bytes and speed > 0:
+        if job["eta_seconds"] is not None:
+            seconds = int(job["eta_seconds"])
+            eta = f"{seconds // 60:02d}:{seconds % 60:02d}"
+        elif speed and total_bytes and speed > 0:
             remaining = max(0, total_bytes - downloaded) / speed
             eta = f"{int(remaining // 60):02d}:{int(remaining % 60):02d}"
+        if status == "downloading" and total_bytes is None:
+            progress_text = "Đang tải…"
+        elif status == "queued":
+            progress_text = "Đang chờ"
+        elif status in ("failed", "interrupted", "cancelled") and total_bytes is None:
+            progress_text = "—"
+        else:
+            progress_text = f"{float(job['progress'] or 0):.0f}%"
         values = (
             job["project_name"],
             job["video_code"],
@@ -96,7 +137,7 @@ class DownloadQueueTableModel(QAbstractTableModel):
                 "interrupted": "Bị gián đoạn",
                 "cancelled": "Đã hủy",
             }.get(status, status),
-            f"{float(job['progress'] or 0):.0f}%",
+            progress_text,
             f"{_format_bytes(int(speed))}/s" if speed else "—",
             (
                 f"{_format_bytes(downloaded)} / {_format_bytes(total_bytes)}"
@@ -135,20 +176,21 @@ class DownloadQueueTable(QTableView):
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.setWordWrap(False)
         self.verticalHeader().hide()
-        self.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.ResizeToContents
-        )
-        self.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.ResizeToContents
-        )
-        for column in (2, 8):
-            self.horizontalHeader().setSectionResizeMode(
-                column, QHeaderView.ResizeMode.Stretch
-            )
-        for column in range(3, 8):
-            self.horizontalHeader().setSectionResizeMode(
-                column, QHeaderView.ResizeMode.ResizeToContents
-            )
+        header = self.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        for column, width in {
+            0: 155,
+            1: 80,
+            3: 85,
+            4: 105,
+            5: 75,
+            6: 155,
+            7: 55,
+            8: 145,
+        }.items():
+            self.setColumnWidth(column, width)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.setItemDelegateForColumn(4, _ProgressBarDelegate(self))
 
     def selected_job_ids(self) -> list[str]:
         rows = sorted({index.row() for index in self.selectionModel().selectedRows()})
@@ -229,6 +271,42 @@ class DownloadQueuePage(QWidget):
 
     def set_jobs(self, jobs: list[Mapping]) -> None:
         self.table.set_jobs(jobs)
+        completed = sum(job["status"] == "completed" for job in jobs)
+        failed = sum(job["status"] in ("failed", "interrupted") for job in jobs)
+        waiting = sum(job["status"] == "queued" for job in jobs)
+        active = sum(job["status"] == "downloading" for job in jobs)
         self.summary.setText(
-            f"{len(jobs)} job · {sum(job['status'] == 'queued' for job in jobs)} đang chờ"
+            f"{len(jobs)} job · Hoàn tất {completed} · Lỗi {failed} · "
+            f"Đang tải {active} · Đang chờ {waiting}"
         )
+
+
+class _ProgressBarDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index) -> None:
+        progress = index.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(progress, dict):
+            super().paint(painter, option, index)
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = option.rect.adjusted(6, 6, -6, -6)
+        painter.setPen(QColor("#304766"))
+        painter.setBrush(QColor("#0c1729"))
+        painter.drawRoundedRect(rect, 4, 4)
+
+        inner = rect.adjusted(1, 1, -1, -1)
+        if progress["indeterminate"]:
+            width = max(18, int(inner.width() * 0.28))
+            left = inner.left() + (inner.width() - width) // 2
+        else:
+            width = int(inner.width() * max(0, min(progress["value"], 100)) / 100)
+            left = inner.left()
+        if width:
+            chunk = QRect(left, inner.top(), width, inner.height())
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#2563eb"))
+            painter.drawRoundedRect(chunk, 3, 3)
+
+        painter.setPen(QColor("#e2e8f0"))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, progress["text"])
+        painter.restore()

@@ -30,6 +30,8 @@ def _create_download_jobs_table(connection: sqlite3.Connection) -> None:
             downloaded_bytes INTEGER NOT NULL DEFAULT 0 CHECK (downloaded_bytes >= 0),
             total_bytes INTEGER,
             speed REAL,
+            eta_seconds INTEGER,
+            retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
             error_message TEXT,
             created_at TEXT NOT NULL,
             started_at TEXT,
@@ -38,6 +40,16 @@ def _create_download_jobs_table(connection: sqlite3.Connection) -> None:
             FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE CASCADE
         )"""
     )
+    columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(download_jobs)")
+    }
+    if "eta_seconds" not in columns:
+        connection.execute("ALTER TABLE download_jobs ADD COLUMN eta_seconds INTEGER")
+    if "retry_count" not in columns:
+        connection.execute(
+            """ALTER TABLE download_jobs
+               ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0)"""
+        )
     connection.execute(
         """CREATE UNIQUE INDEX IF NOT EXISTS uq_download_jobs_active_video
            ON download_jobs(video_id)

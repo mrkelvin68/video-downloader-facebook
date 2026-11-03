@@ -10,6 +10,7 @@ from app.services.download_queue_service import DownloadQueueService
 from app.services.video_service import VideoService
 from app.ui.dialogs.csv_preview_dialog import CsvPreviewDialog, CsvPreviewModel
 from app.ui.main_window import MainWindow
+from app.ui.pages.download_queue_page import DownloadQueuePage
 
 
 class ProjectCsvUiTests(unittest.TestCase):
@@ -286,6 +287,7 @@ class ProjectCsvUiTests(unittest.TestCase):
             model.index(4, 0), Qt.CheckState.Checked, Qt.ItemDataRole.CheckStateRole
         )
         window.detail_page.enqueue_button.click()
+        self.assertFalse(window.queue_running)
         queue = DownloadQueueService(self.database)
         self.assertEqual(
             [row["video_code"] for row in queue.list_jobs(include_finished=False)],
@@ -324,12 +326,45 @@ class ProjectCsvUiTests(unittest.TestCase):
             self.application.processEvents()
             self.assertEqual((window.width(), window.height()), (width, height))
             self.assertTrue(window.queue_page.table.isVisible())
+            self.assertEqual(
+                window.queue_page.table.horizontalScrollBar().maximum(), 0
+            )
             self.assertLess(
                 window.queue_page.table.geometry().top(),
                 window.queue_page.table.geometry().bottom(),
             )
         self.assertTrue(window.grab().save(str(self.root / "queue-manager.png")))
         window.close()
+
+    def test_unknown_download_size_uses_indeterminate_progress(self):
+        from PySide6.QtCore import Qt
+
+        VideoService(self.database).import_csv(
+            self.project_id,
+            "stt,ten_video,url\n1,Video,https://www.facebook.com/reel/1\n",
+        )
+        video = self.database.list_videos(self.project_id)[0]
+        queue = DownloadQueueService(self.database)
+        job_id = queue.enqueue(self.project_id, [video["id"]])[0]
+        queue.claim(job_id)
+        with self.database.connection:
+            self.database.connection.execute(
+                """UPDATE download_jobs SET progress=0, total_bytes=NULL
+                   WHERE job_id=?""",
+                (job_id,),
+            )
+        page = DownloadQueuePage()
+        page.set_jobs(queue.list_jobs())
+        model = page.table.queue_model
+        index = model.index(0, 4)
+        self.assertEqual(model.data(index), "Đang tải…")
+        self.assertEqual(
+            model.data(index, Qt.ItemDataRole.UserRole),
+            {"indeterminate": True, "value": 0, "text": "Đang tải…"},
+        )
+        self.assertIn("Hoàn tất 0", page.summary.text())
+        self.assertIn("Lỗi 0", page.summary.text())
+        page.close()
 
     def test_pause_after_current_then_resume_starts_next_job(self):
         class FakeSignal:

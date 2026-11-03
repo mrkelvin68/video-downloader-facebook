@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from app.core.exceptions import ImportBlockedError
 from app.database.connection import Database
-from app.services.download_queue_service import DownloadQueueService
+from app.services.download_queue_service import MAX_RETRIES, DownloadQueueService
 from app.services.download_service import DownloadError, DownloadService
 from app.services.project_service import ProjectService
 from app.services.video_service import VideoService
@@ -91,6 +91,22 @@ class DownloadQueueServiceTests(unittest.TestCase):
             ["queue-1", "queue-3", "queue-5"],
         )
         reopened.close()
+
+    def test_queue_twenty_videos_preserves_order_and_project_isolation(self):
+        created = self.queue.enqueue(self.project_id, self.video_ids)
+        self.assertEqual(len(created), 20)
+        rows = self.queue.list_jobs(include_finished=False)
+        self.assertEqual(
+            [row["video_code"] for row in rows],
+            [f"queue-{number}" for number in range(1, 21)],
+        )
+        self.assertTrue(all(row["project_id"] == self.project_id for row in rows))
+        self.assertEqual(
+            len(self.queue.list_jobs(include_finished=False)), 20
+        )
+        self.assertEqual(
+            DownloadQueueService(self.db).video_job_info(self.other_project_id), {}
+        )
 
     def test_run_now_when_queue_idle_prioritizes_selected_in_sequence_order(self):
         created = self.queue.enqueue(
@@ -189,6 +205,35 @@ class DownloadQueueServiceTests(unittest.TestCase):
         self.assertEqual(self.queue.next_queued_job()["job_id"], first)
         self.assertEqual(self.queue.get_job(first)["status"], "queued")
         self.assertEqual(self.queue.get_job(second)["status"], "queued")
+
+    def test_retry_rejects_permanent_errors_and_stops_at_limit(self):
+        permanent = self.queue.enqueue(self.project_id, [self.video_ids[0]])[0]
+        self.queue.claim(permanent)
+        self.queue.finish(
+            permanent, status="failed", error_message="yt-dlp: Invalid URL"
+        )
+        self.assertEqual(self.queue.retry([permanent]), [])
+        self.assertEqual(self.queue.get_job(permanent)["retry_count"], 0)
+
+        current_job = self.queue.enqueue(self.project_id, [self.video_ids[1]])[0]
+        original_job = current_job
+        for retry_number in range(MAX_RETRIES + 1):
+            self.queue.claim(current_job)
+            self.queue.finish(
+                current_job,
+                status="failed",
+                error_message="Network connection reset",
+            )
+            retry_jobs = self.queue.retry([current_job])
+            if retry_number < MAX_RETRIES:
+                self.assertEqual(len(retry_jobs), 1)
+                current_job = retry_jobs[0]
+                self.assertEqual(
+                    self.queue.get_job(current_job)["retry_count"], retry_number + 1
+                )
+            else:
+                self.assertEqual(retry_jobs, [])
+                self.assertEqual(self.queue.retry([original_job]), [])
 
     def test_recovery_marks_worker_crash_interrupted_without_auto_retry(self):
         job_id = self.queue.enqueue(self.project_id, [self.video_ids[0]])[0]
