@@ -105,7 +105,7 @@ class ProjectDetailPage(QWidget):
         self.video_table = VideoTable(self)
         import_layout.addWidget(self.video_table, 1)
         download_actions = QHBoxLayout()
-        self.download_button = QPushButton("Tải video chờ")
+        self.download_button = QPushButton("Tải video đã chọn")
         self.download_button.setObjectName("primary")
         self.download_button.clicked.connect(self.downloadRequested.emit)
         self.download_status = QLabel("Chưa tải")

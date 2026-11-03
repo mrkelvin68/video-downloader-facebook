@@ -269,8 +269,12 @@ class MainWindow(QMainWindow):
     def start_downloads(self) -> None:
         if self.current_project is None or self.download_worker is not None:
             return
+        selected = self.detail_page.video_table.selected_video_ids()
+        if len(selected) != 1:
+            QMessageBox.warning(self, "Chọn video", "Hãy chọn đúng một video để tải.")
+            return
         self.download_errors = []
-        worker = DownloadWorker(self.database.path, self.current_project.uuid, self)
+        worker = DownloadWorker(self.database.path, self.current_project.uuid, selected[0], self)
         self.download_worker = worker
         self.detail_page.download_button.setEnabled(False)
         self.detail_page.download_status.setText("Đang bắt đầu tải...")
@@ -279,8 +283,8 @@ class MainWindow(QMainWindow):
         worker.finished_batch.connect(self._downloads_finished)
         worker.start()
 
-    def _download_progress(self, current: int, total: int, code: str) -> None:
-        self.detail_page.download_status.setText(f"Đang tải {current}/{total}: {code}")
+    def _download_progress(self, code: str) -> None:
+        self.detail_page.download_status.setText(f"Đang tải: {code}")
 
     def _download_error(self, message: str) -> None:
         self.download_errors.append(message)
@@ -294,11 +298,9 @@ class MainWindow(QMainWindow):
         self.detail_page.download_button.setEnabled(True)
         self._refresh_project_videos()
         if self.download_errors:
-            self.detail_page.download_status.setText(
-                f"Đã kết thúc, {len(self.download_errors)} lỗi. " + self.download_errors[0][:160]
-            )
+            self.detail_page.download_status.setText("Thất bại: " + self.download_errors[0][:180])
         else:
-            self.detail_page.download_status.setText("Đã kết thúc hàng đợi tải")
+            self.detail_page.download_status.setText("Tải thành công")
 
     def closeEvent(self, event) -> None:
         if self.download_worker is not None:

@@ -1,6 +1,6 @@
 # Video Downloader Facebook
 
-Ứng dụng desktop Windows viết bằng Python và PySide6 để quản lý dự án video, kiểm tra danh sách Facebook từ CSV và lưu danh sách video theo từng dự án trong SQLite. Phiên bản hiện tại dừng ở Phase 2; ứng dụng chưa tải video.
+Ứng dụng desktop Windows viết bằng Python và PySide6 để quản lý dự án video, kiểm tra danh sách Facebook từ CSV, tải từng video Facebook và lưu trạng thái trong SQLite.
 
 ## Chức năng hiện có
 
@@ -11,20 +11,19 @@
 - Hỗ trợ dấu phẩy hoặc chấm phẩy, UTF-8/UTF-8 BOM, CSV Excel và trường có dấu ngoặc kép.
 - Hiển thị video trong `QTableView`; dữ liệu nhiều dòng không tạo widget riêng cho từng video.
 - Xuất CSV từ dữ liệu SQLite của dự án đang mở.
+- Tải đơn lẻ từng video Facebook (Phase 3.1): tải video chất lượng cao nhất bằng yt-dlp, gom file MP4 và thumbnail vào thư mục riêng theo prefix, kiểm tra hợp lệ bằng FFprobe và cập nhật SQLite.
 
 ## Chức năng chưa triển khai
 
-- Tải video Facebook, hàng đợi tải, tiến độ thực tế, retry và quản lý file video.
+- Hàng đợi tải song song, tự động tải hàng loạt, scheduler hoặc Facebook Publisher.
 - Dashboard, live logs và cài đặt.
 - Xóa dự án hoặc di chuyển dữ liệu của dự án.
-
-Không có Download Engine trong phiên bản này.
 
 ## Yêu cầu
 
 - Windows 10/11.
 - Python 3.11 trở lên.
-- PySide6 (cài tự động từ `requirements.txt`).
+- PySide6, yt-dlp, static-ffmpeg (cài tự động từ `requirements.txt`).
 
 ## Cài đặt và khởi chạy nhanh
 

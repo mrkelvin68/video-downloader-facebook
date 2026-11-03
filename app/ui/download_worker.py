@@ -1,4 +1,4 @@
-"""Qt worker: mỗi luồng tự mở SQLite connection, không chia sẻ UI connection."""
+"""Qt worker: tải duy nhất một video được chọn, mỗi luồng tự mở Database riêng."""
 from __future__ import annotations
 
 from PySide6.QtCore import QThread, Signal
@@ -8,14 +8,15 @@ from app.services.download_service import DownloadService
 
 
 class DownloadWorker(QThread):
-    progress = Signal(int, int, str)
+    progress = Signal(str)
     finished_batch = Signal()
     failed = Signal(str)
 
-    def __init__(self, database_path: str, project_id: str, parent=None) -> None:
+    def __init__(self, database_path: str, project_id: str, video_id: str, parent=None) -> None:
         super().__init__(parent)
         self.database_path = database_path
         self.project_id = project_id
+        self.video_id = video_id
 
     def run(self) -> None:
         db = None
@@ -23,20 +24,15 @@ class DownloadWorker(QThread):
             db = Database(self.database_path)
             service = DownloadService(db)
             service.recover_interrupted(self.project_id)
-            videos = [
-                row for row in db.list_videos(self.project_id)
-                if row["download_status"] in ("pending", "waiting", "failed")
-            ]
-            for index, video in enumerate(videos, 1):
-                if self.isInterruptionRequested():
-                    break
-                self.progress.emit(index, len(videos), video["video_code"])
-                try:
-                    service.download(self.project_id, video["id"])
-                except Exception as exc:
-                    self.failed.emit(f"{video['video_code']}: {exc}")
+            video = db.connection.execute(
+                "SELECT video_code FROM videos WHERE id=? AND project_id=?",
+                (self.video_id, self.project_id),
+            ).fetchone()
+            code = video["video_code"] if video else self.video_id
+            self.progress.emit(code)
+            service.download(self.project_id, self.video_id)
         except Exception as exc:
-            self.failed.emit(f"Không thể chạy hàng đợi: {exc}")
+            self.failed.emit(str(exc))
         finally:
             if db is not None:
                 db.close()

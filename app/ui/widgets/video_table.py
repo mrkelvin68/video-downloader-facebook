@@ -82,12 +82,18 @@ class VideoTableModel(QAbstractTableModel):
         self.dataChanged.emit(index, index, [Qt.ItemDataRole.CheckStateRole])
         return True
 
+    def selected_video_ids(self) -> list[str]:
+        return [
+            self._video_key(video, row)
+            for row, video in enumerate(self._videos)
+            if self._video_key(video, row) in self._checked
+        ]
+
     def set_videos(self, videos: list[object]) -> None:
         self.beginResetModel()
         self._videos = list(videos)
         self._checked.clear()
         self.endResetModel()
-
 
 class VideoTable(QTableView):
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -109,6 +115,9 @@ class VideoTable(QTableView):
         self.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
         self.setMinimumHeight(190)
+
+    def selected_video_ids(self) -> list[str]:
+        return self.video_model.selected_video_ids()
 
     def set_videos(self, videos: list[object]) -> None:
         self.video_model.set_videos(videos)
