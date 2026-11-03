@@ -15,6 +15,8 @@ if ffmpeg_dir.is_dir():
 
 app_datas.append((str(ROOT / "app" / "ui" / "styles.qss"), "app/ui"))
 
+onefile = __import__("os").environ.get("VIDEO_DOWNLOADER_ONEFILE") == "1"
+
 analysis = Analysis(
     [str(ROOT / "main.py")],
     pathex=[str(ROOT)],
@@ -31,8 +33,8 @@ pyz = PYZ(analysis.pure)
 exe = EXE(
     pyz,
     analysis.scripts,
-    analysis.binaries,
-    analysis.datas,
+    analysis.binaries if onefile else [],
+    analysis.datas if onefile else [],
     [],
     name="VideoDownloader",
     debug=False,
@@ -40,6 +42,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+    exclude_binaries=not onefile,
 )
-if __import__("os").environ.get("VIDEO_DOWNLOADER_ONEFILE") != "1":
+if not onefile:
     coll = COLLECT(exe, analysis.binaries, analysis.datas, name="VideoDownloader")
