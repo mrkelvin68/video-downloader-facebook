@@ -322,8 +322,8 @@ class MatrixService:
     def list_project_videos(self, project_id: str) -> list[dict]:
         self.database.get_project(project_id)
         rows = self.connection.execute(
-            """SELECT id, video_code, title, download_status, local_video_path,
-                      thumbnail_path, sequence_number
+            """SELECT id, video_code, title, source_url, download_status,
+                      local_video_path, thumbnail_path, sequence_number
                FROM videos WHERE project_id=? ORDER BY sequence_number""",
             (project_id,),
         )

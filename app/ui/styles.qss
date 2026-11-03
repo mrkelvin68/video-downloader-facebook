@@ -57,6 +57,10 @@ QTableView#videoTable { background:#0c1729; alternate-background-color:#101c30; 
 QTableView#csvPreviewTable { background:#0c1729; alternate-background-color:#101c30; border:1px solid #284365; color:#d7e0ef; gridline-color:#1c2d46; selection-background-color:#1d3c66; }
 QTableView#downloadQueueTable { background:#0c1729; alternate-background-color:#101c30; border:1px solid #284365; color:#d7e0ef; gridline-color:#1c2d46; selection-background-color:#1d3c66; }
 QTableView#matrixTable { background:#0c1729; border:1px solid #284365; color:#d7e0ef; gridline-color:#1c2d46; selection-background-color:#1d3c66; }
+QTableView#projectVideoListTable { background:#0c1729; alternate-background-color:#101c30; border:1px solid #284365; color:#d7e0ef; gridline-color:#1c2d46; selection-background-color:#1d3c66; }
+QTabWidget#matrixContentTabs::pane { border:1px solid #243955; border-radius:7px; top:-1px; }
+QTabWidget#matrixContentTabs QTabBar::tab { background:#101c30; color:#9fb0c7; border:1px solid #263a58; border-bottom:0; border-top-left-radius:7px; border-top-right-radius:7px; margin-right:5px; padding:8px 14px; }
+QTabWidget#matrixContentTabs QTabBar::tab:selected { background:#17345b; color:#f8fafc; border-color:#3b82f6; }
 #matrixHeader { background:transparent; border-bottom:1px solid #1d2b43; }
 #matrixTabs::tab { background:#101c30; color:#9fb0c7; border:1px solid #263a58; border-radius:7px; margin-right:6px; padding:9px 14px; }
 #matrixTabs::tab:selected { background:#17345b; color:#f8fafc; border-color:#3b82f6; }

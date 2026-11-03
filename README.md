@@ -13,7 +13,7 @@
 - Xuất CSV từ dữ liệu SQLite của dự án đang mở.
 - Tải đơn lẻ từng video Facebook (Phase 3.1): tải video chất lượng cao nhất bằng yt-dlp, gom file MP4 và thumbnail vào thư mục riêng theo prefix, kiểm tra hợp lệ bằng FFprobe và cập nhật SQLite.
 - Hàng đợi tuần tự Phase 3.2 với **Chạy ngay**, **Thêm vào hàng đợi**, ưu tiên job, tạm dừng sau video hiện tại, tiếp tục và retry. Tiến độ/tốc độ lấy từ yt-dlp; job lưu trong SQLite và được phục hồi an toàn sau restart.
-- Ma trận lịch đăng local (Phase 4.1): tạo nhiều lịch cho từng dự án, cấu hình Page/khung giờ/ngày, phân bổ video theo quy tắc, sửa video/caption từng ô, đánh dấu trạng thái và xuất CSV UTF-8 BOM. Ma trận chỉ lưu trên máy; không kết nối API hoặc tự động đăng.
+- Ma trận lịch đăng local (Phase 4.1): tạo nhiều lịch cho từng dự án, cấu hình Page/khung giờ/ngày, phân bổ video theo quy tắc, sửa video/caption từng ô, đánh dấu trạng thái và xuất CSV UTF-8 BOM. Màn hình có tab lịch đăng và danh sách video riêng của dự án đang mở; bảng lịch nhóm theo ngày/Page và hiển thị tên video, thumbnail, caption, trạng thái. Ma trận chỉ lưu trên máy; không kết nối API hoặc tự động đăng.
 
 ## Chức năng chưa triển khai
 

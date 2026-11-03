@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyledItemDelegate,
     QTabBar,
+    QTabWidget,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -33,7 +34,7 @@ class MatrixScheduleModel(QAbstractTableModel):
         return 0 if parent.isValid() else len(self.rows)
 
     def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
-        return 0 if parent.isValid() else len(self.pages) + 1
+        return 0 if parent.isValid() else len(self.pages) * 3 + 1
 
     def headerData(
         self,
@@ -42,13 +43,40 @@ class MatrixScheduleModel(QAbstractTableModel):
         role: int = Qt.ItemDataRole.DisplayRole,
     ):
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
-            return "Khung giờ" if section == 0 else self.pages[section - 1]["name"]
+            if section == 0:
+                return "Khung giờ"
+            return ("Tên file", "Ảnh", "Caption & TT")[
+                (section - 1) % 3
+            ]
         return None
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None
         row_type, scheduled_date, scheduled_time = self.rows[index.row()]
+        if row_type == "pages":
+            if role == Qt.ItemDataRole.DisplayRole:
+                if index.column() == 0:
+                    return "Khung giờ"
+                if (index.column() - 1) % 3 == 0:
+                    return self.pages[(index.column() - 1) // 3]["name"]
+            if role == Qt.ItemDataRole.BackgroundRole:
+                return QColor("#14233b")
+            if role == Qt.ItemDataRole.ForegroundRole:
+                return QColor("#93c5fd")
+            return None
+        if row_type == "fields":
+            if role == Qt.ItemDataRole.DisplayRole:
+                if index.column() == 0:
+                    return "Khung giờ"
+                return ("Tên file", "Ảnh", "Caption & TT")[
+                    (index.column() - 1) % 3
+                ]
+            if role == Qt.ItemDataRole.BackgroundRole:
+                return QColor("#101c30")
+            if role == Qt.ItemDataRole.ForegroundRole:
+                return QColor("#8ea1bb")
+            return None
         if row_type == "day":
             if role == Qt.ItemDataRole.DisplayRole and index.column() == 0:
                 day_number = (
@@ -69,7 +97,8 @@ class MatrixScheduleModel(QAbstractTableModel):
             if role == Qt.ItemDataRole.ForegroundRole:
                 return QColor("#fbbf24")
             return None
-        page = self.pages[index.column() - 1]
+        page_index = (index.column() - 1) // 3
+        page = self.pages[page_index]
         entry = self.entries.get((page["page_id"], scheduled_date, scheduled_time))
         if role == Qt.ItemDataRole.UserRole:
             return entry
@@ -96,6 +125,8 @@ class MatrixScheduleModel(QAbstractTableModel):
         for day_offset in range(configuration["day_count"]):
             scheduled_date = (first_date + timedelta(days=day_offset)).isoformat()
             self.rows.append(("day", scheduled_date, ""))
+            self.rows.append(("pages", scheduled_date, ""))
+            self.rows.append(("fields", scheduled_date, ""))
             self.rows.extend(
                 ("slot", scheduled_date, slot) for slot in slots
             )
@@ -109,7 +140,7 @@ class MatrixScheduleModel(QAbstractTableModel):
         ):
             return None
         row_type, scheduled_date, scheduled_time = self.rows[index.row()]
-        page = self.pages[index.column() - 1]
+        page = self.pages[(index.column() - 1) // 3]
         return self.entries.get((page["page_id"], scheduled_date, scheduled_time))
 
     def row_is_day_header(self, row: int) -> bool:
@@ -122,10 +153,14 @@ class MatrixCellDelegate(QStyledItemDelegate):
         self._thumbnails: dict[str, QPixmap] = {}
 
     def paint(self, painter: QPainter, option, index: QModelIndex) -> None:
-        if index.column() == 0:
+        if (
+            index.column() == 0
+            or index.model().rows[index.row()][0] != "slot"
+        ):
             super().paint(painter, option, index)
             return
         entry = index.data(Qt.ItemDataRole.UserRole)
+        column_type = (index.column() - 1) % 3
         rect = option.rect.adjusted(1, 1, -1, -1)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         background = QColor("#163158") if selected else QColor("#0f2034")
@@ -138,71 +173,92 @@ class MatrixCellDelegate(QStyledItemDelegate):
         painter.drawRect(rect)
 
         if entry is None or not entry.get("video_id"):
-            painter.setPen(QColor("#71829d"))
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Chưa phân bổ video")
+            if column_type == 0:
+                painter.setPen(QColor("#71829d"))
+                painter.drawText(
+                    rect.adjusted(6, 6, -6, -6),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                    "Chưa chọn video",
+                )
+            elif column_type == 2:
+                painter.setPen(QColor("#71829d"))
+                painter.drawText(
+                    rect.adjusted(6, 6, -6, -6),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                    "Chưa có caption",
+                )
+            elif entry is None:
+                painter.fillRect(rect.adjusted(4, 4, -4, -4), QColor("#17263d"))
             painter.restore()
             return
 
-        image_rect = rect.adjusted(7, 7, -rect.width() + 57, -7)
-        pixmap = self._thumbnail(entry.get("thumbnail_path"))
-        if not pixmap.isNull():
-            painter.drawPixmap(
-                image_rect,
-                pixmap,
-                pixmap.rect(),
+        if column_type == 0:
+            painter.setPen(QColor("#7dd3fc"))
+            painter.drawText(
+                rect.adjusted(7, 7, -7, -7),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                self._elide(
+                    painter,
+                    entry.get("video_code") or "Video",
+                    rect.width() - 14,
+                ),
             )
+            title_rect = rect.adjusted(7, 27, -7, -7)
+            painter.setPen(QColor("#dbe7f7"))
+            painter.drawText(
+                title_rect,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                self._elide(
+                    painter,
+                    entry.get("video_title") or "",
+                    title_rect.width(),
+                ),
+            )
+        elif column_type == 1:
+            image_rect = rect.adjusted(4, 4, -4, -4)
+            pixmap = self._thumbnail(entry.get("thumbnail_path"))
+            if not pixmap.isNull():
+                scaled = pixmap.scaled(
+                    image_rect.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                target = image_rect
+                target.setSize(scaled.size())
+                target.moveCenter(image_rect.center())
+                painter.drawPixmap(target, scaled)
+            else:
+                painter.fillRect(image_rect, QColor("#17263d"))
+                painter.setPen(QColor("#71829d"))
+                painter.drawText(image_rect, Qt.AlignmentFlag.AlignCenter, "VIDEO")
         else:
-            painter.fillRect(image_rect, QColor("#17263d"))
-            painter.setPen(QColor("#71829d"))
-            painter.drawText(image_rect, Qt.AlignmentFlag.AlignCenter, "VIDEO")
-
-        text_left = image_rect.right() + 8
-        text_rect = rect.adjusted(text_left - rect.left(), 7, -7, -7)
-        painter.setPen(QColor("#7dd3fc"))
-        painter.setFont(option.font)
-        painter.drawText(
-            text_rect,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
-            entry.get("video_code") or "Chưa chọn video",
-        )
-        title_rect = text_rect.adjusted(0, 20, 0, 0)
-        painter.setPen(QColor("#dbe7f7"))
-        painter.drawText(
-            title_rect,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
-            self._elide(painter, entry.get("video_title") or "", title_rect.width()),
-        )
-        caption_rect = title_rect.adjusted(0, 20, 0, -20)
-        painter.setPen(QColor("#9fb0c7"))
-        painter.drawText(
-            caption_rect,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
-            self._elide(
-                painter, entry.get("caption") or "Chưa có caption",
-                caption_rect.width(), Qt.TextElideMode.ElideRight,
-            ),
-        )
-        painter.setPen(
-            QColor("#34d399")
-            if entry["publish_status"] == "posted"
-            else QColor("#fbbf24")
-        )
-        painter.drawText(
-            rect.adjusted(6, 0, -6, -5),
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom,
-            "ĐÃ ĐĂNG" if entry["publish_status"] == "posted" else "CHƯA ĐĂNG",
-        )
+            caption_rect = rect.adjusted(7, 6, -7, -29)
+            painter.setPen(QColor("#9fb0c7"))
+            painter.drawText(
+                caption_rect,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+                | Qt.TextFlag.TextWordWrap,
+                entry.get("caption") or "Chưa có caption",
+            )
+            status_rect = rect.adjusted(4, 0, -4, -4)
+            posted = entry["publish_status"] == "posted"
+            painter.setPen(QColor("#34d399") if posted else QColor("#fbbf24"))
+            painter.drawText(
+                status_rect,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom,
+                "✓ ĐÃ ĐĂNG" if posted else "CHƯA ĐĂNG",
+            )
         painter.restore()
 
     def sizeHint(self, option, index: QModelIndex) -> QSize:
-        return QSize(224, 120)
+        return QSize(105, 92)
 
     def _thumbnail(self, path: str | None) -> QPixmap:
         if not path or not Path(path).is_file():
             return QPixmap()
         if path not in self._thumbnails:
             reader = QImageReader(path)
-            reader.setScaledSize(QSize(96, 116))
+            reader.setScaledSize(QSize(128, 96))
             self._thumbnails[path] = QPixmap.fromImage(reader.read())
         return self._thumbnails[path]
 
@@ -214,6 +270,106 @@ class MatrixCellDelegate(QStyledItemDelegate):
         mode: Qt.TextElideMode = Qt.TextElideMode.ElideRight,
     ) -> str:
         return painter.fontMetrics().elidedText(text, mode, max(0, width))
+
+
+class ProjectVideoListModel(QAbstractTableModel):
+    HEADERS = (
+        "STT",
+        "Mã video",
+        "Ảnh",
+        "Tên video",
+        "Link Facebook",
+        "Trạng thái tải",
+        "Tệp MP4",
+    )
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.videos: list[dict] = []
+        self._thumbnails: dict[str, QPixmap] = {}
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self.videos)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self.HEADERS)
+
+    def headerData(
+        self,
+        section: int,
+        orientation: Qt.Orientation,
+        role: int = Qt.ItemDataRole.DisplayRole,
+    ):
+        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
+            return self.HEADERS[section]
+        return None
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        video = self.videos[index.row()]
+        column = index.column()
+        if role == Qt.ItemDataRole.ToolTipRole:
+            if column == 4:
+                return video.get("source_url", "")
+            if column == 6:
+                return video.get("local_video_path", "") or "Chưa tải"
+        if column == 2 and role == Qt.ItemDataRole.DecorationRole:
+            path = video.get("thumbnail_path")
+            if not path or not Path(path).is_file():
+                return None
+            if path not in self._thumbnails:
+                reader = QImageReader(path)
+                reader.setScaledSize(QSize(104, 72))
+                self._thumbnails[path] = QPixmap.fromImage(reader.read())
+            return self._thumbnails[path]
+        if role != Qt.ItemDataRole.DisplayRole:
+            return None
+        values = (
+            video.get("sequence_number", ""),
+            video.get("video_code", ""),
+            "",
+            video.get("title", ""),
+            video.get("source_url", ""),
+            {
+                "completed": "Đã tải",
+                "failed": "Lỗi",
+                "waiting": "Chờ tải",
+                "queued": "Trong hàng đợi",
+                "downloading": "Đang tải",
+                "interrupted": "Bị gián đoạn",
+                "cancelled": "Đã hủy",
+            }.get(video.get("download_status"), "Chờ tải"),
+            video.get("local_video_path") or "Chưa có file",
+        )
+        return str(values[column])
+
+    def set_videos(self, videos: list[dict]) -> None:
+        self.beginResetModel()
+        self.videos = list(videos)
+        self.endResetModel()
+
+
+class ProjectVideoListTable(QTableView):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("projectVideoListTable")
+        self.video_model = ProjectVideoListModel(self)
+        self.setModel(self.video_model)
+        self.setAlternatingRowColors(True)
+        self.setWordWrap(False)
+        self.verticalHeader().hide()
+        self.verticalHeader().setDefaultSectionSize(82)
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.horizontalHeader().setStretchLastSection(False)
+        for column, width in enumerate((58, 112, 90, 220, 280, 112, 260)):
+            self.setColumnWidth(column, width)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setMinimumHeight(260)
+
+    def set_videos(self, videos: list[dict]) -> None:
+        self.video_model.set_videos(videos)
 
 
 class MatrixPage(QWidget):
@@ -270,6 +426,13 @@ class MatrixPage(QWidget):
         header_layout.addLayout(actions)
         layout.addWidget(header)
 
+        self.content_tabs = QTabWidget()
+        self.content_tabs.setObjectName("matrixContentTabs")
+        self.schedule_view = QWidget()
+        schedule_layout = QVBoxLayout(self.schedule_view)
+        schedule_layout.setContentsMargins(0, 0, 0, 0)
+        schedule_layout.setSpacing(10)
+
         tabs_row = QVBoxLayout()
         tabs_label = QLabel("DANH SÁCH MA TRẬN")
         tabs_label.setObjectName("navSection")
@@ -284,7 +447,7 @@ class MatrixPage(QWidget):
         self.add_tab_button.setObjectName("matrixAddTab")
         self.add_tab_button.clicked.connect(self.newMatrixRequested.emit)
         tabs_row.addWidget(self.add_tab_button, alignment=Qt.AlignmentFlag.AlignLeft)
-        layout.addLayout(tabs_row)
+        schedule_layout.addLayout(tabs_row)
 
         toolbar = QVBoxLayout()
         statistics = QHBoxLayout()
@@ -335,7 +498,7 @@ class MatrixPage(QWidget):
             cell_actions.addWidget(button)
         cell_actions.addStretch()
         toolbar.addLayout(cell_actions)
-        layout.addLayout(toolbar)
+        schedule_layout.addLayout(toolbar)
 
         self.table = QTableView()
         self.table.setObjectName("matrixTable")
@@ -349,13 +512,14 @@ class MatrixPage(QWidget):
         self.table.setItemDelegate(self.delegate)
         self.table.setAlternatingRowColors(False)
         self.table.setWordWrap(False)
-        self.table.verticalHeader().setDefaultSectionSize(126)
+        self.table.verticalHeader().setDefaultSectionSize(96)
         self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectItems)
         self.table.setSelectionMode(QTableView.SelectionMode.SingleSelection)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._context_menu)
         self.table.doubleClicked.connect(self._edit_current)
         self.table.verticalHeader().hide()
+        self.table.horizontalHeader().hide()
         self.table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Interactive
         )
@@ -363,13 +527,26 @@ class MatrixPage(QWidget):
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.table.setMinimumHeight(280)
-        layout.addWidget(self.table, 1)
+        schedule_layout.addWidget(self.table, 1)
 
         self.empty_state = QLabel("Dự án này chưa có ma trận. Tạo ma trận để bắt đầu.")
         self.empty_state.setObjectName("matrixEmpty")
         self.empty_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_state.hide()
-        layout.addWidget(self.empty_state)
+        schedule_layout.addWidget(self.empty_state)
+        self.content_tabs.addTab(self.schedule_view, "Lịch đăng")
+
+        self.video_list_view = QWidget()
+        video_layout = QVBoxLayout(self.video_list_view)
+        video_layout.setContentsMargins(0, 10, 0, 0)
+        video_layout.setSpacing(10)
+        self.video_count_label = QLabel("Video của dự án")
+        self.video_count_label.setObjectName("detailMeta")
+        video_layout.addWidget(self.video_count_label)
+        self.video_table = ProjectVideoListTable(self.video_list_view)
+        video_layout.addWidget(self.video_table, 1)
+        self.content_tabs.addTab(self.video_list_view, "Video theo dự án")
+        layout.addWidget(self.content_tabs, 1)
 
     def _tool_button(self, text: str, signal: Signal) -> QPushButton:
         button = QPushButton(text)
@@ -393,6 +570,10 @@ class MatrixPage(QWidget):
         self.matrices = matrices
         self.matrix = matrix
         self.videos = videos
+        self.video_table.set_videos(videos)
+        self.video_count_label.setText(
+            f"{len(videos)} video trong dự án “{project.name}”"
+        )
         self.project_title.setText(f"{project.name} · Ma trận lịch đăng")
         self._updating_tabs = True
         while self.tabs.count():
@@ -451,13 +632,24 @@ class MatrixPage(QWidget):
         self.progress.setValue(round(posted * 100 / total) if total else 0)
         self.model.set_schedule(configuration, pages, entries)
         self.table.clearSpans()
-        self.table.verticalHeader().setDefaultSectionSize(126)
+        self.table.verticalHeader().setDefaultSectionSize(96)
         for column in range(self.model.columnCount()):
-            self.table.setColumnWidth(column, 105 if column == 0 else 235)
+            if column == 0:
+                self.table.setColumnWidth(column, 72)
+            else:
+                field = (column - 1) % 3
+                self.table.setColumnWidth(column, (78, 52, 112)[field])
         for row in range(self.model.rowCount()):
             if self.model.row_is_day_header(row):
                 self.table.setSpan(row, 0, 1, self.model.columnCount())
-                self.table.setRowHeight(row, 30)
+                self.table.setRowHeight(row, 27)
+            elif self.model.rows[row][0] == "pages":
+                self.table.setSpan(row, 0, 1, 1)
+                for page_index in range(len(pages)):
+                    self.table.setSpan(row, 1 + page_index * 3, 1, 3)
+                self.table.setRowHeight(row, 26)
+            elif self.model.rows[row][0] == "fields":
+                self.table.setRowHeight(row, 24)
         self._update_status_button()
 
     def _tab_changed(self, index: int) -> None:

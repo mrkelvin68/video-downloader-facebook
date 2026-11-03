@@ -484,8 +484,46 @@ class MatrixUiTests(unittest.TestCase):
         self.window.show_matrices(next(p for p in projects if p.uuid == self.project_id))
         self.assertEqual(self.window.pages.currentIndex(), 3)
         self.assertEqual(self.window.current_project.uuid, self.project_id)
-        self.assertEqual(self.window.matrix_page.model.rowCount(), 50)
-        self.assertEqual(self.window.matrix_page.model.columnCount(), 9)
+        self.assertEqual(self.window.matrix_page.model.rowCount(), 70)
+        self.assertEqual(self.window.matrix_page.model.columnCount(), 25)
+        self.assertEqual(
+            self.window.matrix_page.model.data(
+                self.window.matrix_page.model.index(1, 1)
+            ),
+            "Page 1",
+        )
+        self.assertEqual(self.window.matrix_page.video_table.video_model.rowCount(), 20)
+
+    def test_project_video_tab_only_shows_current_project_videos(self):
+        VideoService(self.database).import_csv(
+            self.other_project_id,
+            "stt,ten_video,url\n1,Other project video,"
+            "https://www.facebook.com/watch/?v=other-video\n",
+        )
+        self.window.show_matrices(
+            next(
+                project
+                for project in self.projects.list_projects()
+                if project.uuid == self.project_id
+            )
+        )
+        page = self.window.matrix_page
+        page.content_tabs.setCurrentWidget(page.video_list_view)
+        self.assertEqual(page.video_table.video_model.rowCount(), 20)
+        self.assertIn("20 video", page.video_count_label.text())
+
+        self.window.show_matrices(
+            next(
+                project
+                for project in self.projects.list_projects()
+                if project.uuid == self.other_project_id
+            )
+        )
+        self.assertEqual(page.video_table.video_model.rowCount(), 1)
+        self.assertEqual(
+            page.video_table.video_model.data(page.video_table.video_model.index(0, 1)),
+            "other-1",
+        )
 
     def test_tabs_switch_between_matrices_in_the_same_project(self):
         second_id = self.service.create_matrix(
@@ -509,7 +547,7 @@ class MatrixUiTests(unittest.TestCase):
         self.window.matrix_page.tabs.setCurrentIndex(tab_index)
         self.application.processEvents()
         self.assertEqual(self.window.current_matrix_id, second_id)
-        self.assertEqual(self.window.matrix_page.model.columnCount(), 2)
+        self.assertEqual(self.window.matrix_page.model.columnCount(), 4)
 
     def test_configuration_dialog_has_defaults_and_list_controls(self):
         dialog = MatrixConfigurationDialog(self.window)
@@ -534,6 +572,6 @@ class MatrixUiTests(unittest.TestCase):
             self.assertEqual(self.window.size().width(), size[0])
             self.assertGreater(self.window.matrix_page.table.verticalScrollBar().maximum(), 0)
             self.assertGreater(self.window.matrix_page.table.horizontalScrollBar().maximum(), 0)
-            self.assertEqual(self.window.matrix_page.model.rowCount(), 50)
+            self.assertEqual(self.window.matrix_page.model.rowCount(), 70)
         cards = self.window.project_page.findChildren(QPushButton, "secondary")
         self.assertTrue(any("Ma trận" in card.text() for card in cards))
