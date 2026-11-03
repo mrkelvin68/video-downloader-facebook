@@ -53,4 +53,6 @@ QLineEdit:focus, QTextEdit:focus { border:1px solid #60a5fa; }
 #dropZone { border:2px dashed #304766; border-radius:8px; color:#8ea1bb; background:#0c1729; }
 #dropZone:hover { border-color:#3b82f6; color:#d7e0ef; }
 QTableView#videoTable { background:#0c1729; alternate-background-color:#101c30; border:1px solid #284365; color:#d7e0ef; gridline-color:#1c2d46; selection-background-color:#1d3c66; }
+QTableView#csvPreviewTable { background:#0c1729; alternate-background-color:#101c30; border:1px solid #284365; color:#d7e0ef; gridline-color:#1c2d46; selection-background-color:#1d3c66; }
+#csvPreviewErrors { background:#0c1729; border:1px solid #713342; border-radius:6px; color:#fca5a5; }
 QHeaderView::section { background:#14223a; color:#8ea1bb; border:1px solid #284365; padding:7px; }

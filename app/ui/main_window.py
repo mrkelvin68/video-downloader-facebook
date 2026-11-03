@@ -75,7 +75,6 @@ class MainWindow(QMainWindow):
         self.detail_page.csvDropped.connect(self.load_csv)
         self.detail_page.sampleRequested.connect(self.save_sample_csv)
         self.detail_page.exportRequested.connect(self.export_csv)
-        self.detail_page.importRequested.connect(self.confirm_import)
         self.detail_page.downloadRequested.connect(self.start_downloads)
         self.refresh()
 
@@ -188,7 +187,22 @@ class MainWindow(QMainWindow):
         self.pending_csv_rows = rows
         self.pending_csv_errors = errors
         self.detail_page.show_preview(path.name, len(rows), errors)
-        CsvPreviewDialog(path.name, rows, errors, self).exec()
+        if self.current_project is None:
+            return
+        dialog = CsvPreviewDialog(
+            path.name,
+            rows,
+            errors,
+            self.current_project.prefix,
+            self,
+        )
+        if dialog.exec() == CsvPreviewDialog.DialogCode.Accepted:
+            self.confirm_import()
+        else:
+            self.pending_csv_text = None
+            self.pending_csv_rows = []
+            self.pending_csv_errors = []
+            self.detail_page.discard_preview()
 
     def save_sample_csv(self) -> None:
         path, _ = QFileDialog.getSaveFileName(

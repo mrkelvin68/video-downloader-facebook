@@ -62,5 +62,5 @@ class Sidebar(QFrame):
         live = QLabel("SQLite đang hoạt động")
         live.setObjectName("storageTitle")
         status_layout.addWidget(live)
-        status_layout.addWidget(QLabel("Phase 1 · Quản lý dự án"))
+        status_layout.addWidget(QLabel("Phase 1–3 · Quản lý & tải video"))
         layout.addWidget(status)

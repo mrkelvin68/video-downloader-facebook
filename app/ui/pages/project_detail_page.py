@@ -22,7 +22,6 @@ class ProjectDetailPage(QWidget):
     csvDropped = Signal(object)
     sampleRequested = Signal()
     exportRequested = Signal()
-    importRequested = Signal()
     downloadRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -84,15 +83,10 @@ class ProjectDetailPage(QWidget):
         export = QPushButton("Xuất CSV")
         export.setObjectName("secondary")
         export.clicked.connect(self.exportRequested.emit)
-        self.confirm = QPushButton("Xác nhận import")
-        self.confirm.setObjectName("primary")
-        self.confirm.setEnabled(False)
-        self.confirm.clicked.connect(self.importRequested.emit)
         actions.addWidget(choose)
         actions.addWidget(sample)
         actions.addWidget(export)
         actions.addStretch()
-        actions.addWidget(self.confirm)
         import_layout.addLayout(actions)
         self.csv_summary = QLabel("Chưa chọn tệp CSV")
         self.csv_summary.setObjectName("detailMeta")
@@ -130,7 +124,6 @@ class ProjectDetailPage(QWidget):
             self.csv_summary.setText(
                 "Chưa có danh sách video trong dự án. Kéo thả hoặc chọn tệp CSV."
             )
-        self.confirm.setEnabled(False)
 
     def show_preview(
         self, filename: str, row_count: int, errors: list[str]
@@ -144,7 +137,13 @@ class ProjectDetailPage(QWidget):
         else:
             self.csv_errors.clear()
             self.csv_errors.hide()
-        self.confirm.setEnabled(row_count > 0 and not errors)
+
+    def discard_preview(self) -> None:
+        self.csv_summary.setText(
+            "Đã hủy xem trước CSV. Dữ liệu đã lưu không thay đổi."
+        )
+        self.csv_errors.clear()
+        self.csv_errors.hide()
 
 class _DropZone(QLabel):
     fileDropped = Signal(object)
