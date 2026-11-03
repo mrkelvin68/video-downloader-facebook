@@ -3,11 +3,16 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
+from typing import Callable
 
 from app.database.connection import Database
 
@@ -22,7 +27,14 @@ class DownloadService:
         self.runner = runner or subprocess.run
         self.ffprobe = ffprobe or self._find_ffprobe
 
-    def download(self, project_id: str, video_id: str) -> tuple[Path, Path | None]:
+    def download(
+        self,
+        project_id: str,
+        video_id: str,
+        *,
+        progress_callback: Callable[[float, int, int | None, float | None, int | None], None]
+        | None = None,
+    ) -> tuple[Path, Path | None]:
         project = self.database.get_project(project_id)
         video = self.database.connection.execute(
             "SELECT * FROM videos WHERE id=? AND project_id=?", (video_id, project_id)
@@ -46,10 +58,25 @@ class DownloadService:
                 folder = Path(work)
                 ffmpeg_loc = self._find_ffmpeg()
                 command = [
-                    sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-progress",
+                    sys.executable, "-m", "yt_dlp", "--no-playlist",
                     "--no-overwrites", "--write-thumbnail", "--convert-thumbnails", "jpg",
                     "-f", "bv*+ba/b", "--merge-output-format", "mp4", "--remux-video", "mp4",
                 ]
+                if progress_callback is None:
+                    command.append("--no-progress")
+                else:
+                    command.extend(
+                        [
+                            "--newline",
+                            "--progress-delta",
+                            "1",
+                            "--progress-template",
+                            "download:QUEUE_PROGRESS:%(progress._percent_str)s\t"
+                            "%(progress.downloaded_bytes)s\t"
+                            "%(progress.total_bytes or progress.total_bytes_estimate)s\t"
+                            "%(progress.speed)s\t%(progress.eta)s",
+                        ]
+                    )
                 if ffmpeg_loc:
                     command.extend(["--ffmpeg-location", ffmpeg_loc])
                 command.extend([
@@ -58,7 +85,16 @@ class DownloadService:
                 ])
 
                 try:
-                    result = self.runner(command, capture_output=True, text=True, timeout=1800, check=False)
+                    if progress_callback is None:
+                        result = self.runner(
+                            command,
+                            capture_output=True,
+                            text=True,
+                            timeout=1800,
+                            check=False,
+                        )
+                    else:
+                        result = self._run_with_progress(command, progress_callback)
                 except FileNotFoundError as exc:
                     raise DownloadError("Không tìm thấy Python/yt-dlp. Chạy lại py install.py") from exc
                 except subprocess.TimeoutExpired as exc:
@@ -98,6 +134,99 @@ class DownloadService:
                     f"{download_error}; không thể lưu trạng thái thất bại: {status_error}"
                 ) from status_error
             raise
+
+    @staticmethod
+    def _run_with_progress(
+        command: list[str],
+        progress_callback: Callable[
+            [float, int, int | None, float | None, int | None], None
+        ],
+    ) -> subprocess.CompletedProcess:
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+        except FileNotFoundError:
+            raise
+
+        output_lines: queue.Queue[str | None] = queue.Queue()
+
+        def read_output() -> None:
+            stdout = process.stdout
+            try:
+                if stdout is not None:
+                    for line in stdout:
+                        output_lines.put(line.rstrip("\r\n"))
+            finally:
+                close_stdout = getattr(stdout, "close", None)
+                if callable(close_stdout):
+                    close_stdout()
+                output_lines.put(None)
+
+        reader = threading.Thread(target=read_output, daemon=True)
+        reader.start()
+        deadline = time.monotonic() + 1800
+        output_tail: list[str] = []
+        reader_finished = False
+        while not reader_finished or process.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                reader.join(timeout=5)
+                raise subprocess.TimeoutExpired(command, 1800)
+            try:
+                line = output_lines.get(timeout=min(0.25, remaining))
+            except queue.Empty:
+                continue
+            if line is None:
+                reader_finished = True
+                continue
+            output_tail.append(line)
+            if len(output_tail) > 100:
+                output_tail.pop(0)
+            if not line.startswith("QUEUE_PROGRESS:"):
+                continue
+            fields = line.removeprefix("QUEUE_PROGRESS:").split("\t")
+            if len(fields) != 5:
+                continue
+            try:
+                percent = float(fields[0].strip().rstrip("%"))
+                downloaded = int(fields[1]) if fields[1].isdigit() else 0
+                total = int(fields[2]) if fields[2].isdigit() else None
+                speed = float(fields[3]) if fields[3] not in ("None", "") else None
+                eta = int(fields[4]) if fields[4].isdigit() else None
+            except ValueError:
+                continue
+            try:
+                progress_callback(percent, downloaded, total, speed, eta)
+            except BaseException:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                reader.join(timeout=5)
+                raise
+
+        reader.join(timeout=5)
+        return subprocess.CompletedProcess(
+            command,
+            process.wait(),
+            stdout="\n".join(output_tail),
+            stderr="",
+        )
 
     def _validate_media(self, path: Path) -> None:
         if not path.is_file() or path.stat().st_size == 0:

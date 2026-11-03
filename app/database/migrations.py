@@ -14,6 +14,45 @@ def _create_videos_table(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_download_jobs_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS download_jobs (
+            job_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            video_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (
+                status IN ('queued', 'downloading', 'completed', 'failed',
+                           'interrupted', 'cancelled')
+            ),
+            priority INTEGER NOT NULL DEFAULT 0,
+            queue_order INTEGER NOT NULL,
+            progress REAL NOT NULL DEFAULT 0 CHECK (progress >= 0 AND progress <= 100),
+            downloaded_bytes INTEGER NOT NULL DEFAULT 0 CHECK (downloaded_bytes >= 0),
+            total_bytes INTEGER,
+            speed REAL,
+            error_message TEXT,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            FOREIGN KEY(project_id) REFERENCES projects(uuid) ON DELETE CASCADE,
+            FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE CASCADE
+        )"""
+    )
+    connection.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_download_jobs_active_video
+           ON download_jobs(video_id)
+           WHERE status IN ('queued', 'downloading')"""
+    )
+    connection.execute(
+        """CREATE INDEX IF NOT EXISTS ix_download_jobs_queue_order
+           ON download_jobs(status, priority DESC, queue_order, created_at)"""
+    )
+    connection.execute(
+        """CREATE INDEX IF NOT EXISTS ix_download_jobs_project
+           ON download_jobs(project_id, created_at DESC)"""
+    )
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("BEGIN IMMEDIATE")
@@ -70,6 +109,7 @@ def migrate(connection: sqlite3.Connection) -> None:
                     "Migration videos không đầy đủ; dữ liệu cũ được giữ nguyên."
                 )
             connection.execute("DROP TABLE videos_legacy")
+        _create_download_jobs_table(connection)
         connection.commit()
     except BaseException:
         connection.rollback()

@@ -1,7 +1,9 @@
 import sqlite3
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -22,10 +24,12 @@ from app.models.project import Project
 from app.services.csv_service import parse_video_csv, sample_video_csv
 from app.services.project_service import ProjectService
 from app.services.video_service import VideoService
+from app.services.download_queue_service import DownloadQueueService
 from app.ui.dialogs.csv_preview_dialog import CsvPreviewDialog
 from app.ui.dialogs.project_dialog import ProjectDialog
 from app.ui.pages.project_detail_page import ProjectDetailPage
 from app.ui.pages.project_page import ProjectPage
+from app.ui.pages.download_queue_page import DownloadQueuePage
 from app.ui.widgets.sidebar import Sidebar
 from app.ui.download_worker import DownloadWorker
 
@@ -39,12 +43,17 @@ class MainWindow(QMainWindow):
         self.database = database
         self.projects = ProjectService(database)
         self.videos = VideoService(database)
+        self.download_queue = DownloadQueueService(database)
         self.current_project: Project | None = None
         self.pending_csv_text: str | None = None
         self.pending_csv_rows: list[dict] = []
         self.pending_csv_errors: list[str] = []
-        self.download_worker: DownloadWorker | None = None
-        self.download_errors: list[str] = []
+        self.queue_worker: DownloadWorker | None = None
+        self.queue_running = False
+        self.pause_after_current = False
+        self.queue_job_id: str | None = None
+        self.queue_error: str | None = None
+        self.download_queue.recover_interrupted()
         self.setWindowTitle("Video Downloader")
         self.resize(1366, 768)
         self.setMinimumSize(960, 640)
@@ -53,7 +62,8 @@ class MainWindow(QMainWindow):
         root_layout = QHBoxLayout(root)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
-        root_layout.addWidget(Sidebar())
+        self.sidebar = Sidebar()
+        root_layout.addWidget(self.sidebar)
         workspace = QWidget()
         workspace_layout = QVBoxLayout(workspace)
         workspace_layout.setContentsMargins(0, 0, 0, 0)
@@ -62,8 +72,10 @@ class MainWindow(QMainWindow):
         self.pages = QStackedWidget()
         self.project_page = ProjectPage()
         self.detail_page = ProjectDetailPage()
+        self.queue_page = DownloadQueuePage()
         self.pages.addWidget(self.project_page)
         self.pages.addWidget(self.detail_page)
+        self.pages.addWidget(self.queue_page)
         workspace_layout.addWidget(self.pages, 1)
         root_layout.addWidget(workspace, 1)
         self.setCentralWidget(root)
@@ -71,11 +83,29 @@ class MainWindow(QMainWindow):
         self.project_page.editRequested.connect(self.edit_project)
         self.project_page.openRequested.connect(self.show_detail)
         self.detail_page.backRequested.connect(self.show_projects)
+        self.sidebar.projectsRequested.connect(self.show_projects)
+        self.sidebar.queueRequested.connect(self.show_queue)
         self.detail_page.csvChosen.connect(self.choose_csv)
         self.detail_page.csvDropped.connect(self.load_csv)
         self.detail_page.sampleRequested.connect(self.save_sample_csv)
         self.detail_page.exportRequested.connect(self.export_csv)
-        self.detail_page.downloadRequested.connect(self.start_downloads)
+        self.detail_page.runNowRequested.connect(self.run_now)
+        self.detail_page.enqueueRequested.connect(self.add_selected_to_queue)
+        self.detail_page.queueRequested.connect(self.show_queue)
+        self.detail_page.selectAllRequested.connect(
+            self.detail_page.video_table.select_all
+        )
+        self.detail_page.clearSelectionRequested.connect(
+            self.detail_page.video_table.clear_selection
+        )
+        self.queue_page.backRequested.connect(self.show_projects)
+        self.queue_page.startRequested.connect(self.start_queue)
+        self.queue_page.pauseRequested.connect(self.pause_queue)
+        self.queue_page.resumeRequested.connect(self.start_queue)
+        self.queue_page.retryRequested.connect(self.retry_queue_jobs)
+        self.queue_page.cancelRequested.connect(self.cancel_queue_jobs)
+        self.queue_page.prioritizeRequested.connect(self.prioritize_queue_jobs)
+        self.refresh_queue()
         self.refresh()
 
     def _build_header(self) -> QWidget:
@@ -88,7 +118,7 @@ class MainWindow(QMainWindow):
         crumb.setObjectName("breadcrumb")
         layout.addWidget(crumb)
         layout.addStretch()
-        phase = QLabel("PHASE 1–3")
+        phase = QLabel("PHASE 1–3.2")
         phase.setObjectName("phaseTag")
         layout.addWidget(phase)
         return header
@@ -106,20 +136,35 @@ class MainWindow(QMainWindow):
         self.pending_csv_rows = []
         self.pending_csv_errors = []
         self.pages.setCurrentIndex(0)
+        self.sidebar.set_active("projects")
 
     def show_detail(self, project: Project) -> None:
         self.current_project = project
         self.detail_page.set_project(project)
         self._refresh_project_videos()
         self.pages.setCurrentIndex(1)
+        self.sidebar.set_active("projects")
+
+    def show_queue(self) -> None:
+        self.refresh_queue()
+        self.pages.setCurrentIndex(2)
+        self.sidebar.set_active("queue")
 
     def _refresh_project_videos(self) -> bool:
         if self.current_project is None:
             return False
         try:
-            self.detail_page.set_saved_videos(
-                self.videos.list_videos(self.current_project.uuid)
-            )
+            videos = self.videos.list_videos(self.current_project.uuid)
+            job_info = self.download_queue.video_job_info(self.current_project.uuid)
+            decorated = []
+            for video in videos:
+                row = asdict(video)
+                job = job_info.get(video.id)
+                if job is not None:
+                    row["queue_status"] = job["status"]
+                    row["queue_progress"] = job["progress"]
+                decorated.append(row)
+            self.detail_page.set_saved_videos(decorated)
             return True
         except sqlite3.Error as exc:
             QMessageBox.critical(self, "Lỗi cơ sở dữ liệu", str(exc))
@@ -280,46 +325,264 @@ class MainWindow(QMainWindow):
             self, "Thành công", f"Đã lưu thành công {imported} video vào dự án."
         )
 
-    def start_downloads(self) -> None:
-        if self.current_project is None or self.download_worker is not None:
-            return
+    def _selected_project_video_ids(self) -> list[str]:
+        if self.current_project is None:
+            return []
         selected = self.detail_page.video_table.selected_video_ids()
-        if len(selected) != 1:
-            QMessageBox.warning(self, "Chọn video", "Hãy chọn đúng một video để tải.")
+        if not selected:
+            QMessageBox.warning(self, "Chọn video", "Hãy chọn ít nhất một video.")
+        return selected
+
+    def add_selected_to_queue(self) -> None:
+        if self.current_project is None:
             return
-        self.download_errors = []
-        worker = DownloadWorker(self.database.path, self.current_project.uuid, selected[0], self)
-        self.download_worker = worker
-        self.detail_page.download_button.setEnabled(False)
-        self.detail_page.download_status.setText("Đang bắt đầu tải...")
-        worker.progress.connect(self._download_progress)
-        worker.failed.connect(self._download_error)
-        worker.finished_batch.connect(self._downloads_finished)
+        selected = self._selected_project_video_ids()
+        if not selected:
+            return
+        try:
+            created = self.download_queue.enqueue(
+                self.current_project.uuid, selected
+            )
+        except (ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "Không thể thêm vào hàng đợi", str(exc))
+            return
+        self.refresh_queue()
+        self._refresh_project_videos()
+        message = (
+            f"Đã thêm {len(created)} video vào hàng đợi."
+            if created
+            else "Các video đã chọn đã có trong hàng đợi."
+        )
+        self.detail_page.queue_status.setText(message)
+
+    def run_now(self) -> None:
+        if self.current_project is None:
+            return
+        selected = self._selected_project_video_ids()
+        if not selected:
+            return
+        try:
+            self.download_queue.enqueue(
+                self.current_project.uuid, selected, run_now=True
+            )
+        except (ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "Không thể chạy video", str(exc))
+            return
+        self.refresh_queue()
+        self._refresh_project_videos()
+        self.start_queue()
+
+    def start_queue(self) -> None:
+        self.queue_running = True
+        self.pause_after_current = False
+        self.queue_page.queue_status.setText("Đang chạy hàng đợi tuần tự.")
+        self.detail_page.queue_status.setText("Đang chạy hàng đợi.")
+        self._start_next_queue_job()
+
+    def pause_queue(self) -> None:
+        if self.queue_worker is None:
+            self.queue_running = False
+            self.queue_page.queue_status.setText("Hàng đợi đang tạm dừng.")
+            self.detail_page.queue_status.setText("Hàng đợi đang tạm dừng.")
+            return
+        self.pause_after_current = True
+        self.queue_page.queue_status.setText(
+            "Sẽ tạm dừng sau khi video hiện tại hoàn tất."
+        )
+        self.detail_page.queue_status.setText("Tạm dừng sau video hiện tại.")
+
+    def _start_next_queue_job(self) -> None:
+        if self.queue_worker is not None or not self.queue_running:
+            return
+        if self.pause_after_current:
+            self.queue_running = False
+            return
+        try:
+            job = self.download_queue.next_queued_job()
+        except sqlite3.Error as exc:
+            self.queue_running = False
+            QMessageBox.critical(self, "Lỗi hàng đợi", str(exc))
+            return
+        if job is None:
+            self.queue_running = False
+            self.queue_page.queue_status.setText("Không còn job đang chờ.")
+            self.detail_page.queue_status.setText("Hàng đợi đã hoàn tất.")
+            self.refresh_queue()
+            return
+        worker = DownloadWorker(self.database.path, job["job_id"], self)
+        self.queue_worker = worker
+        self.queue_job_id = job["job_id"]
+        self.queue_error = None
+        worker.progress.connect(self._queue_progress)
+        worker.jobFinished.connect(self._queue_job_finished)
+        worker.finished.connect(
+            lambda active_worker=worker: self._queue_thread_finished(active_worker)
+        )
+        job_info = self.download_queue.get_job(job["job_id"])
+        code = job["job_id"]
+        if job_info is not None:
+            video = self.database.connection.execute(
+                "SELECT video_code FROM videos WHERE id=?", (job_info["video_id"],)
+            ).fetchone()
+            if video is not None:
+                code = video["video_code"]
+        self.queue_page.queue_status.setText(f"Đang tải {code}…")
+        self.detail_page.queue_status.setText(f"Đang tải {code}…")
         worker.start()
 
-    def _download_progress(self, code: str) -> None:
-        self.detail_page.download_status.setText(f"Đang tải: {code}")
+    def _queue_progress(
+        self,
+        job_id: str,
+        percent: float,
+        downloaded: int,
+        total: int | None,
+        speed: float | None,
+        eta: int | None,
+    ) -> None:
+        self.refresh_queue()
+        self._refresh_project_videos()
+        job = self.download_queue.get_job(job_id)
+        code = job_id
+        if job is not None:
+            video = self.database.connection.execute(
+                "SELECT video_code FROM videos WHERE id=?", (job["video_id"],)
+            ).fetchone()
+            if video is not None:
+                code = video["video_code"]
+        rate = f"{speed / 1024 / 1024:.1f} MB/s" if speed else "—"
+        remaining = f" · còn {eta}s" if eta is not None else ""
+        status = f"Đang tải {code}: {percent:.1f}% · {rate}{remaining}"
+        self.queue_page.queue_status.setText(status)
+        self.detail_page.queue_status.setText(status)
 
-    def _download_error(self, message: str) -> None:
-        self.download_errors.append(message)
-
-    def _downloads_finished(self) -> None:
-        worker = self.download_worker
-        if worker is None:
+    def _queue_job_finished(self, job_id: str, succeeded: bool, message: str) -> None:
+        worker = self.queue_worker
+        if worker is None or self.queue_job_id != job_id:
             return
         worker.wait()
-        self.download_worker = None
-        self.detail_page.download_button.setEnabled(True)
-        self._refresh_project_videos()
-        if self.download_errors:
-            self.detail_page.download_status.setText("Thất bại: " + self.download_errors[0][:180])
+        self.queue_worker = None
+        self.queue_job_id = None
+        self.queue_error = message if not succeeded else None
+        can_continue = True
+        if not succeeded:
+            try:
+                self.download_queue.fail_unclaimed(job_id, message)
+                job = self.download_queue.get_job(job_id)
+                can_continue = job is None or job["status"] not in (
+                    "queued",
+                    "downloading",
+                )
+            except sqlite3.Error as exc:
+                message += f"; không lưu được trạng thái lỗi: {exc}"
+                can_continue = False
+        self.refresh_queue()
+        if self.current_project is not None:
+            self._refresh_project_videos()
+        if not succeeded:
+            status = f"Job lỗi: {message}"
+            self.queue_page.queue_status.setText(status)
+            self.detail_page.queue_status.setText(status)
         else:
-            self.detail_page.download_status.setText("Tải thành công")
+            self.queue_page.queue_status.setText("Video tải thành công.")
+            self.detail_page.queue_status.setText("Video tải thành công.")
+        if self.pause_after_current:
+            self.pause_after_current = False
+            self.queue_running = False
+            self.queue_page.queue_status.setText(
+                "Đã tạm dừng sau video hiện tại."
+            )
+            return
+        if can_continue:
+            QTimer.singleShot(0, self._start_next_queue_job)
+        else:
+            self.queue_running = False
+
+    def _queue_thread_finished(self, worker: DownloadWorker) -> None:
+        if self.queue_worker is not worker:
+            return
+        job_id = self.queue_job_id
+        if job_id is None:
+            self.queue_worker = None
+            return
+        try:
+            if not self.download_queue.interrupt_job(
+                job_id, "Worker dừng bất thường trước khi báo hoàn tất."
+            ):
+                self.download_queue.fail_unclaimed(
+                    job_id, "Worker dừng bất thường trước khi nhận job."
+                )
+        except sqlite3.Error as exc:
+            QMessageBox.critical(self, "Lỗi hàng đợi", str(exc))
+        self.queue_worker = None
+        self.queue_job_id = None
+        self.refresh_queue()
+        self._refresh_project_videos()
+        self.queue_page.queue_status.setText(
+            "Worker bị gián đoạn; các job còn lại vẫn được giữ."
+        )
+        QTimer.singleShot(0, self._start_next_queue_job)
+
+    def refresh_queue(self) -> None:
+        try:
+            self.queue_page.set_jobs(self.download_queue.list_jobs())
+        except sqlite3.Error as exc:
+            QMessageBox.critical(self, "Lỗi hàng đợi", str(exc))
+
+    def _selected_queue_job_ids(self) -> list[str]:
+        selected = self.queue_page.table.selected_job_ids()
+        if not selected:
+            QMessageBox.warning(
+                self, "Chọn job", "Hãy chọn ít nhất một job trong hàng đợi."
+            )
+        return selected
+
+    def retry_queue_jobs(self) -> None:
+        selected = self._selected_queue_job_ids()
+        if not selected:
+            return
+        try:
+            created = self.download_queue.retry(selected)
+        except (ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "Không thể retry", str(exc))
+            return
+        self.refresh_queue()
+        self.queue_page.queue_status.setText(
+            f"Đã tạo {len(created)} job retry. Bấm Bắt đầu hàng đợi để chạy."
+        )
+
+    def cancel_queue_jobs(self) -> None:
+        selected = self._selected_queue_job_ids()
+        if not selected:
+            return
+        try:
+            cancelled = self.download_queue.cancel(selected)
+        except sqlite3.Error as exc:
+            QMessageBox.warning(self, "Không thể xóa job", str(exc))
+            return
+        self.refresh_queue()
+        self._refresh_project_videos()
+        self.queue_page.queue_status.setText(
+            f"Đã xóa {cancelled} job đang chờ; file video không bị xóa."
+        )
+
+    def prioritize_queue_jobs(self) -> None:
+        selected = self._selected_queue_job_ids()
+        if not selected:
+            return
+        try:
+            count = self.download_queue.prioritize(selected)
+        except sqlite3.Error as exc:
+            QMessageBox.warning(self, "Không thể ưu tiên job", str(exc))
+            return
+        self.refresh_queue()
+        self.queue_page.queue_status.setText(f"Đã ưu tiên {count} job đang chờ.")
 
     def closeEvent(self, event) -> None:
-        if self.download_worker is not None:
+        if self.queue_worker is not None:
             QMessageBox.information(
-                self, "Đang tải", "Đợi hàng đợi hoàn thành trước khi đóng ứng dụng."
+                self,
+                "Đang tải",
+                "Đợi video hiện tại hoàn tất trước khi đóng ứng dụng.",
             )
             event.ignore()
             return

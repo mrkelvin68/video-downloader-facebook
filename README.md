@@ -12,10 +12,11 @@
 - Hiển thị video trong `QTableView`; dữ liệu nhiều dòng không tạo widget riêng cho từng video.
 - Xuất CSV từ dữ liệu SQLite của dự án đang mở.
 - Tải đơn lẻ từng video Facebook (Phase 3.1): tải video chất lượng cao nhất bằng yt-dlp, gom file MP4 và thumbnail vào thư mục riêng theo prefix, kiểm tra hợp lệ bằng FFprobe và cập nhật SQLite.
+- Hàng đợi tuần tự Phase 3.2 với **Chạy ngay**, **Thêm vào hàng đợi**, ưu tiên job, tạm dừng sau video hiện tại, tiếp tục và retry. Tiến độ/tốc độ lấy từ yt-dlp; job lưu trong SQLite và được phục hồi an toàn sau restart.
 
 ## Chức năng chưa triển khai
 
-- Hàng đợi tải song song, tự động tải hàng loạt, scheduler hoặc Facebook Publisher.
+- Tải song song (concurrency luôn bằng 1), scheduler hoặc Facebook Publisher.
 - Dashboard, live logs và cài đặt.
 - Xóa dự án hoặc di chuyển dữ liệu của dự án.
 
@@ -71,6 +72,16 @@ stt,ten_video,url
 3. Chọn **Xác nhận import** để lưu. Nếu dự án đã có danh sách, ứng dụng yêu cầu xác nhận trước khi thay thế.
 4. Nếu có video đã tải/đang tải hoặc có đường dẫn file liên kết, thao tác thay thế bị chặn. Việc import diễn ra trong một transaction; lỗi sẽ rollback dữ liệu cũ.
 5. **Xuất CSV** lấy dữ liệu đã lưu trong SQLite của dự án hiện tại, theo STT tăng dần và có UTF-8 BOM. Preview chưa xác nhận không được export.
+
+## Download Queue
+
+1. Trong trang dự án, chọn một hoặc nhiều video bằng checkbox. Có thể dùng **Chọn tất cả** hoặc **Bỏ chọn tất cả**.
+2. **Chạy ngay** đưa video đã chọn lên đầu hàng đợi và bắt đầu queue. Video đang chạy không bị ngắt.
+3. **Thêm vào hàng đợi** chỉ lưu job, không tự bắt đầu tải.
+4. Mở **Hàng đợi tải video** ở sidebar hoặc **Xem hàng đợi** để theo dõi trạng thái, tiến độ thực, tốc độ, dung lượng, ETA ước tính và lỗi.
+5. Queue chạy từng video một. **Tạm dừng sau video hiện tại** không ngắt file đang tải; **Tiếp tục** bắt đầu các job còn chờ.
+6. Job gián đoạn khi ứng dụng đóng bất thường được đánh dấu để người dùng chủ động Retry/tiếp tục. Ứng dụng không tự tải lại job đó.
+7. Xóa job đang chờ chỉ bỏ job khỏi queue, không xóa file video. Job đang tải không thể bị xóa bằng thao tác này.
 
 ## Cấu trúc source code
 

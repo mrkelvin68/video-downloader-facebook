@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -5,6 +6,8 @@ from unittest.mock import patch
 
 from app.database.connection import Database
 from app.services.project_service import ProjectService
+from app.services.download_queue_service import DownloadQueueService
+from app.services.video_service import VideoService
 from app.ui.dialogs.csv_preview_dialog import CsvPreviewDialog, CsvPreviewModel
 from app.ui.main_window import MainWindow
 
@@ -259,6 +262,162 @@ class ProjectCsvUiTests(unittest.TestCase):
             self.assertEqual((window.width(), window.height()), (width, height))
         screenshot = window.grab()
         self.assertFalse(screenshot.isNull())
+        window.close()
+
+    def test_queue_selection_actions_navigation_and_responsive_layout(self):
+        from PySide6.QtCore import Qt
+
+        rows = ["stt,ten_video,url"]
+        rows.extend(
+            f"{index},Video {index},https://www.facebook.com/reel/{index}"
+            for index in range(1, 21)
+        )
+        VideoService(self.database).import_csv(self.project_id, "\n".join(rows))
+        window = MainWindow(self.database)
+        self.open_project(window)
+        model = window.detail_page.video_table.video_model
+        model.setData(
+            model.index(0, 0), Qt.CheckState.Checked, Qt.ItemDataRole.CheckStateRole
+        )
+        model.setData(
+            model.index(2, 0), Qt.CheckState.Checked, Qt.ItemDataRole.CheckStateRole
+        )
+        model.setData(
+            model.index(4, 0), Qt.CheckState.Checked, Qt.ItemDataRole.CheckStateRole
+        )
+        window.detail_page.enqueue_button.click()
+        queue = DownloadQueueService(self.database)
+        self.assertEqual(
+            [row["video_code"] for row in queue.list_jobs(include_finished=False)],
+            ["ui-1", "ui-3", "ui-5"],
+        )
+
+        window.detail_page.video_table.clear_selection()
+        model = window.detail_page.video_table.video_model
+        model.setData(
+            model.index(5, 0), Qt.CheckState.Checked, Qt.ItemDataRole.CheckStateRole
+        )
+        model.setData(
+            model.index(6, 0), Qt.CheckState.Checked, Qt.ItemDataRole.CheckStateRole
+        )
+        with patch.object(window, "start_queue") as start_queue:
+            window.detail_page.run_now_button.click()
+            start_queue.assert_called_once()
+        self.assertEqual(
+            [
+                row["video_code"]
+                for row in queue.list_jobs(include_finished=False)
+            ],
+            ["ui-6", "ui-7", "ui-1", "ui-3", "ui-5"],
+        )
+        window.show()
+        window.resize(1366, 768)
+        self.application.processEvents()
+        self.assertGreaterEqual(window.detail_page.video_table.height(), 190)
+        window.sidebar.queue_button.click()
+        self.assertEqual(window.pages.currentIndex(), 2)
+        self.assertEqual(window.queue_page.table.queue_model.rowCount(), 5)
+
+        window.show()
+        for width, height in ((1366, 768), (1920, 1080)):
+            window.resize(width, height)
+            self.application.processEvents()
+            self.assertEqual((window.width(), window.height()), (width, height))
+            self.assertTrue(window.queue_page.table.isVisible())
+            self.assertLess(
+                window.queue_page.table.geometry().top(),
+                window.queue_page.table.geometry().bottom(),
+            )
+        self.assertTrue(window.grab().save(str(self.root / "queue-manager.png")))
+        window.close()
+
+    def test_pause_after_current_then_resume_starts_next_job(self):
+        class FakeSignal:
+            def connect(self, callback):
+                self.callback = callback
+
+        class FakeWorker:
+            started_jobs = []
+
+            def __init__(self, database_path, job_id, parent):
+                self.job_id = job_id
+                self.progress = FakeSignal()
+                self.jobFinished = FakeSignal()
+                self.finished = FakeSignal()
+
+            def start(self):
+                self.started_jobs.append(self.job_id)
+
+            def wait(self):
+                return True
+
+        rows = ["stt,ten_video,url"]
+        rows.extend(
+            f"{index},Video {index},https://www.facebook.com/reel/{index}"
+            for index in range(1, 3)
+        )
+        VideoService(self.database).import_csv(self.project_id, "\n".join(rows))
+        window = MainWindow(self.database)
+        queue = DownloadQueueService(self.database)
+        queue.enqueue(self.project_id, [row["id"] for row in self.database.list_videos(self.project_id)])
+        with patch("app.ui.main_window.DownloadWorker", FakeWorker):
+            window.start_queue()
+            current_job = window.queue_job_id
+            self.assertIsNotNone(current_job)
+            window.pause_queue()
+            self.assertTrue(window.pause_after_current)
+            current = queue.claim(current_job)
+            with self.database.connection:
+                self.database.connection.execute(
+                    """UPDATE videos SET download_status='completed'
+                       WHERE id=? AND project_id=?""",
+                    (current["video_id"], self.project_id),
+                )
+            queue.finish(current_job, status="completed")
+            window._queue_job_finished(current_job, True, "")
+            self.assertFalse(window.queue_running)
+            self.assertIsNone(window.queue_worker)
+            self.assertEqual(queue.next_queued_job()["job_id"] != current_job, True)
+
+            window.start_queue()
+            self.assertEqual(len(FakeWorker.started_jobs), 2)
+            self.assertNotEqual(FakeWorker.started_jobs[0], FakeWorker.started_jobs[1])
+            window.queue_worker = None
+            window.queue_job_id = None
+        window.close()
+
+    def test_worker_database_failure_stops_queue_without_retry_loop(self):
+        VideoService(self.database).import_csv(
+            self.project_id,
+            "stt,ten_video,url\n1,Video,https://www.facebook.com/reel/1\n",
+        )
+        video = self.database.list_videos(self.project_id)[0]
+        job_id = DownloadQueueService(self.database).enqueue(
+            self.project_id, [video["id"]]
+        )[0]
+        window = MainWindow(self.database)
+
+        class FinishedWorker:
+            def wait(self):
+                return True
+
+        window.queue_worker = FinishedWorker()
+        window.queue_job_id = job_id
+        window.queue_running = True
+        with (
+            patch.object(
+                window.download_queue,
+                "fail_unclaimed",
+                side_effect=sqlite3.OperationalError("database is locked"),
+            ),
+            patch("app.ui.main_window.QTimer.singleShot") as schedule_next,
+        ):
+            window._queue_job_finished(job_id, False, "Could not open database")
+
+        self.assertFalse(window.queue_running)
+        self.assertEqual(window.download_queue.get_job(job_id)["status"], "queued")
+        schedule_next.assert_not_called()
+        self.assertIn("database is locked", window.queue_page.queue_status.text())
         window.close()
 
 

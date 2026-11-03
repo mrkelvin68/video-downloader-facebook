@@ -78,6 +78,13 @@ class Database:
                 (project_id,),
             ).fetchone()
             is None
+            and self.connection.execute(
+                """SELECT 1 FROM download_jobs
+                   WHERE project_id=? AND status IN ('queued', 'downloading')
+                   LIMIT 1""",
+                (project_id,),
+            ).fetchone()
+            is None
         )
 
     def replace_videos(
@@ -111,7 +118,13 @@ class Database:
                    LIMIT 1""",
                 (project_id,),
             ).fetchone()
-            if blocked_video is not None:
+            active_job = self.connection.execute(
+                """SELECT 1 FROM download_jobs
+                   WHERE project_id=? AND status IN ('queued', 'downloading')
+                   LIMIT 1""",
+                (project_id,),
+            ).fetchone()
+            if blocked_video is not None or active_job is not None:
                 raise ImportBlockedError(
                     "Không thể thay thế: dự án có video đang tải/đã tải hoặc có tệp liên kết."
                 )
