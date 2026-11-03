@@ -26,23 +26,23 @@ Không có Download Engine trong phiên bản này.
 - Python 3.11 trở lên.
 - PySide6 (cài tự động từ `requirements.txt`).
 
-## Cài đặt
+## Cài đặt và khởi chạy nhanh
 
-Mở PowerShell tại thư mục repository:
-
-```powershell
-py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-## Chạy ứng dụng
+Yêu cầu Windows 10/11 và Python 3.11 trở lên có trong `PATH` (Python Launcher `py` được khuyến nghị). Tại thư mục repository, cài lần đầu bằng:
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
-python main.py
+py install.py
 ```
+
+Installer tạo hoặc tái sử dụng `.venv`, cài các gói từ `requirements.txt` vào môi trường đó và kiểm tra PySide6. Chạy lại lệnh an toàn; installer không thay đổi Python global và không xóa môi trường hiện có.
+
+Mở ứng dụng bằng:
+
+```powershell
+py run.py
+```
+
+Hoặc nhấp đúp `start.bat`. Không cần tự activate môi trường hoặc cài thư viện bằng pip. `run.py` chỉ sử dụng Python trong `.venv`, không cài dependency khi khởi chạy. Ứng dụng chỉ cho phép một cửa sổ chạy cùng lúc.
 
 ## Tạo dự án
 
@@ -77,7 +77,7 @@ stt,ten_video,url
 
 ```text
 app/
-├── core/                 # Validator và exception nghiệp vụ
+├── core/                 # Validator, exception, khóa một instance
 ├── database/             # Kết nối SQLite và migration
 ├── models/               # Project, Video
 ├── services/             # Project, CSV, video services
@@ -88,6 +88,9 @@ app/
     ├── main_window.py
     └── styles.qss
 main.py                   # Entry point
+install.py                # Tạo .venv và cài dependencies
+run.py                    # Khởi chạy bằng Python trong .venv
+start.bat                 # Launcher Windows không hiện console khi chạy bình thường
 ```
 
 CSV parser nằm trong service thuần Python và không import PySide6. UI gọi services, còn câu lệnh SQL và transaction nằm trong database layer.
@@ -105,16 +108,22 @@ Không xóa hoặc sửa file database khi ứng dụng đang chạy. Repository
 ## Chạy test
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
 $env:QT_QPA_PLATFORM = "offscreen"
-python -m unittest -v
+py -m unittest -v
 ```
 
-Test dùng SQLite thực trên file tạm, bao gồm parser, transaction rollback, migration, cô lập dự án, import 1.000 dòng, UI preview/cancel/restart/export và model bảng.
+Test dùng SQLite thực trên file tạm, bao gồm parser, transaction rollback, migration, cô lập dự án, import 1.000 dòng, UI preview/cancel/restart/export, model bảng và cài đặt/khởi chạy trong thư mục tạm. Test launcher không cài gói ra Python global.
 
 ## Lỗi thường gặp
 
 - **Không có quyền ghi thư mục:** chọn thư mục cha mà tài khoản Windows có quyền tạo thư mục con.
+- **Không tìm thấy Python:** cài Python 3.11 trở lên và bật tùy chọn thêm Python vào `PATH`; mở lại PowerShell rồi kiểm tra `py --version`.
+- **Python sai phiên bản:** chạy installer bằng một Python 3.11 trở lên, ví dụ `py -3.11 install.py`. Installer không tự thay đổi interpreter hoặc xóa `.venv` hiện tại.
+- **Thiếu PySide6:** chạy lại `py install.py`; khi lỗi vẫn còn, xem thông báo pip để kiểm tra mạng, proxy hoặc quyền ghi.
+- **Tạo virtual environment thất bại:** kiểm tra quyền ghi repository, cài đặt Python đầy đủ (bao gồm `venv`/`ensurepip`), rồi thử lại. `.venv` hiện có sẽ không bị tự xóa.
+- **Cài dependency thất bại:** kiểm tra kết nối tới package index và thông báo lỗi `pip`; dùng `py install.py` để thử lại. Gói chỉ được cài vào `.venv`.
+- **Ứng dụng không khởi chạy:** chạy `py run.py` từ PowerShell để xem lỗi cụ thể; kiểm tra `.venv`, PySide6, quyền truy cập database và các migration được báo.
+- **Nhấp đúp start.bat báo thiếu môi trường:** chạy `py install.py`, sau đó nhấp đúp lại. Nếu lỗi startup khác, dùng `py run.py` để đọc chi tiết.
 - **Thư mục đã tồn tại:** chọn một đường dẫn mới; ứng dụng không tái sử dụng thư mục có thể chứa dữ liệu khác.
 - **CSV thiếu cột hoặc sai dòng:** dùng đủ `stt,ten_video,url`, sửa dòng được báo và import lại toàn bộ file.
 - **Không thể thay thế danh sách:** dự án có video đang tải/đã tải hoặc đang liên kết file; không xóa dữ liệu/file thủ công để vượt qua kiểm tra.

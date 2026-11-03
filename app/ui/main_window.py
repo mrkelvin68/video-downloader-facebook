@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.exceptions import ImportBlockedError, ImportConfirmationRequired
+from app.core.single_instance import acquire_single_instance
 from app.database.connection import Database
 from app.models.project import Project
 from app.services.csv_service import parse_video_csv, sample_video_csv
@@ -263,6 +264,16 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    if not acquire_single_instance():
+        from ctypes import windll
+
+        windll.user32.MessageBoxW(
+            None,
+            "Video Downloader đang chạy.",
+            "Video Downloader",
+            0x40,
+        )
+        return 0
     application = QApplication(sys.argv)
     style_path = Path(__file__).with_name("styles.qss")
     application.setStyleSheet(style_path.read_text(encoding="utf-8"))
