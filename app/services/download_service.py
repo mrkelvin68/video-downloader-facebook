@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 from app.database.connection import Database
+import imageio_ffmpeg
 
 
 class DownloadError(RuntimeError):
@@ -36,7 +37,9 @@ class DownloadService:
         try:
             with tempfile.TemporaryDirectory(prefix=".download-", dir=root) as work:
                 folder = Path(work)
+                ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
                 command = [
+                    "--ffmpeg-location", ffmpeg,
                     "yt-dlp", "--no-playlist", "--no-progress", "--no-overwrites",
                     "--write-thumbnail", "--convert-thumbnails", "jpg",
                     "-f", "bv*+ba/b", "--merge-output-format", "mp4",
