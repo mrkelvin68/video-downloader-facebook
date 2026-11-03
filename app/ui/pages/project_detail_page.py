@@ -23,6 +23,7 @@ class ProjectDetailPage(QWidget):
     sampleRequested = Signal()
     exportRequested = Signal()
     importRequested = Signal()
+    downloadRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -103,7 +104,15 @@ class ProjectDetailPage(QWidget):
         import_layout.addWidget(self.csv_errors)
         self.video_table = VideoTable(self)
         import_layout.addWidget(self.video_table, 1)
+        download_actions = QHBoxLayout()
+        self.download_button = QPushButton("Tải video chờ")
+        self.download_button.setObjectName("primary")
+        self.download_button.clicked.connect(self.downloadRequested.emit)
+        self.download_status = QLabel("Chưa tải")
+        download_actions.addWidget(self.download_button)
+        download_actions.addWidget(self.download_status, 1)
         layout.addWidget(import_box, 1)
+        layout.addLayout(download_actions)
 
     def set_project(self, project: Project) -> None:
         self.detail_title.setText(project.name)
