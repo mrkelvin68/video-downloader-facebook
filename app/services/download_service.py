@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -61,9 +60,10 @@ class DownloadService:
                     raise DownloadError("Không tìm thấy MP4 hợp lệ; kiểm tra FFmpeg và nguồn video")
                 thumb = folder / (video["video_code"] + ".jpg")
                 # Thumbnail có thể không khả dụng ở nguồn; không đánh đồng với video lỗi.
+                has_thumbnail = thumb.is_file()
                 os.replace(folder, target)
                 output = target / video_path.name
-                thumbnail = target / thumb.name if thumb.is_file() else None
+                thumbnail = target / thumb.name if has_thumbnail else None
                 self._set_status(video_id, "completed", str(output), str(thumbnail) if thumbnail else None)
                 return output, thumbnail
         except BaseException:
