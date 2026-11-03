@@ -109,7 +109,7 @@ Không xóa hoặc sửa file database khi ứng dụng đang chạy. Repository
 
 ```powershell
 $env:QT_QPA_PLATFORM = "offscreen"
-py -m unittest -v
+.\.venv\Scripts\python.exe -m unittest -v
 ```
 
 Test dùng SQLite thực trên file tạm, bao gồm parser, transaction rollback, migration, cô lập dự án, import 1.000 dòng, UI preview/cancel/restart/export, model bảng và cài đặt/khởi chạy trong thư mục tạm. Test launcher không cài gói ra Python global.
