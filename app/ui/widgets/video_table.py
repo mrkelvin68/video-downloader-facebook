@@ -50,8 +50,8 @@ class VideoTableModel(QAbstractTableModel):
             self._value(video, "video_code"),
             self._value(video, "title", self._value(video, "ten_video")),
             self._compact_url(str(self._value(video, "source_url", self._value(video, "url")))),
-            "Chờ tải",
-            "—",
+            {"pending": "Chờ tải", "waiting": "Chờ tải", "downloading": "Đang tải", "completed": "Đã tải", "failed": "Lỗi"}.get(str(self._value(video, "download_status", "pending")), "Không rõ"),
+            "100%" if self._value(video, "download_status") == "completed" else "—",
         )
         return str(values[column])
 
