@@ -1,0 +1,56 @@
+QWidget { background:#0d1526; color:#d7e0ef; font-family:"Segoe UI"; font-size:14px; }
+#sidebar { background:#09111f; border-right:1px solid #1d2b43; }
+#brand { color:#f8fafc; font-size:17px; font-weight:700; }
+#brandMark { background:#2563eb; border-radius:8px; padding:7px; }
+#navSection { color:#64748b; font-size:11px; font-weight:700; letter-spacing:0.8px; padding-left:10px; }
+#sidebar QPushButton { color:#9badc4; border:1px solid transparent; border-radius:8px; min-height:26px; padding:9px 10px; text-align:left; }
+#sidebar QPushButton:hover:enabled { background:#13223a; color:#f8fafc; }
+#sidebar QPushButton[active="true"] { background:#1d4ed8; color:#fff; font-weight:600; }
+#sidebar QPushButton:disabled { color:#63738c; }
+#sidebar QPushButton[comingSoon="true"]:disabled { border:1px solid #17263d; }
+#storageStatus { background:#101c30; border:1px solid #1d304b; border-radius:9px; color:#71829d; }
+#storageTitle { color:#34d399; font-weight:600; }
+#header { background:#101a2c; border-bottom:1px solid #1d2b43; }
+#breadcrumb { color:#91a4bf; }
+#phaseTag { background:#1e3a5f; border-radius:5px; color:#7dd3fc; font-size:11px; font-weight:700; padding:5px 8px; }
+#title { color:#f8fafc; font-size:27px; font-weight:700; }
+#detailMeta, #muted { color:#8ea1bb; }
+QPushButton { color:#c5d2e5; background:transparent; border:1px solid transparent; border-radius:7px; padding:9px 13px; }
+QPushButton:hover:enabled { background:#17263d; color:#fff; }
+QPushButton:focus { border:1px solid #60a5fa; }
+QPushButton#primary { background:#2563eb; border:1px solid #3b82f6; color:#fff; font-weight:600; }
+QPushButton#primary:hover { background:#1d4ed8; }
+QPushButton#secondary { background:#14223a; border:1px solid #2b4264; color:#c6d7ee; }
+QPushButton#secondary:hover { background:#1b3151; }
+QPushButton#back { color:#93c5fd; padding-left:0; }
+QScrollArea { background:transparent; }
+QScrollBar:vertical { background:#0d1526; width:9px; margin:4px; }
+QScrollBar::handle:vertical { background:#31445f; border-radius:4px; min-height:25px; }
+#card { background:#14223a; border:1px solid #263a58; border-radius:11px; }
+#card:hover { border:1px solid #3b82f6; background:#162741; }
+#cardTitle { color:#f8fafc; font-size:17px; font-weight:650; }
+#tag { background:#1d3c66; border-radius:5px; color:#93c5fd; font-weight:600; padding:4px 8px; }
+#status { color:#34d399; font-weight:600; }
+#path { color:#aabbd2; background:#101c30; border-radius:6px; padding:8px 10px; }
+#emptyState { background:#14223a; border:1px dashed #365170; border-radius:12px; }
+#emptyTitle { color:#f8fafc; font-size:18px; font-weight:650; }
+QDialog { background:#101b2e; }
+#dialogHeader { background:#14233b; border-bottom:1px solid #293e5d; }
+#dialogIcon { background:#1d4ed8; border-radius:8px; padding:8px; }
+#dialogTitle { color:#f8fafc; font-size:19px; font-weight:700; }
+#dialogSubtitle, #fieldHint { color:#8fa3bf; font-size:12px; }
+#dialogFooter { background:#14233b; border-top:1px solid #293e5d; }
+QFormLayout > QLabel { color:#dbe7f7; font-weight:600; }
+QLineEdit, QTextEdit { background:#0c1729; border:1px solid #304766; border-radius:7px; color:#f8fafc; padding:9px 10px; }
+QLineEdit:focus, QTextEdit:focus { border:1px solid #60a5fa; }
+#error { color:#fca5a5; background:#3a1f2a; border:1px solid #713342; border-radius:6px; padding:8px 10px; }
+#stepActive, #step { background:#14223a; border:1px solid #283e5e; border-radius:10px; min-height:88px; }
+#stepActive { border-color:#3b82f6; background:#163158; }
+#stepNumberActive, #stepNumber { background:#24354e; border-radius:14px; color:#9fb0c7; font-weight:700; min-width:28px; min-height:28px; max-width:28px; max-height:28px; }
+#stepNumberActive { background:#2563eb; color:#fff; }
+#stepText { color:#b8c8dd; font-weight:600; }
+#detailNotice { background:#13233a; border:1px solid #284365; border-radius:9px; color:#b8cae2; }
+#dropZone { border:2px dashed #304766; border-radius:8px; color:#8ea1bb; background:#0c1729; }
+#dropZone:hover { border-color:#3b82f6; color:#d7e0ef; }
+QTableView#videoTable { background:#0c1729; alternate-background-color:#101c30; border:1px solid #284365; color:#d7e0ef; gridline-color:#1c2d46; selection-background-color:#1d3c66; }
+QHeaderView::section { background:#14223a; color:#8ea1bb; border:1px solid #284365; padding:7px; }
