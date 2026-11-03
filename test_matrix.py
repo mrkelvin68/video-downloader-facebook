@@ -3,9 +3,12 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtGui import QColor, QImage
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QLineEdit, QPushButton
 
 from app.database.connection import Database
 from app.services.matrix_service import (
@@ -17,6 +20,7 @@ from app.services.matrix_service import (
 )
 from app.services.project_service import ProjectService
 from app.services.video_service import VideoService
+from app.services.download_queue_service import DownloadQueueService
 from app.ui.main_window import MainWindow
 from app.ui.dialogs.matrix_configuration_dialog import MatrixConfigurationDialog
 
@@ -162,6 +166,79 @@ class MatrixServiceTests(unittest.TestCase):
             self.service.list_project_videos(self.project_id)[0]["facebook_uploaded"],
             0,
         )
+
+    def test_video_code_title_and_thumbnail_can_be_updated_safely(self):
+        self.import_videos(2)
+        videos = self.videos.list_videos(self.project_id)
+        video = videos[0]
+        image_path = self.root / "custom-thumbnail.png"
+        image = QImage(240, 120, QImage.Format.Format_RGB32)
+        image.fill(QColor("#2563eb"))
+        self.assertTrue(image.save(str(image_path)))
+
+        self.videos.update_video_field(
+            self.project_id, video.id, "video_code", "edited-code"
+        )
+        self.videos.update_video_field(
+            self.project_id, video.id, "title", "Tên đã sửa"
+        )
+        self.videos.update_video_field(
+            self.project_id, video.id, "thumbnail_path", str(image_path)
+        )
+        saved = self.database.connection.execute(
+            """SELECT video_code, title, thumbnail_path FROM videos
+               WHERE id=? AND project_id=?""",
+            (video.id, self.project_id),
+        ).fetchone()
+        self.assertEqual(saved["video_code"], "edited-code")
+        self.assertEqual(saved["title"], "Tên đã sửa")
+        self.assertEqual(saved["thumbnail_path"], str(image_path))
+
+        with self.assertRaisesRegex(ValueError, "không hợp lệ"):
+            self.videos.update_video_field(
+                self.project_id, video.id, "video_code", "../outside"
+            )
+        with self.assertRaisesRegex(ValueError, "không được để trống"):
+            self.videos.update_video_field(
+                self.project_id, video.id, "title", "  "
+            )
+        with self.assertRaisesRegex(ValueError, "dự án này"):
+            self.videos.update_video_field(
+                self.other_project_id, video.id, "title", "Không đúng dự án"
+            )
+
+    def test_video_code_cannot_change_during_download_or_duplicate(self):
+        self.import_videos(2)
+        videos = self.videos.list_videos(self.project_id)
+        with self.assertRaisesRegex(ValueError, "đang tải"):
+            self.database.connection.execute(
+                "UPDATE videos SET download_status='downloading' WHERE id=?",
+                (videos[0].id,),
+            )
+            self.database.connection.commit()
+            self.videos.update_video_field(
+                self.project_id, videos[0].id, "video_code", "active-edit"
+            )
+
+        self.database.connection.execute(
+            "UPDATE videos SET download_status='pending' WHERE id=?",
+            (videos[0].id,),
+        )
+        self.database.connection.commit()
+        with self.assertRaisesRegex(ValueError, "đã được sử dụng"):
+            self.videos.update_video_field(
+                self.project_id,
+                videos[0].id,
+                "video_code",
+                videos[1].video_code,
+            )
+        DownloadQueueService(self.database).enqueue(
+            self.project_id, [videos[0].id]
+        )
+        with self.assertRaisesRegex(ValueError, "trong hàng đợi"):
+            self.videos.update_video_field(
+                self.project_id, videos[0].id, "video_code", "queued-edit"
+            )
 
     def test_no_repeat_and_repeat_between_pages_are_deterministic(self):
         self.import_videos(2)
@@ -572,20 +649,80 @@ class MatrixUiTests(unittest.TestCase):
         page = self.window.matrix_page
         page.video_table.selectRow(0)
         page._update_video_actions()
-        self.assertTrue(page.copy_video_path_button.isEnabled())
-        self.assertTrue(page.copy_video_title_button.isEnabled())
         self.assertEqual(
             page.video_table.video_model.data(
-                page.video_table.video_model.index(0, 7),
+                page.video_table.video_model.index(0, 9),
                 Qt.ItemDataRole.ToolTipRole,
             ),
             str(local_path),
         )
 
-        page.copy_video_path_button.click()
+        image_path = self.root / "small.png"
+        image = QImage(240, 120, QImage.Format.Format_RGB32)
+        image.fill(QColor("#2563eb"))
+        self.assertTrue(image.save(str(image_path)))
+        page.content_tabs.setCurrentWidget(page.video_list_view)
+        self.window.show()
+        self.application.processEvents()
+        image_action = page.video_table.video_model.index(0, 3)
+        page.video_table.scrollTo(image_action)
+        self.application.processEvents()
+        with patch(
+            "app.ui.main_window.QFileDialog.getOpenFileName",
+            return_value=(str(image_path), "PNG"),
+        ):
+            QTest.mouseClick(
+                page.video_table.viewport(),
+                Qt.MouseButton.LeftButton,
+                pos=page.video_table.visualRect(image_action).center(),
+            )
+        self.assertEqual(
+            self.database.list_videos(self.project_id)[0]["thumbnail_path"],
+            str(image_path),
+        )
+        thumbnail = page.video_table.video_model.data(
+            page.video_table.video_model.index(0, 2),
+            Qt.ItemDataRole.DecorationRole,
+        )
+        self.assertEqual((thumbnail.width(), thumbnail.height()), (160, 80))
+
+        path_action = page.video_table.video_model.index(0, 10)
+        page.video_table.scrollTo(path_action)
+        self.application.processEvents()
+        QTest.mouseClick(
+            page.video_table.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=page.video_table.visualRect(path_action).center(),
+        )
         self.assertEqual(self.application.clipboard().text(), str(local_path))
-        page.copy_video_title_button.click()
+        title_action = page.video_table.video_model.index(0, 5)
+        page.video_table.scrollTo(title_action)
+        self.application.processEvents()
+        QTest.mouseClick(
+            page.video_table.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=page.video_table.visualRect(title_action).center(),
+        )
         self.assertEqual(self.application.clipboard().text(), "Video 1")
+        self.assertTrue(
+            page.video_table.video_model.flags(
+                page.video_table.video_model.index(0, 1)
+            )
+            & Qt.ItemFlag.ItemIsEditable
+        )
+        self.assertTrue(
+            page.video_table.video_model.setData(
+                page.video_table.video_model.index(0, 1), "edited-1"
+            )
+        )
+        self.assertTrue(
+            page.video_table.video_model.setData(
+                page.video_table.video_model.index(0, 4), "Edited video title"
+            )
+        )
+        updated = self.database.list_videos(self.project_id)[0]
+        self.assertEqual(updated["video_code"], "edited-1")
+        self.assertEqual(updated["title"], "Edited video title")
 
         page.facebook_uploaded_button.click()
         self.assertEqual(
@@ -598,10 +735,50 @@ class MatrixUiTests(unittest.TestCase):
         )
         self.assertEqual(
             page.video_table.video_model.data(
-                page.video_table.video_model.index(0, 6)
+                page.video_table.video_model.index(0, 8)
             ),
             "Đã tải lên Facebook",
         )
+
+    def test_video_code_and_title_can_be_edited_from_the_table(self):
+        project = next(
+            project for project in self.projects.list_projects()
+            if project.uuid == self.project_id
+        )
+        self.window.show_matrices(project)
+        page = self.window.matrix_page
+        page.content_tabs.setCurrentWidget(page.video_list_view)
+        self.window.show()
+        self.application.processEvents()
+
+        for column, value, field in (
+            (1, "inline-code", "video_code"),
+            (4, "Inline title", "title"),
+        ):
+            index = page.video_table.video_model.index(0, column)
+            page.video_table.scrollTo(index)
+            self.application.processEvents()
+            click_position = page.video_table.visualRect(index).center()
+            QTest.mouseClick(
+                page.video_table.viewport(),
+                Qt.MouseButton.LeftButton,
+                pos=click_position,
+            )
+            QTest.mouseDClick(
+                page.video_table.viewport(),
+                Qt.MouseButton.LeftButton,
+                pos=click_position,
+            )
+            self.application.processEvents()
+            editor = page.video_table.findChild(QLineEdit)
+            self.assertIsNotNone(editor)
+            editor.selectAll()
+            QTest.keyClicks(editor, value)
+            QTest.keyClick(editor, Qt.Key.Key_Return)
+            self.application.processEvents()
+            self.assertEqual(
+                self.database.list_videos(self.project_id)[0][field], value
+            )
 
     def test_tabs_switch_between_matrices_in_the_same_project(self):
         second_id = self.service.create_matrix(

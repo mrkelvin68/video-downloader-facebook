@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import date, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QImageReader, QPainter, QPixmap
+from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QImageReader, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QHeaderView,
     QHBoxLayout,
@@ -15,6 +16,8 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QStyle,
     QStyledItemDelegate,
+    QStyleOptionButton,
+    QStyleOptionViewItem,
     QTabBar,
     QTabWidget,
     QTableView,
@@ -270,16 +273,28 @@ class MatrixCellDelegate(QStyledItemDelegate):
 
 
 class ProjectVideoListModel(QAbstractTableModel):
+    editRequested = Signal(str, str, object)
+    actionRequested = Signal(int, int)
     HEADERS = (
         "STT",
         "Mã video",
         "Ảnh",
+        "Chọn ảnh",
         "Tên video",
+        "Copy title",
         "Link Facebook",
         "Trạng thái tải",
         "Tải lên Facebook",
         "Tệp MP4",
+        "Copy đường dẫn",
     )
+    CODE_COLUMN = 1
+    THUMBNAIL_COLUMN = 2
+    CHOOSE_THUMBNAIL_COLUMN = 3
+    TITLE_COLUMN = 4
+    COPY_TITLE_COLUMN = 5
+    COPY_PATH_COLUMN = 10
+    EDITABLE_FIELDS = {CODE_COLUMN: "video_code", TITLE_COLUMN: "title"}
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -308,26 +323,53 @@ class ProjectVideoListModel(QAbstractTableModel):
         video = self.videos[index.row()]
         column = index.column()
         if role == Qt.ItemDataRole.ToolTipRole:
-            if column == 4:
+            if column == 6:
                 return video.get("source_url", "")
-            if column == 7:
+            if column == 9:
                 return video.get("local_video_path", "") or "Chưa tải"
-        if column == 2 and role == Qt.ItemDataRole.DecorationRole:
+            if column == self.THUMBNAIL_COLUMN:
+                return "Ảnh thu nhỏ. Nhấn “Chọn ảnh” để thay đổi."
+            if column == self.CHOOSE_THUMBNAIL_COLUMN:
+                return "Chọn hoặc thay ảnh thumbnail."
+            if column == self.COPY_TITLE_COLUMN:
+                return "Sao chép tên video."
+            if column == self.COPY_PATH_COLUMN:
+                return "Sao chép đường dẫn MP4."
+            if column in (self.CODE_COLUMN, self.TITLE_COLUMN):
+                return "Nhấp đúp để chỉnh sửa."
+        if column == self.THUMBNAIL_COLUMN and role == Qt.ItemDataRole.DecorationRole:
             path = video.get("thumbnail_path")
             if not path or not Path(path).is_file():
                 return None
             if path not in self._thumbnails:
                 reader = QImageReader(path)
-                reader.setScaledSize(QSize(104, 72))
-                self._thumbnails[path] = QPixmap.fromImage(reader.read())
+                image_size = reader.size()
+                if image_size.isValid():
+                    reader.setScaledSize(
+                        image_size.scaled(
+                            QSize(160, 100), Qt.AspectRatioMode.KeepAspectRatio
+                        )
+                    )
+                image = reader.read()
+                self._thumbnails[path] = QPixmap.fromImage(image)
             return self._thumbnails[path]
+        if role == Qt.ItemDataRole.EditRole:
+            field = self.EDITABLE_FIELDS.get(column)
+            return video.get(field, "") if field else None
+        if role == Qt.ItemDataRole.UserRole:
+            if column == self.COPY_TITLE_COLUMN:
+                return bool(video.get("title"))
+            if column == self.COPY_PATH_COLUMN:
+                return bool(video.get("local_video_path"))
         if role != Qt.ItemDataRole.DisplayRole:
             return None
         values = (
             video.get("sequence_number", ""),
             video.get("video_code", ""),
             "",
+            "Chọn",
             video.get("title", ""),
+            "Copy",
             video.get("source_url", ""),
             {
                 "completed": "Đã tải",
@@ -342,31 +384,180 @@ class ProjectVideoListModel(QAbstractTableModel):
             if video.get("facebook_uploaded")
             else "Chưa đăng",
             video.get("local_video_path") or "Chưa có file",
+            "Copy",
         )
         return str(values[column])
+
+    def flags(self, index: QModelIndex) -> Qt.ItemFlag:
+        flags = super().flags(index)
+        if index.isValid() and index.column() in self.EDITABLE_FIELDS:
+            flags |= Qt.ItemFlag.ItemIsEditable
+        return flags
+
+    def setData(
+        self,
+        index: QModelIndex,
+        value: object,
+        role: int = Qt.ItemDataRole.EditRole,
+    ) -> bool:
+        if not index.isValid() or role != Qt.ItemDataRole.EditRole:
+            return False
+        field = self.EDITABLE_FIELDS.get(index.column())
+        if field is None:
+            return False
+        text = str(value).strip()
+        if not text:
+            return False
+        video = self.videos[index.row()]
+        if text == video.get(field):
+            return True
+        video[field] = text
+        self.dataChanged.emit(index, index, [Qt.ItemDataRole.DisplayRole])
+        self.editRequested.emit(video["id"], field, text)
+        return True
+
+    def trigger_action(self, row: int, column: int) -> None:
+        self.actionRequested.emit(row, column)
 
     def set_videos(self, videos: list[dict]) -> None:
         self.beginResetModel()
         self.videos = list(videos)
+        self._thumbnails.clear()
         self.endResetModel()
 
 
+class ProjectVideoCellDelegate(QStyledItemDelegate):
+    actionTriggered = Signal(int, int)
+
+    def paint(self, painter: QPainter, option, index: QModelIndex) -> None:
+        column = index.column()
+        if column == ProjectVideoListModel.THUMBNAIL_COLUMN:
+            item_option = QStyleOptionViewItem(option)
+            self.initStyleOption(item_option, index)
+            pixmap = index.data(Qt.ItemDataRole.DecorationRole)
+            item_option.text = ""
+            item_option.icon = QIcon()
+            widget = item_option.widget
+            if widget is not None:
+                widget.style().drawControl(
+                    QStyle.ControlElement.CE_ItemViewItem,
+                    item_option,
+                    painter,
+                    widget,
+                )
+            if pixmap is not None and not pixmap.isNull():
+                image_rect = option.rect.adjusted(5, 5, -5, -5)
+                scaled = pixmap.scaled(
+                    image_rect.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                target = scaled.rect()
+                target.moveCenter(image_rect.center())
+                painter.drawPixmap(target, scaled)
+            else:
+                placeholder = option.rect.adjusted(7, 7, -7, -7)
+                painter.save()
+                painter.setPen(QColor("#71829d"))
+                painter.drawText(
+                    placeholder,
+                    Qt.AlignmentFlag.AlignCenter,
+                    "Chưa có ảnh",
+                )
+                painter.restore()
+            return
+        if column not in (
+            ProjectVideoListModel.CHOOSE_THUMBNAIL_COLUMN,
+            ProjectVideoListModel.COPY_TITLE_COLUMN,
+            ProjectVideoListModel.COPY_PATH_COLUMN,
+        ):
+            super().paint(painter, option, index)
+            return
+
+        item_option = QStyleOptionViewItem(option)
+        self.initStyleOption(item_option, index)
+        item_option.text = ""
+        item_option.icon = QIcon()
+        widget = item_option.widget
+        if widget is not None:
+            widget.style().drawControl(
+                QStyle.ControlElement.CE_ItemViewItem,
+                item_option,
+                painter,
+                widget,
+            )
+        button = QStyleOptionButton()
+        button.rect = option.rect.adjusted(7, 29, -7, -29)
+        button.text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        button.state = QStyle.StateFlag.State_Raised
+        enabled = bool(index.flags() & Qt.ItemFlag.ItemIsEnabled)
+        if column in (
+            ProjectVideoListModel.COPY_TITLE_COLUMN,
+            ProjectVideoListModel.COPY_PATH_COLUMN,
+        ) and not index.data(Qt.ItemDataRole.UserRole):
+            enabled = False
+        if enabled:
+            button.state |= QStyle.StateFlag.State_Enabled
+        if option.state & QStyle.StateFlag.State_MouseOver:
+            button.state |= QStyle.StateFlag.State_MouseOver
+        if option.state & QStyle.StateFlag.State_Selected:
+            button.state |= QStyle.StateFlag.State_On
+        if widget is not None:
+            widget.style().drawControl(
+                QStyle.ControlElement.CE_PushButton, button, painter, widget
+            )
+
+    def editorEvent(self, event, model, option, index: QModelIndex) -> bool:
+        if (
+            event.type() == QEvent.Type.MouseButtonRelease
+            and event.button() == Qt.MouseButton.LeftButton
+            and option.rect.contains(event.position().toPoint())
+        ):
+            column = index.column()
+            if column in (
+                ProjectVideoListModel.CHOOSE_THUMBNAIL_COLUMN,
+                ProjectVideoListModel.COPY_TITLE_COLUMN,
+                ProjectVideoListModel.COPY_PATH_COLUMN,
+            ):
+                if (
+                    column == ProjectVideoListModel.CHOOSE_THUMBNAIL_COLUMN
+                    or index.data(Qt.ItemDataRole.UserRole)
+                ):
+                    self.actionTriggered.emit(index.row(), column)
+                return True
+        return super().editorEvent(event, model, option, index)
+
+
 class ProjectVideoListTable(QTableView):
+    actionRequested = Signal(int, int)
+    editRequested = Signal(str, str, object)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("projectVideoListTable")
         self.video_model = ProjectVideoListModel(self)
         self.setModel(self.video_model)
+        self.cell_delegate = ProjectVideoCellDelegate(self)
+        self.setItemDelegate(self.cell_delegate)
+        self.cell_delegate.actionTriggered.connect(self.video_model.trigger_action)
+        self.video_model.actionRequested.connect(self.actionRequested)
+        self.video_model.editRequested.connect(self.editRequested)
         self.setAlternatingRowColors(True)
         self.setWordWrap(False)
         self.verticalHeader().hide()
-        self.verticalHeader().setDefaultSectionSize(82)
+        self.verticalHeader().setDefaultSectionSize(92)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.horizontalHeader().setStretchLastSection(False)
-        for column, width in enumerate((58, 112, 90, 220, 280, 112, 135, 260)):
+        for column, width in enumerate(
+            (58, 140, 126, 92, 240, 94, 280, 112, 145, 270, 120)
+        ):
             self.setColumnWidth(column, width)
         self.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
         self.setSelectionMode(QTableView.SelectionMode.SingleSelection)
+        self.setEditTriggers(
+            QTableView.EditTrigger.DoubleClicked | QTableView.EditTrigger.EditKeyPressed
+        )
+        self.setMouseTracking(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setMinimumHeight(260)
@@ -407,6 +598,8 @@ class MatrixPage(QWidget):
     editEntryRequested = Signal(object)
     publishStatusRequested = Signal(object, bool)
     facebookUploadStatusRequested = Signal(str, bool)
+    videoEditRequested = Signal(str, str, object)
+    videoImageRequested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -568,28 +761,23 @@ class MatrixPage(QWidget):
         video_actions = QHBoxLayout()
         video_actions.addWidget(self.video_count_label)
         video_actions.addStretch()
-        self.copy_video_path_button = QPushButton("Copy đường dẫn")
-        self.copy_video_path_button.setObjectName("secondary")
-        self.copy_video_path_button.setEnabled(False)
-        self.copy_video_path_button.clicked.connect(self._copy_selected_video_path)
-        self.copy_video_title_button = QPushButton("Copy title")
-        self.copy_video_title_button.setObjectName("secondary")
-        self.copy_video_title_button.setEnabled(False)
-        self.copy_video_title_button.clicked.connect(self._copy_selected_video_title)
+        edit_hint = QLabel("Nhấp đúp mã/tên để sửa · Ảnh, copy nằm ngay cạnh video")
+        edit_hint.setObjectName("detailMeta")
+        video_actions.addWidget(edit_hint)
         self.facebook_uploaded_button = QPushButton("Đánh dấu đã tải lên Facebook")
         self.facebook_uploaded_button.setObjectName("primary")
         self.facebook_uploaded_button.setEnabled(False)
         self.facebook_uploaded_button.clicked.connect(
             self._toggle_selected_facebook_uploaded
         )
-        video_actions.addWidget(self.copy_video_path_button)
-        video_actions.addWidget(self.copy_video_title_button)
         video_actions.addWidget(self.facebook_uploaded_button)
         video_layout.addLayout(video_actions)
         self.video_table = ProjectVideoListTable(self.video_list_view)
         self.video_table.selectionModel().currentChanged.connect(
             lambda *_: self._update_video_actions()
         )
+        self.video_table.actionRequested.connect(self._handle_video_action)
+        self.video_table.editRequested.connect(self.videoEditRequested)
         video_layout.addWidget(self.video_table, 1)
         self.content_tabs.addTab(self.video_list_view, "Video theo dự án")
         layout.addWidget(self.content_tabs, 1)
@@ -772,12 +960,6 @@ class MatrixPage(QWidget):
 
     def _update_video_actions(self) -> None:
         video = self.video_table.selected_video()
-        self.copy_video_path_button.setEnabled(
-            video is not None and bool(video.get("local_video_path"))
-        )
-        self.copy_video_title_button.setEnabled(
-            video is not None and bool(video.get("title"))
-        )
         self.facebook_uploaded_button.setEnabled(video is not None)
         if video is not None:
             self.facebook_uploaded_button.setText(
@@ -786,19 +968,21 @@ class MatrixPage(QWidget):
                 else "Đánh dấu đã tải lên Facebook"
             )
 
-    def _copy_selected_video_path(self) -> None:
-        video = self.video_table.selected_video()
-        if video is not None and video.get("local_video_path"):
-            from PySide6.QtWidgets import QApplication
-
-            QApplication.clipboard().setText(video["local_video_path"])
-
-    def _copy_selected_video_title(self) -> None:
-        video = self.video_table.selected_video()
-        if video is not None and video.get("title"):
-            from PySide6.QtWidgets import QApplication
-
-            QApplication.clipboard().setText(video["title"])
+    def _handle_video_action(self, row: int, column: int) -> None:
+        if not 0 <= row < len(self.video_table.video_model.videos):
+            return
+        video = self.video_table.video_model.videos[row]
+        self.video_table.setCurrentIndex(
+            self.video_table.video_model.index(row, column)
+        )
+        if column == ProjectVideoListModel.CHOOSE_THUMBNAIL_COLUMN:
+            self.videoImageRequested.emit(video["id"])
+        elif column == ProjectVideoListModel.COPY_TITLE_COLUMN:
+            if video.get("title"):
+                QApplication.clipboard().setText(video["title"])
+        elif column == ProjectVideoListModel.COPY_PATH_COLUMN:
+            if video.get("local_video_path"):
+                QApplication.clipboard().setText(video["local_video_path"])
 
     def _toggle_selected_facebook_uploaded(self) -> None:
         video = self.video_table.selected_video()

@@ -1,6 +1,7 @@
 import sqlite3
+from pathlib import Path
 
-from app.core.validators import normalize_video_url
+from app.core.validators import normalize_video_url, validate_windows_name
 from app.database.connection import Database
 from app.models.video import Video
 from app.services.csv_service import (
@@ -45,3 +46,32 @@ class VideoService:
         if not isinstance(uploaded, bool):
             raise ValueError("Trạng thái Facebook không hợp lệ.")
         self.database.set_video_facebook_uploaded(project_id, video_id, uploaded)
+
+    def update_video_field(
+        self, project_id: str, video_id: str, field: str, value: object
+    ) -> None:
+        if field == "video_code":
+            if not isinstance(value, str):
+                raise ValueError("Mã video không hợp lệ.")
+            value = validate_windows_name(value, "Mã video")
+        elif field == "title":
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("Tên video không được để trống.")
+            value = value.strip()
+        elif field == "thumbnail_path":
+            if (
+                not isinstance(value, str)
+                or not value
+                or not Path(value).is_file()
+            ):
+                raise ValueError("Không tìm thấy tệp ảnh đã chọn.")
+        else:
+            raise ValueError("Trường video không hợp lệ.")
+        try:
+            self.database.update_video_field(
+                project_id, video_id, field, value
+            )
+        except sqlite3.IntegrityError as exc:
+            if field == "video_code":
+                raise ValueError("Mã video đã được sử dụng trong dự án.") from exc
+            raise

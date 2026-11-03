@@ -191,5 +191,51 @@ class Database:
             if cursor.rowcount != 1:
                 raise ValueError("Video không tồn tại trong dự án này.")
 
+    def update_video_field(
+        self, project_id: str, video_id: str, field: str, value: str
+    ) -> None:
+        columns = {
+            "video_code": "video_code",
+            "title": "title",
+            "thumbnail_path": "thumbnail_path",
+        }
+        column = columns.get(field)
+        if column is None:
+            raise ValueError("Trường video không hợp lệ.")
+        with self.connection:
+            video = self.connection.execute(
+                """SELECT download_status FROM videos
+                   WHERE id=? AND project_id=?""",
+                (video_id, project_id),
+            ).fetchone()
+            if video is None:
+                raise ValueError("Video không tồn tại trong dự án này.")
+            if field in ("video_code", "thumbnail_path"):
+                active_job = self.connection.execute(
+                    """SELECT 1 FROM download_jobs
+                       WHERE video_id=? AND status IN ('queued', 'downloading')
+                       LIMIT 1""",
+                    (video_id,),
+                ).fetchone()
+                if (
+                    active_job is not None
+                    or video["download_status"] == "downloading"
+                ):
+                    raise ValueError(
+                        "Không thể sửa mã hoặc ảnh khi video đang tải hoặc trong hàng đợi."
+                    )
+            cursor = self.connection.execute(
+                f"""UPDATE videos SET {column}=?, updated_at=?
+                    WHERE id=? AND project_id=?""",
+                (
+                    value,
+                    datetime.now(UTC).isoformat(timespec="seconds"),
+                    video_id,
+                    project_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Video không tồn tại trong dự án này.")
+
     def close(self) -> None:
         self.connection.close()

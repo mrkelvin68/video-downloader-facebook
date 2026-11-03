@@ -5,6 +5,7 @@ from datetime import date
 from pathlib import Path
 
 from PySide6.QtCore import QTimer
+from PySide6.QtGui import QImageReader
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -131,6 +132,10 @@ class MainWindow(QMainWindow):
         self.matrix_page.publishStatusRequested.connect(self._set_matrix_status)
         self.matrix_page.facebookUploadStatusRequested.connect(
             self._set_video_facebook_uploaded
+        )
+        self.matrix_page.videoEditRequested.connect(self._update_project_video_field)
+        self.matrix_page.videoImageRequested.connect(
+            self._choose_project_video_thumbnail
         )
         self.refresh_queue()
         self.refresh()
@@ -421,6 +426,39 @@ class MainWindow(QMainWindow):
             )
             return
         self._refresh_matrices(self.current_matrix_id)
+
+    def _update_project_video_field(
+        self, video_id: str, field: str, value: object
+    ) -> None:
+        if self.current_project is None:
+            return
+        try:
+            self.videos.update_video_field(
+                self.current_project.uuid, video_id, field, value
+            )
+        except (ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "Không thể cập nhật video", str(exc))
+        finally:
+            self._refresh_matrices(self.current_matrix_id)
+
+    def _choose_project_video_thumbnail(self, video_id: str) -> None:
+        if self.current_project is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Chọn ảnh thumbnail",
+            "",
+            "Tệp ảnh (*.png *.jpg *.jpeg *.webp *.bmp *.gif)",
+        )
+        if not path:
+            return
+        reader = QImageReader(path)
+        if not reader.canRead():
+            QMessageBox.warning(
+                self, "Ảnh thumbnail không hợp lệ", reader.errorString()
+            )
+            return
+        self._update_project_video_field(video_id, "thumbnail_path", path)
 
     def _export_matrix(self) -> None:
         if self.current_project is None or self.current_matrix_id is None:

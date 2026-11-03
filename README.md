@@ -13,7 +13,7 @@
 - Xuất CSV từ dữ liệu SQLite của dự án đang mở, với cột `title` có thể nhập lại cùng `stt` và `url`.
 - Tải đơn lẻ từng video Facebook (Phase 3.1): tải video chất lượng cao nhất bằng yt-dlp, gom file MP4 và thumbnail vào thư mục riêng theo prefix, kiểm tra hợp lệ bằng FFprobe và cập nhật SQLite.
 - Hàng đợi tuần tự Phase 3.2 với **Chạy ngay**, **Thêm vào hàng đợi**, ưu tiên job, tạm dừng sau video hiện tại, tiếp tục và retry. Tiến độ/tốc độ lấy từ yt-dlp; job lưu trong SQLite và được phục hồi an toàn sau restart.
-- Ma trận lịch đăng local (Phase 4.1): tạo nhiều lịch cho từng dự án, cấu hình Page/khung giờ/ngày, phân bổ video theo quy tắc, sửa video/caption từng ô, đánh dấu trạng thái và xuất CSV UTF-8 BOM. Tab video có thao tác copy đường dẫn MP4/title và trạng thái “Đã tải lên Facebook” do người dùng tự cập nhật, lưu cục bộ. Màn hình có tab lịch đăng và danh sách video riêng của dự án đang mở; CSV lịch có cột `Title`. Không kết nối Facebook/Google Sheets API hoặc tự động đăng.
+- Ma trận lịch đăng local (Phase 4.1): tạo nhiều lịch cho từng dự án, cấu hình Page/khung giờ/ngày, phân bổ video theo quy tắc, sửa video/caption từng ô, đánh dấu trạng thái và xuất CSV UTF-8 BOM. Tab video có nút copy title/MP4 ngay trên từng dòng, cho sửa mã/tên và chọn thumbnail; trạng thái “Đã tải lên Facebook” do người dùng tự cập nhật, lưu cục bộ. Màn hình có tab lịch đăng và danh sách video riêng của dự án đang mở; CSV lịch có cột `Title`. Không kết nối Facebook/Google Sheets API hoặc tự động đăng.
 
 ## Chức năng chưa triển khai
 
@@ -69,7 +69,7 @@ Hoặc nhấp đúp `start.bat`. Không cần tự activate môi trường hoặ
 3. Chọn một đường dẫn tuyệt đối cho thư mục lưu video. Thư mục đích phải chưa tồn tại để tránh ghi đè.
 4. Lưu dự án. Ứng dụng tự tạo thư mục đích và lưu thông tin trong SQLite.
 
-Mã video được tạo theo `{prefix}-{stt}`, ví dụ `ep1-6-1`. Khi dự án đã có video, ứng dụng từ chối đổi prefix hoặc thư mục output để tránh làm sai mã và liên kết dữ liệu.
+Mã video được tạo theo `{prefix}-{stt}`, ví dụ `ep1-6-1`. Trong tab **Video theo dự án** của Ma trận, nhấp đúp mã hoặc tên để sửa; mã phải hợp lệ và không trùng trong dự án. Không thể sửa mã khi video đang tải hoặc nằm trong hàng đợi. Khi dự án đã có video, ứng dụng từ chối đổi prefix hoặc thư mục output để tránh làm sai mã và liên kết dữ liệu.
 
 ## Định dạng CSV
 
