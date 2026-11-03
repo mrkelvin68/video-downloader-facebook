@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QPushButton
 
 from app.database.connection import Database
@@ -135,6 +136,32 @@ class MatrixServiceTests(unittest.TestCase):
         )
         entry = self.service.list_entries(matrix_id, self.project_id)[0]
         self.assertEqual(entry["video_id"], videos[1]["id"])
+
+    def test_facebook_uploaded_status_persists_and_is_project_scoped(self):
+        self.import_videos(1)
+        video = self.service.list_project_videos(self.project_id)[0]
+        self.assertFalse(self.videos.list_videos(self.project_id)[0].facebook_uploaded)
+        self.videos.set_facebook_uploaded(self.project_id, video["id"], True)
+        self.assertTrue(self.videos.list_videos(self.project_id)[0].facebook_uploaded)
+        refreshed = self.service.list_project_videos(self.project_id)[0]
+        self.assertEqual(refreshed["facebook_uploaded"], 1)
+
+        with self.assertRaisesRegex(ValueError, "dự án này"):
+            self.videos.set_facebook_uploaded(
+                self.other_project_id, video["id"], False
+            )
+
+        self.database.close()
+        self.database = Database(self.database_path)
+        self.service = MatrixService(self.database)
+        self.videos = VideoService(self.database)
+        persisted = self.service.list_project_videos(self.project_id)[0]
+        self.assertEqual(persisted["facebook_uploaded"], 1)
+        self.videos.set_facebook_uploaded(self.project_id, video["id"], False)
+        self.assertEqual(
+            self.service.list_project_videos(self.project_id)[0]["facebook_uploaded"],
+            0,
+        )
 
     def test_no_repeat_and_repeat_between_pages_are_deterministic(self):
         self.import_videos(2)
@@ -426,11 +453,12 @@ class MatrixServiceTests(unittest.TestCase):
         self.assertEqual(
             list(rows[0]),
             [
-                "Ngày", "Giờ", "Tên Page", "Mã video", "Tên video",
+                "Ngày", "Giờ", "Tên Page", "Mã video", "Title",
                 "Đường dẫn video", "Thumbnail", "Caption", "Trạng thái",
             ],
         )
         self.assertEqual(rows[0]["Mã video"], "matrix-1")
+        self.assertEqual(rows[0]["Title"], "Video 1")
         self.assertEqual(rows[0]["Đường dẫn video"], str(video_path))
         self.assertEqual(rows[0]["Thumbnail"], str(thumbnail_path))
         self.assertEqual(rows[0]["Caption"], "CSV caption")
@@ -523,6 +551,56 @@ class MatrixUiTests(unittest.TestCase):
         self.assertEqual(
             page.video_table.video_model.data(page.video_table.video_model.index(0, 1)),
             "other-1",
+        )
+
+    def test_video_actions_copy_path_and_title_and_toggle_facebook_status(self):
+        project = next(
+            project
+            for project in self.projects.list_projects()
+            if project.uuid == self.project_id
+        )
+        video = self.service.list_project_videos(self.project_id)[0]
+        local_path = self.root / "video-1.mp4"
+        local_path.write_bytes(b"synthetic test media")
+        self.database.connection.execute(
+            "UPDATE videos SET local_video_path=? WHERE id=?",
+            (str(local_path), video["id"]),
+        )
+        self.database.connection.commit()
+
+        self.window.show_matrices(project)
+        page = self.window.matrix_page
+        page.video_table.selectRow(0)
+        page._update_video_actions()
+        self.assertTrue(page.copy_video_path_button.isEnabled())
+        self.assertTrue(page.copy_video_title_button.isEnabled())
+        self.assertEqual(
+            page.video_table.video_model.data(
+                page.video_table.video_model.index(0, 7),
+                Qt.ItemDataRole.ToolTipRole,
+            ),
+            str(local_path),
+        )
+
+        page.copy_video_path_button.click()
+        self.assertEqual(self.application.clipboard().text(), str(local_path))
+        page.copy_video_title_button.click()
+        self.assertEqual(self.application.clipboard().text(), "Video 1")
+
+        page.facebook_uploaded_button.click()
+        self.assertEqual(
+            self.service.list_project_videos(self.project_id)[0]["facebook_uploaded"],
+            1,
+        )
+        self.assertEqual(
+            page.facebook_uploaded_button.text(),
+            "Đánh dấu chưa tải lên Facebook",
+        )
+        self.assertEqual(
+            page.video_table.video_model.data(
+                page.video_table.video_model.index(0, 6)
+            ),
+            "Đã tải lên Facebook",
         )
 
     def test_tabs_switch_between_matrices_in_the_same_project(self):

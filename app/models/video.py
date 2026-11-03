@@ -15,6 +15,7 @@ class Video:
     download_status: str
     local_video_path: str | None
     thumbnail_path: str | None
+    facebook_uploaded: bool
     created_at: str
     updated_at: str
 
@@ -24,7 +25,7 @@ class Video:
     ) -> "Video":
         return cls(
             **{
-                key: row[key]
+                key: bool(row[key]) if key == "facebook_uploaded" else row[key]
                 for key in cls.__dataclass_fields__
             }
         )

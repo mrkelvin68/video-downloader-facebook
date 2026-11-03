@@ -139,7 +139,7 @@ class MatrixScheduleModel(QAbstractTableModel):
             or self.rows[index.row()][0] != "slot"
         ):
             return None
-        row_type, scheduled_date, scheduled_time = self.rows[index.row()]
+        _, scheduled_date, scheduled_time = self.rows[index.row()]
         page = self.pages[(index.column() - 1) // 3]
         return self.entries.get((page["page_id"], scheduled_date, scheduled_time))
 
@@ -250,9 +250,6 @@ class MatrixCellDelegate(QStyledItemDelegate):
             )
         painter.restore()
 
-    def sizeHint(self, option, index: QModelIndex) -> QSize:
-        return QSize(105, 92)
-
     def _thumbnail(self, path: str | None) -> QPixmap:
         if not path or not Path(path).is_file():
             return QPixmap()
@@ -280,6 +277,7 @@ class ProjectVideoListModel(QAbstractTableModel):
         "Tên video",
         "Link Facebook",
         "Trạng thái tải",
+        "Tải lên Facebook",
         "Tệp MP4",
     )
 
@@ -312,7 +310,7 @@ class ProjectVideoListModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.ToolTipRole:
             if column == 4:
                 return video.get("source_url", "")
-            if column == 6:
+            if column == 7:
                 return video.get("local_video_path", "") or "Chưa tải"
         if column == 2 and role == Qt.ItemDataRole.DecorationRole:
             path = video.get("thumbnail_path")
@@ -340,6 +338,9 @@ class ProjectVideoListModel(QAbstractTableModel):
                 "interrupted": "Bị gián đoạn",
                 "cancelled": "Đã hủy",
             }.get(video.get("download_status"), "Chờ tải"),
+            "Đã tải lên Facebook"
+            if video.get("facebook_uploaded")
+            else "Chưa đăng",
             video.get("local_video_path") or "Chưa có file",
         )
         return str(values[column])
@@ -362,14 +363,35 @@ class ProjectVideoListTable(QTableView):
         self.verticalHeader().setDefaultSectionSize(82)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.horizontalHeader().setStretchLastSection(False)
-        for column, width in enumerate((58, 112, 90, 220, 280, 112, 260)):
+        for column, width in enumerate((58, 112, 90, 220, 280, 112, 135, 260)):
             self.setColumnWidth(column, width)
+        self.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QTableView.SelectionMode.SingleSelection)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setMinimumHeight(260)
 
     def set_videos(self, videos: list[dict]) -> None:
+        selected = self.selected_video()
+        selected_id = selected["id"] if selected is not None else None
         self.video_model.set_videos(videos)
+        if selected_id is not None:
+            row = next(
+                (
+                    index
+                    for index, video in enumerate(self.video_model.videos)
+                    if video["id"] == selected_id
+                ),
+                -1,
+            )
+            if row >= 0:
+                self.setCurrentIndex(self.video_model.index(row, 0))
+
+    def selected_video(self) -> dict | None:
+        row = self.currentIndex().row()
+        if 0 <= row < len(self.video_model.videos):
+            return self.video_model.videos[row]
+        return None
 
 
 class MatrixPage(QWidget):
@@ -384,6 +406,7 @@ class MatrixPage(QWidget):
     deleteRequested = Signal()
     editEntryRequested = Signal(object)
     publishStatusRequested = Signal(object, bool)
+    facebookUploadStatusRequested = Signal(str, bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -542,8 +565,31 @@ class MatrixPage(QWidget):
         video_layout.setSpacing(10)
         self.video_count_label = QLabel("Video của dự án")
         self.video_count_label.setObjectName("detailMeta")
-        video_layout.addWidget(self.video_count_label)
+        video_actions = QHBoxLayout()
+        video_actions.addWidget(self.video_count_label)
+        video_actions.addStretch()
+        self.copy_video_path_button = QPushButton("Copy đường dẫn")
+        self.copy_video_path_button.setObjectName("secondary")
+        self.copy_video_path_button.setEnabled(False)
+        self.copy_video_path_button.clicked.connect(self._copy_selected_video_path)
+        self.copy_video_title_button = QPushButton("Copy title")
+        self.copy_video_title_button.setObjectName("secondary")
+        self.copy_video_title_button.setEnabled(False)
+        self.copy_video_title_button.clicked.connect(self._copy_selected_video_title)
+        self.facebook_uploaded_button = QPushButton("Đánh dấu đã tải lên Facebook")
+        self.facebook_uploaded_button.setObjectName("primary")
+        self.facebook_uploaded_button.setEnabled(False)
+        self.facebook_uploaded_button.clicked.connect(
+            self._toggle_selected_facebook_uploaded
+        )
+        video_actions.addWidget(self.copy_video_path_button)
+        video_actions.addWidget(self.copy_video_title_button)
+        video_actions.addWidget(self.facebook_uploaded_button)
+        video_layout.addLayout(video_actions)
         self.video_table = ProjectVideoListTable(self.video_list_view)
+        self.video_table.selectionModel().currentChanged.connect(
+            lambda *_: self._update_video_actions()
+        )
         video_layout.addWidget(self.video_table, 1)
         self.content_tabs.addTab(self.video_list_view, "Video theo dự án")
         layout.addWidget(self.content_tabs, 1)
@@ -574,6 +620,7 @@ class MatrixPage(QWidget):
         self.video_count_label.setText(
             f"{len(videos)} video trong dự án “{project.name}”"
         )
+        self._update_video_actions()
         self.project_title.setText(f"{project.name} · Ma trận lịch đăng")
         self._updating_tabs = True
         while self.tabs.count():
@@ -722,3 +769,40 @@ class MatrixPage(QWidget):
             from PySide6.QtWidgets import QApplication
 
             QApplication.clipboard().setText(entry.get("caption") or "")
+
+    def _update_video_actions(self) -> None:
+        video = self.video_table.selected_video()
+        self.copy_video_path_button.setEnabled(
+            video is not None and bool(video.get("local_video_path"))
+        )
+        self.copy_video_title_button.setEnabled(
+            video is not None and bool(video.get("title"))
+        )
+        self.facebook_uploaded_button.setEnabled(video is not None)
+        if video is not None:
+            self.facebook_uploaded_button.setText(
+                "Đánh dấu chưa tải lên Facebook"
+                if video.get("facebook_uploaded")
+                else "Đánh dấu đã tải lên Facebook"
+            )
+
+    def _copy_selected_video_path(self) -> None:
+        video = self.video_table.selected_video()
+        if video is not None and video.get("local_video_path"):
+            from PySide6.QtWidgets import QApplication
+
+            QApplication.clipboard().setText(video["local_video_path"])
+
+    def _copy_selected_video_title(self) -> None:
+        video = self.video_table.selected_video()
+        if video is not None and video.get("title"):
+            from PySide6.QtWidgets import QApplication
+
+            QApplication.clipboard().setText(video["title"])
+
+    def _toggle_selected_facebook_uploaded(self) -> None:
+        video = self.video_table.selected_video()
+        if video is not None:
+            self.facebookUploadStatusRequested.emit(
+                video["id"], not bool(video.get("facebook_uploaded"))
+            )

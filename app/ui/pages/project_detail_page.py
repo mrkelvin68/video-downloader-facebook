@@ -70,7 +70,7 @@ class ProjectDetailPage(QWidget):
         section_title.setObjectName("cardTitle")
         import_layout.addWidget(section_title)
         import_layout.addWidget(
-            QLabel("CSV gồm các cột stt, ten_video, url (có hỗ trợ sequence, title).")
+            QLabel("CSV gồm các cột stt, title, url (có hỗ trợ tên cũ ten_video).")
         )
         self.drop_zone = _DropZone()
         self.drop_zone.setObjectName("dropZone")

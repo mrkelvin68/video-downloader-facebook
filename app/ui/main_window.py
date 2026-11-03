@@ -129,6 +129,9 @@ class MainWindow(QMainWindow):
         self.matrix_page.deleteRequested.connect(self._delete_matrix)
         self.matrix_page.editEntryRequested.connect(self._edit_matrix_entry)
         self.matrix_page.publishStatusRequested.connect(self._set_matrix_status)
+        self.matrix_page.facebookUploadStatusRequested.connect(
+            self._set_video_facebook_uploaded
+        )
         self.refresh_queue()
         self.refresh()
 
@@ -402,6 +405,20 @@ class MainWindow(QMainWindow):
             )
         except (ValueError, sqlite3.Error) as exc:
             QMessageBox.warning(self, "Không thể cập nhật trạng thái", str(exc))
+            return
+        self._refresh_matrices(self.current_matrix_id)
+
+    def _set_video_facebook_uploaded(self, video_id: str, uploaded: bool) -> None:
+        if self.current_project is None:
+            return
+        try:
+            self.videos.set_facebook_uploaded(
+                self.current_project.uuid, video_id, uploaded
+            )
+        except (ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(
+                self, "Không thể cập nhật trạng thái Facebook", str(exc)
+            )
             return
         self._refresh_matrices(self.current_matrix_id)
 

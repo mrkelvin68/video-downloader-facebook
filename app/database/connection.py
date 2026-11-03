@@ -173,5 +173,23 @@ class Database:
             )
         )
 
+    def set_video_facebook_uploaded(
+        self, project_id: str, video_id: str, uploaded: bool
+    ) -> None:
+        with self.connection:
+            cursor = self.connection.execute(
+                """UPDATE videos
+                   SET facebook_uploaded=?, updated_at=?
+                   WHERE id=? AND project_id=?""",
+                (
+                    int(uploaded),
+                    datetime.now(UTC).isoformat(timespec="seconds"),
+                    video_id,
+                    project_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Video không tồn tại trong dự án này.")
+
     def close(self) -> None:
         self.connection.close()

@@ -7,7 +7,10 @@ def _create_videos_table(connection: sqlite3.Connection) -> None:
             id TEXT PRIMARY KEY, project_id TEXT NOT NULL, sequence_number INTEGER NOT NULL,
             video_code TEXT NOT NULL, title TEXT NOT NULL, source_url TEXT NOT NULL,
             normalized_url TEXT NOT NULL, download_status TEXT NOT NULL DEFAULT 'pending',
-            local_video_path TEXT, thumbnail_path TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            local_video_path TEXT, thumbnail_path TEXT,
+            facebook_uploaded INTEGER NOT NULL DEFAULT 0
+                CHECK(facebook_uploaded IN (0, 1)),
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
             FOREIGN KEY(project_id) REFERENCES projects(uuid) ON DELETE CASCADE,
             UNIQUE(project_id, sequence_number), UNIQUE(project_id, normalized_url),
             UNIQUE(project_id, video_code))"""
@@ -244,6 +247,14 @@ def migrate(connection: sqlite3.Connection) -> None:
                     "Migration videos không đầy đủ; dữ liệu cũ được giữ nguyên."
                 )
             connection.execute("DROP TABLE videos_legacy")
+        video_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(videos)")
+        }
+        if "facebook_uploaded" not in video_columns:
+            connection.execute(
+                """ALTER TABLE videos ADD COLUMN facebook_uploaded INTEGER
+                   NOT NULL DEFAULT 0 CHECK(facebook_uploaded IN (0, 1))"""
+            )
         _create_download_jobs_table(connection)
         _create_matrices_tables(connection)
         connection.commit()

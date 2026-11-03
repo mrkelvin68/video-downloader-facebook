@@ -98,7 +98,7 @@ class ProjectCsvUiTests(unittest.TestCase):
         ):
             restarted.export_csv()
         content = export_path.read_text(encoding="utf-8")
-        self.assertTrue(content.startswith("\ufeffstt,ten_video,url"))
+        self.assertTrue(content.startswith("\ufeffstt,title,url"))
         self.assertLess(content.index("CSV A-1"), content.index("CSV A-3"))
         restarted.close()
 

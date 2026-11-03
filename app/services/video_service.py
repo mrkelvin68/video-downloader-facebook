@@ -38,3 +38,10 @@ class VideoService:
         if self.database.get_project(project_id) is None:
             raise ValueError("Dự án không tồn tại")
         return export_video_csv(self.database.export_video_rows(project_id))
+
+    def set_facebook_uploaded(
+        self, project_id: str, video_id: str, uploaded: bool
+    ) -> None:
+        if not isinstance(uploaded, bool):
+            raise ValueError("Trạng thái Facebook không hợp lệ.")
+        self.database.set_video_facebook_uploaded(project_id, video_id, uploaded)

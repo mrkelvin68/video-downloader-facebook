@@ -323,6 +323,7 @@ class MatrixService:
         self.database.get_project(project_id)
         rows = self.connection.execute(
             """SELECT id, video_code, title, source_url, download_status,
+                      facebook_uploaded,
                       local_video_path, thumbnail_path, sequence_number
                FROM videos WHERE project_id=? ORDER BY sequence_number""",
             (project_id,),
@@ -427,7 +428,7 @@ class MatrixService:
             writer = csv.writer(output)
             writer.writerow(
                 (
-                    "Ngày", "Giờ", "Tên Page", "Mã video", "Tên video",
+                    "Ngày", "Giờ", "Tên Page", "Mã video", "Title",
                     "Đường dẫn video", "Thumbnail", "Caption", "Trạng thái",
                 )
             )
