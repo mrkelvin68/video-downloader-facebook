@@ -27,6 +27,7 @@ from app.ui.dialogs.project_dialog import ProjectDialog
 from app.ui.pages.project_detail_page import ProjectDetailPage
 from app.ui.pages.project_page import ProjectPage
 from app.ui.widgets.sidebar import Sidebar
+from app.ui.download_worker import DownloadWorker
 
 APP_DIR = Path.home() / ".video-downloader-facebook"
 DB_PATH = APP_DIR / "projects.sqlite3"
@@ -42,6 +43,8 @@ class MainWindow(QMainWindow):
         self.pending_csv_text: str | None = None
         self.pending_csv_rows: list[dict] = []
         self.pending_csv_errors: list[str] = []
+        self.download_worker: DownloadWorker | None = None
+        self.download_errors: list[str] = []
         self.setWindowTitle("Video Downloader")
         self.resize(1366, 768)
         self.setMinimumSize(960, 640)
@@ -73,6 +76,7 @@ class MainWindow(QMainWindow):
         self.detail_page.sampleRequested.connect(self.save_sample_csv)
         self.detail_page.exportRequested.connect(self.export_csv)
         self.detail_page.importRequested.connect(self.confirm_import)
+        self.detail_page.downloadRequested.connect(self.start_downloads)
         self.refresh()
 
     def _build_header(self) -> QWidget:
@@ -85,7 +89,7 @@ class MainWindow(QMainWindow):
         crumb.setObjectName("breadcrumb")
         layout.addWidget(crumb)
         layout.addStretch()
-        phase = QLabel("PHASE 1–2")
+        phase = QLabel("PHASE 1–3")
         phase.setObjectName("phaseTag")
         layout.addWidget(phase)
         return header
@@ -261,6 +265,49 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "Thành công", f"Đã lưu thành công {imported} video vào dự án."
         )
+
+    def start_downloads(self) -> None:
+        if self.current_project is None or self.download_worker is not None:
+            return
+        self.download_errors = []
+        worker = DownloadWorker(self.database.path, self.current_project.uuid, self)
+        self.download_worker = worker
+        self.detail_page.download_button.setEnabled(False)
+        self.detail_page.download_status.setText("Đang bắt đầu tải...")
+        worker.progress.connect(self._download_progress)
+        worker.failed.connect(self._download_error)
+        worker.finished_batch.connect(self._downloads_finished)
+        worker.start()
+
+    def _download_progress(self, current: int, total: int, code: str) -> None:
+        self.detail_page.download_status.setText(f"Đang tải {current}/{total}: {code}")
+
+    def _download_error(self, message: str) -> None:
+        self.download_errors.append(message)
+
+    def _downloads_finished(self) -> None:
+        worker = self.download_worker
+        if worker is None:
+            return
+        worker.wait()
+        self.download_worker = None
+        self.detail_page.download_button.setEnabled(True)
+        self._refresh_project_videos()
+        if self.download_errors:
+            self.detail_page.download_status.setText(
+                f"Đã kết thúc, {len(self.download_errors)} lỗi. " + self.download_errors[0][:160]
+            )
+        else:
+            self.detail_page.download_status.setText("Đã kết thúc hàng đợi tải")
+
+    def closeEvent(self, event) -> None:
+        if self.download_worker is not None:
+            QMessageBox.information(
+                self, "Đang tải", "Đợi hàng đợi hoàn thành trước khi đóng ứng dụng."
+            )
+            event.ignore()
+            return
+        super().closeEvent(event)
 
 
 def main() -> int:
