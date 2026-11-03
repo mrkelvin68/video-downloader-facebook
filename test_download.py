@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.database.connection import Database
 from app.services.download_service import DownloadError, DownloadService
@@ -76,6 +77,29 @@ class DownloadTests(unittest.TestCase):
         with self.assertRaisesRegex(DownloadError, "FFprobe thất bại"):
             DownloadService(self.db, runner=runner).download(self.project, self.video["id"])
         self.assertEqual(self.db.list_videos(self.project)[0]["download_status"], "failed")
+
+    def test_failed_status_write_is_reported(self):
+        service = DownloadService(
+            self.db,
+            runner=lambda *a, **k: SimpleNamespace(
+                returncode=1, stderr="invalid URL", stdout=""
+            ),
+        )
+        original_set_status = service._set_status
+
+        def fail_failed_status(project_id, video_id, status, *args, **kwargs):
+            if status == "failed":
+                raise OSError("database write failed")
+            return original_set_status(project_id, video_id, status, *args, **kwargs)
+
+        with patch.object(service, "_set_status", side_effect=fail_failed_status):
+            with self.assertRaises(DownloadError) as error:
+                service.download(self.project, self.video["id"])
+        self.assertIn("invalid URL", str(error.exception))
+        self.assertIn("database write failed", str(error.exception))
+        self.assertEqual(
+            self.db.list_videos(self.project)[0]["download_status"], "downloading"
+        )
 
     def test_existing_folder_and_wrong_project_preserve_data(self):
         target = self.root / "project" / "episode-1"

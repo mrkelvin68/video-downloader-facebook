@@ -90,11 +90,13 @@ class DownloadService:
                 thumbnail = target / "thumbnail.jpg" if has_thumbnail else None
                 self._set_status(project_id, video_id, "completed", str(output), str(thumbnail) if thumbnail else None)
                 return output, thumbnail
-        except Exception:
+        except Exception as download_error:
             try:
                 self._set_status(project_id, video_id, "failed")
-            except Exception:
-                pass
+            except Exception as status_error:
+                raise DownloadError(
+                    f"{download_error}; không thể lưu trạng thái thất bại: {status_error}"
+                ) from status_error
             raise
 
     def _validate_media(self, path: Path) -> None:
