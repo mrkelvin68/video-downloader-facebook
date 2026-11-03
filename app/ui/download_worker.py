@@ -1,6 +1,8 @@
 """Runs one persisted queue job on a thread-owned SQLite connection."""
 from __future__ import annotations
 
+import time
+
 from PySide6.QtCore import QThread, Signal
 
 from app.database.connection import Database
@@ -29,6 +31,8 @@ class DownloadWorker(QThread):
                 raise RuntimeError("Job không còn ở trạng thái chờ.")
             claimed = True
 
+            last_persisted_at = 0.0
+
             def report_progress(
                 percent: float,
                 downloaded: int,
@@ -36,14 +40,18 @@ class DownloadWorker(QThread):
                 speed: float | None,
                 eta: int | None,
             ) -> None:
-                jobs.update_progress(
-                    self.job_id,
-                    progress=percent,
-                    downloaded_bytes=downloaded,
-                    total_bytes=total,
-                    speed=speed,
-                    eta_seconds=eta,
-                )
+                nonlocal last_persisted_at
+                now = time.monotonic()
+                if now - last_persisted_at >= 2 or percent >= 100:
+                    jobs.update_progress(
+                        self.job_id,
+                        progress=percent,
+                        downloaded_bytes=downloaded,
+                        total_bytes=total,
+                        speed=speed,
+                        eta_seconds=eta,
+                    )
+                    last_persisted_at = now
                 self.progress.emit(
                     self.job_id, percent, downloaded, total, speed, eta
                 )

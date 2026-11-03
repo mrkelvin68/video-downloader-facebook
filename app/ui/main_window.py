@@ -441,8 +441,9 @@ class MainWindow(QMainWindow):
         speed: float | None,
         eta: int | None,
     ) -> None:
-        self.refresh_queue()
-        self._refresh_project_videos()
+        self.queue_page.table.queue_model.update_progress(
+            job_id, percent, downloaded, total, speed, eta
+        )
         job = self.download_queue.get_job(job_id)
         code = job_id
         if job is not None:

@@ -431,6 +431,8 @@ class DownloadWorkerTests(unittest.TestCase):
                     self.database = worker_db
 
                 def download(self, worker_project_id, worker_video_id, *, progress_callback):
+                    progress_callback(10.0, 10, 100, 50.0, 2)
+                    progress_callback(20.0, 20, 100, 50.0, 2)
                     progress_callback(100.0, 100, 100, None, 0)
                     with self.database.connection:
                         self.database.connection.execute(
@@ -440,7 +442,9 @@ class DownloadWorkerTests(unittest.TestCase):
                         )
 
             finished = []
+            worker_progress = []
             worker = DownloadWorker(str(root / "worker.sqlite3"), job_id)
+            worker.progress.connect(lambda *args: worker_progress.append(args))
             worker.jobFinished.connect(
                 lambda active_job, success, message: finished.append(
                     (active_job, success, message)
@@ -450,6 +454,7 @@ class DownloadWorkerTests(unittest.TestCase):
                 worker.start()
                 self.assertTrue(worker.wait(10000))
             application.processEvents()
+            self.assertEqual(len(worker_progress), 3)
             self.assertEqual(finished, [(job_id, True, "")])
             verify = Database(root / "worker.sqlite3")
             self.assertEqual(

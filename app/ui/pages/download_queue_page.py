@@ -163,6 +163,29 @@ class DownloadQueueTableModel(QAbstractTableModel):
         self._jobs = list(jobs)
         self.endResetModel()
 
+    def update_progress(
+        self,
+        job_id: str,
+        percent: float,
+        downloaded: int,
+        total: int | None,
+        speed: float | None,
+        eta: int | None,
+    ) -> None:
+        row = self.row_for_job(job_id)
+        if row is None:
+            return
+        job = dict(self._jobs[row])
+        job.update(
+            progress=percent,
+            downloaded_bytes=downloaded,
+            total_bytes=total,
+            speed=speed,
+            eta_seconds=eta,
+        )
+        self._jobs[row] = job
+        self.dataChanged.emit(self.index(row, 4), self.index(row, 7))
+
 
 class DownloadQueueTable(QTableView):
     def __init__(self, parent: QWidget | None = None) -> None:
