@@ -708,6 +708,7 @@ class ProjectCsvUiTests(unittest.TestCase):
         )
         VideoService(self.database).import_csv(self.project_id, "\n".join(rows))
         window = MainWindow(self.database)
+        window.queue_concurrency = 1
         queue = DownloadQueueService(self.database)
         queue.enqueue(self.project_id, [row["id"] for row in self.database.list_videos(self.project_id)])
         with patch("app.ui.main_window.DownloadWorker", FakeWorker):

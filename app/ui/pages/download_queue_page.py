@@ -13,6 +13,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -247,6 +248,7 @@ class DownloadQueuePage(QWidget):
     deleteFailedRequested = Signal()
     deleteCompletedRequested = Signal()
     deleteInactiveRequested = Signal()
+    concurrencyChanged = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -291,6 +293,24 @@ class DownloadQueuePage(QWidget):
         controls.addWidget(self.cancel_button)
         layout.addLayout(controls)
 
+        concurrency_row = QHBoxLayout()
+        concurrency_row.addWidget(QLabel("Tải đồng thời:"))
+        self.concurrency_combo = QComboBox()
+        for slots in range(1, 6):
+            self.concurrency_combo.addItem(str(slots), slots)
+        self.concurrency_combo.setCurrentIndex(1)
+        self.concurrency_combo.currentIndexChanged.connect(
+            lambda _index: self.concurrencyChanged.emit(
+                int(self.concurrency_combo.currentData())
+            )
+        )
+        concurrency_row.addWidget(self.concurrency_combo)
+        self.stats_label = QLabel("Đang tải: 0 · Đang chờ: 0 · Tốc độ tổng: —")
+        self.stats_label.setObjectName("detailMeta")
+        concurrency_row.addWidget(self.stats_label)
+        concurrency_row.addStretch()
+        layout.addLayout(concurrency_row)
+
         delete_controls = QHBoxLayout()
         self.delete_selected_button = QPushButton("🗑 Xóa job đã chọn")
         self.delete_selected_button.setObjectName("danger")
@@ -329,6 +349,19 @@ class DownloadQueuePage(QWidget):
         )
         self._job_counts = {}
         self._update_delete_buttons()
+
+    def set_concurrency(self, value: int) -> None:
+        index = self.concurrency_combo.findData(int(value))
+        if index >= 0 and index != self.concurrency_combo.currentIndex():
+            self.concurrency_combo.blockSignals(True)
+            self.concurrency_combo.setCurrentIndex(index)
+            self.concurrency_combo.blockSignals(False)
+
+    def set_stats(self, active: int, pending: int, speed: float) -> None:
+        rate = f"{_format_bytes(int(speed))}/s" if speed else "—"
+        self.stats_label.setText(
+            f"Đang tải: {active} · Đang chờ: {pending} · Tốc độ tổng: {rate}"
+        )
 
     def _show_context_menu(self, position) -> None:
         index = self.table.indexAt(position)

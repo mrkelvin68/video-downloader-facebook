@@ -1,6 +1,7 @@
 import csv
 from urllib.parse import unquote, urlsplit
 import sqlite3
+import time
 import sys
 from dataclasses import asdict
 from datetime import UTC, date, datetime, timedelta
@@ -70,6 +71,61 @@ DB_PATH = APP_DIR / "projects.sqlite3"
 
 
 class MainWindow(QMainWindow):
+    DEFAULT_QUEUE_CONCURRENCY = 2
+    QUEUE_PROGRESS_UI_INTERVAL = 0.2
+
+    @property
+    def queue_worker(self) -> DownloadWorker | None:
+        """Compatibility view: first active worker (or None)."""
+        return next(iter(self.queue_workers.values()), None)
+
+    @queue_worker.setter
+    def queue_worker(self, worker: DownloadWorker | None) -> None:
+        if worker is None:
+            self.queue_workers.clear()
+        else:
+            self.queue_workers[getattr(worker, "job_id", "")] = worker
+
+    @property
+    def queue_job_id(self) -> str | None:
+        return next(iter(self.queue_workers), None)
+
+    @queue_job_id.setter
+    def queue_job_id(self, value: str | None) -> None:
+        if value is None:
+            self.queue_workers.clear()
+        elif "" in self.queue_workers:
+            self.queue_workers[value] = self.queue_workers.pop("")
+
+    @staticmethod
+    def _load_queue_concurrency() -> int:
+        value = QSettings("VideoDownloader", "VideoDownloaderFacebook").value(
+            "downloads/concurrency", MainWindow.DEFAULT_QUEUE_CONCURRENCY
+        )
+        try:
+            return max(1, min(5, int(value)))
+        except (TypeError, ValueError):
+            return MainWindow.DEFAULT_QUEUE_CONCURRENCY
+
+    def set_queue_concurrency(self, value: int) -> None:
+        self.queue_concurrency = max(1, min(5, int(value)))
+        QSettings("VideoDownloader", "VideoDownloaderFacebook").setValue(
+            "downloads/concurrency", self.queue_concurrency
+        )
+        if self.queue_page.concurrency_combo.currentData() != self.queue_concurrency:
+            self.queue_page.set_concurrency(self.queue_concurrency)
+        if self.queue_running and not self.pause_after_current:
+            self._start_next_queue_job()
+        self._update_queue_stats()
+
+    def _update_queue_stats(self) -> None:
+        try:
+            pending = self.download_queue.count_jobs(("queued",))
+        except sqlite3.Error:
+            pending = 0
+        speed = sum(self._queue_speeds.get(job_id, 0.0) for job_id in self.queue_workers)
+        self.queue_page.set_stats(len(self.queue_workers), pending, speed)
+
     def __init__(self, database: Database) -> None:
         super().__init__()
         self.database = database
@@ -84,10 +140,15 @@ class MainWindow(QMainWindow):
         self.pending_csv_text: str | None = None
         self.pending_csv_rows: list[dict] = []
         self.pending_csv_errors: list[str] = []
-        self.queue_worker: DownloadWorker | None = None
+        self.queue_workers: dict[str, DownloadWorker] = {}
+        self._queue_video_ids: dict[str, str] = {}
+        self._queue_speeds: dict[str, float] = {}
+        self._queue_ui_stamp: dict[str, float] = {}
+        self._queue_codes: dict[str, str] = {}
+        self._pending_wait_ids: set[str] = set()
+        self.queue_concurrency = self._load_queue_concurrency()
         self.queue_running = False
         self.pause_after_current = False
-        self.queue_job_id: str | None = None
         self.queue_error: str | None = None
         self.pending_project_delete: tuple[str, bool] | None = None
         self.pending_queue_delete: tuple[list[str], str] | None = None
@@ -160,6 +221,8 @@ class MainWindow(QMainWindow):
         )
         self.queue_page.backRequested.connect(self.show_projects)
         self.queue_page.startRequested.connect(self.start_queue)
+        self.queue_page.set_concurrency(self.queue_concurrency)
+        self.queue_page.concurrencyChanged.connect(self.set_queue_concurrency)
         self.queue_page.pauseRequested.connect(self.pause_queue)
         self.queue_page.resumeRequested.connect(self.start_queue)
         self.queue_page.retryRequested.connect(self.retry_queue_jobs)
@@ -250,17 +313,19 @@ class MainWindow(QMainWindow):
                 return
 
         try:
-            downloading = self.database.connection.execute(
-                """SELECT job_id FROM download_jobs
-                   WHERE project_id=? AND status='downloading' LIMIT 1""",
-                (project.uuid,),
-            ).fetchone()
+            downloading_ids = [
+                row["job_id"]
+                for row in self.database.connection.execute(
+                    """SELECT job_id FROM download_jobs
+                       WHERE project_id=? AND status='downloading'""",
+                    (project.uuid,),
+                ).fetchall()
+            ]
         except sqlite3.Error as exc:
             QMessageBox.critical(self, "Lỗi hàng đợi", str(exc))
             return
-        if downloading is not None:
-            worker = self.queue_worker
-            if worker is None or worker.job_id != downloading["job_id"]:
+        if downloading_ids:
+            if any(job_id not in self.queue_workers for job_id in downloading_ids):
                 QMessageBox.warning(
                     self,
                     "Không thể dừng tải",
@@ -279,13 +344,15 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
             self.pending_project_delete = (project.uuid, delete_files)
+            self._pending_wait_ids = set(downloading_ids)
             self.queue_running = False
             self.pause_after_current = False
             self.setEnabled(False)
             self.queue_page.queue_status.setText(
                 "Đang dừng worker trước khi xóa dự án…"
             )
-            worker.request_cancel()
+            for job_id in downloading_ids:
+                self.queue_workers[job_id].request_cancel()
             return
         self._perform_project_deletion(project.uuid, delete_files)
 
@@ -1315,60 +1382,85 @@ class MainWindow(QMainWindow):
     def start_queue(self) -> None:
         self.queue_running = True
         self.pause_after_current = False
-        self.queue_page.queue_status.setText("Đang chạy hàng đợi tuần tự.")
+        self.queue_page.queue_status.setText(
+            f"Đang chạy hàng đợi ({self.queue_concurrency} luồng song song)."
+        )
         self.detail_page.queue_status.setText("Đang chạy hàng đợi.")
         self._start_next_queue_job()
 
     def pause_queue(self) -> None:
-        if self.queue_worker is None:
+        if not self.queue_workers:
             self.queue_running = False
             self.queue_page.queue_status.setText("Hàng đợi đang tạm dừng.")
             self.detail_page.queue_status.setText("Hàng đợi đang tạm dừng.")
             return
         self.pause_after_current = True
         self.queue_page.queue_status.setText(
-            "Sẽ tạm dừng sau khi video hiện tại hoàn tất."
+            "Sẽ tạm dừng sau khi các video đang tải hoàn tất."
         )
         self.detail_page.queue_status.setText("Tạm dừng sau video hiện tại.")
 
     def _start_next_queue_job(self) -> None:
-        if self.queue_worker is not None or not self.queue_running:
+        """Fill every free download slot with the highest-priority queued job."""
+        if not self.queue_running:
             return
         if self.pause_after_current:
-            self.queue_running = False
+            if not self.queue_workers:
+                self.queue_running = False
             return
+        while len(self.queue_workers) < self.queue_concurrency:
+            try:
+                job = self.download_queue.next_queued_job(
+                    exclude_job_ids=tuple(self.queue_workers),
+                    exclude_video_ids=tuple(self._queue_video_ids.values()),
+                )
+            except sqlite3.Error as exc:
+                self.queue_running = False
+                QMessageBox.critical(self, "Lỗi hàng đợi", str(exc))
+                return
+            if job is None:
+                if not self.queue_workers:
+                    self.queue_running = False
+                    self.queue_page.queue_status.setText("Không còn job đang chờ.")
+                    self.detail_page.queue_status.setText("Hàng đợi đã hoàn tất.")
+                    self.refresh_queue()
+                break
+            self._launch_queue_worker(job)
+        self._update_queue_stats()
+
+    def _launch_queue_worker(self, job) -> None:
+        job_id = job["job_id"]
+        worker = DownloadWorker(self.database.path, job_id, self)
+        self.queue_workers[job_id] = worker
         try:
-            job = self.download_queue.next_queued_job()
-        except sqlite3.Error as exc:
-            self.queue_running = False
-            QMessageBox.critical(self, "Lỗi hàng đợi", str(exc))
-            return
-        if job is None:
-            self.queue_running = False
-            self.queue_page.queue_status.setText("Không còn job đang chờ.")
-            self.detail_page.queue_status.setText("Hàng đợi đã hoàn tất.")
-            self.refresh_queue()
-            return
-        worker = DownloadWorker(self.database.path, job["job_id"], self)
-        self.queue_worker = worker
-        self.queue_job_id = job["job_id"]
+            self._queue_video_ids[job_id] = job["video_id"]
+        except (IndexError, KeyError):
+            pass
         self.queue_error = None
         worker.progress.connect(self._queue_progress)
         worker.jobFinished.connect(self._queue_job_finished)
         worker.finished.connect(
             lambda active_worker=worker: self._queue_thread_finished(active_worker)
         )
-        job_info = self.download_queue.get_job(job["job_id"])
-        code = job["job_id"]
+        code = job_id
+        job_info = self.download_queue.get_job(job_id)
         if job_info is not None:
             video = self.database.connection.execute(
                 "SELECT video_code FROM videos WHERE id=?", (job_info["video_id"],)
             ).fetchone()
             if video is not None:
                 code = video["video_code"]
+        self._queue_codes[job_id] = code
         self.queue_page.queue_status.setText(f"Đang tải {code}…")
         self.detail_page.queue_status.setText(f"Đang tải {code}…")
         worker.start()
+
+    def _release_queue_job(self, job_id: str) -> None:
+        self.queue_workers.pop(job_id, None)
+        self._queue_video_ids.pop(job_id, None)
+        self._queue_speeds.pop(job_id, None)
+        self._queue_ui_stamp.pop(job_id, None)
+        self._queue_codes.pop(job_id, None)
 
     def _queue_progress(
         self,
@@ -1379,30 +1471,53 @@ class MainWindow(QMainWindow):
         speed: float | None,
         eta: int | None,
     ) -> None:
+        if job_id not in self.queue_workers:
+            return
+        self._queue_speeds[job_id] = float(speed or 0.0)
+        now = time.monotonic()
+        last = self._queue_ui_stamp.get(job_id, 0.0)
+        if percent < 100 and now - last < self.QUEUE_PROGRESS_UI_INTERVAL:
+            return
+        self._queue_ui_stamp[job_id] = now
         self.queue_page.table.queue_model.update_progress(
             job_id, percent, downloaded, total, speed, eta
         )
-        job = self.download_queue.get_job(job_id)
-        code = job_id
-        if job is not None:
-            video = self.database.connection.execute(
-                "SELECT video_code FROM videos WHERE id=?", (job["video_id"],)
-            ).fetchone()
-            if video is not None:
-                code = video["video_code"]
+        code = self._queue_codes.get(job_id, job_id)
         rate = f"{speed / 1024 / 1024:.1f} MB/s" if speed else "—"
         remaining = f" · còn {eta}s" if eta is not None else ""
         status = f"Đang tải {code}: {percent:.1f}% · {rate}{remaining}"
         self.queue_page.queue_status.setText(status)
         self.detail_page.queue_status.setText(status)
+        self._update_queue_stats()
+
+    def _run_pending_deletions(self) -> bool:
+        """Run deferred deletions once the cancelled workers have fully stopped."""
+        if self._pending_wait_ids & set(self.queue_workers):
+            return False
+        if self.pending_project_delete is not None:
+            project_id, delete_files = self.pending_project_delete
+            self.pending_project_delete = None
+            self._pending_wait_ids.clear()
+            self.queue_running = False
+            self.setEnabled(True)
+            self._perform_project_deletion(project_id, delete_files)
+            return True
+        if self.pending_queue_delete is not None:
+            job_ids, description = self.pending_queue_delete
+            self.pending_queue_delete = None
+            self._pending_wait_ids.clear()
+            self.queue_running = False
+            self.setEnabled(True)
+            self._perform_queue_job_deletion(job_ids, description)
+            return True
+        return False
 
     def _queue_job_finished(self, job_id: str, succeeded: bool, message: str) -> None:
-        worker = self.queue_worker
-        if worker is None or self.queue_job_id != job_id:
+        worker = self.queue_workers.get(job_id)
+        if worker is None:
             return
         worker.wait()
-        self.queue_worker = None
-        self.queue_job_id = None
+        self._release_queue_job(job_id)
         self.queue_error = message if not succeeded else None
         can_continue = True
         if not succeeded:
@@ -1419,45 +1534,33 @@ class MainWindow(QMainWindow):
         self.refresh_queue()
         if self.current_project is not None:
             self._refresh_project_videos()
-        if self.pending_project_delete is not None:
-            project_id, delete_files = self.pending_project_delete
-            self.pending_project_delete = None
-            self.queue_running = False
-            self.setEnabled(True)
-            self._perform_project_deletion(project_id, delete_files)
+        self._update_queue_stats()
+        if self._run_pending_deletions():
             return
-        if self.pending_queue_delete is not None:
-            job_ids, description = self.pending_queue_delete
-            self.pending_queue_delete = None
-            self.queue_running = False
-            self.setEnabled(True)
-            self._perform_queue_job_deletion(job_ids, description)
+        if self.pending_project_delete is not None or self.pending_queue_delete is not None:
             return
         if not succeeded:
             status = f"Job lỗi: {message}"
-            self.queue_page.queue_status.setText(status)
-            self.detail_page.queue_status.setText(status)
         else:
-            self.queue_page.queue_status.setText("Video tải thành công.")
-            self.detail_page.queue_status.setText("Video tải thành công.")
+            status = "Video tải thành công."
+        self.queue_page.queue_status.setText(status)
+        self.detail_page.queue_status.setText(status)
         if self.pause_after_current:
-            self.pause_after_current = False
-            self.queue_running = False
-            self.queue_page.queue_status.setText(
-                "Đã tạm dừng sau video hiện tại."
-            )
+            if not self.queue_workers:
+                self.pause_after_current = False
+                self.queue_running = False
+                self.queue_page.queue_status.setText(
+                    "Đã tạm dừng sau video hiện tại."
+                )
             return
         if can_continue:
             QTimer.singleShot(0, self._start_next_queue_job)
-        else:
+        elif not self.queue_workers:
             self.queue_running = False
 
     def _queue_thread_finished(self, worker: DownloadWorker) -> None:
-        if self.queue_worker is not worker:
-            return
-        job_id = self.queue_job_id
-        if job_id is None:
-            self.queue_worker = None
+        job_id = worker.job_id
+        if self.queue_workers.get(job_id) is not worker:
             return
         try:
             if not self.download_queue.interrupt_job(
@@ -1468,23 +1571,13 @@ class MainWindow(QMainWindow):
                 )
         except sqlite3.Error as exc:
             QMessageBox.critical(self, "Lỗi hàng đợi", str(exc))
-        self.queue_worker = None
-        self.queue_job_id = None
+        self._release_queue_job(job_id)
         self.refresh_queue()
         self._refresh_project_videos()
-        if self.pending_project_delete is not None:
-            project_id, delete_files = self.pending_project_delete
-            self.pending_project_delete = None
-            self.queue_running = False
-            self.setEnabled(True)
-            self._perform_project_deletion(project_id, delete_files)
+        self._update_queue_stats()
+        if self._run_pending_deletions():
             return
-        if self.pending_queue_delete is not None:
-            job_ids, description = self.pending_queue_delete
-            self.pending_queue_delete = None
-            self.queue_running = False
-            self.setEnabled(True)
-            self._perform_queue_job_deletion(job_ids, description)
+        if self.pending_project_delete is not None or self.pending_queue_delete is not None:
             return
         self.queue_page.queue_status.setText(
             "Worker bị gián đoạn; các job còn lại vẫn được giữ."
@@ -1621,12 +1714,7 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
         if active:
-            worker = self.queue_worker
-            if (
-                len(active) != 1
-                or worker is None
-                or worker.job_id != active[0]["job_id"]
-            ):
+            if any(row["job_id"] not in self.queue_workers for row in active):
                 QMessageBox.warning(
                     self,
                     "Không thể dừng tải",
@@ -1634,13 +1722,15 @@ class MainWindow(QMainWindow):
                 )
                 return
             self.pending_queue_delete = (job_ids, description)
+            self._pending_wait_ids = {row["job_id"] for row in active}
             self.queue_running = False
             self.pause_after_current = False
             self.setEnabled(False)
             self.queue_page.queue_status.setText(
                 "Đang dừng worker trước khi xóa job…"
             )
-            worker.request_cancel()
+            for row in active:
+                self.queue_workers[row["job_id"]].request_cancel()
             return
         self._perform_queue_job_deletion(job_ids, description)
 
@@ -1661,11 +1751,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self.viral_reels_scheduler.stop()
-        if self.queue_worker is not None:
+        if self.queue_workers:
             QMessageBox.information(
                 self,
                 "Đang tải",
-                "Đợi video hiện tại hoàn tất trước khi đóng ứng dụng.",
+                "Đợi các video hiện tại hoàn tất trước khi đóng ứng dụng.",
             )
             event.ignore()
             return
