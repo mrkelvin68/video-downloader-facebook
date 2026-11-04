@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QSplitter,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -121,6 +122,7 @@ class ViralReelsPage(QWidget):
     pagesDeleteRequested = Signal(list)
     exportPagesCsvRequested = Signal(list)
     recoverRunRequested = Signal()
+    filtersChanged = Signal(dict)
 
     COLUMNS = (
         ("page_name", "Page"),
@@ -206,17 +208,25 @@ class ViralReelsPage(QWidget):
         provider_bar.addWidget(self.provider_button)
         layout.addLayout(provider_bar)
 
-        # B. Page selection
+        self.scan_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.scan_splitter.setChildrenCollapsible(False)
+        self.scan_splitter.setHandleWidth(6)
+
+        # B. Page selection (Top pane of splitter)
+        top_pane = QWidget()
+        top_layout = QVBoxLayout(top_pane)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(4)
         add_row = QHBoxLayout()
         self.page_url_input = QLineEdit()
         self.page_url_input.setPlaceholderText("Facebook Page URL, e.g. https://www.facebook.com/PageName")
-        self.page_url_input.setMinimumHeight(36)
+        self.page_url_input.setMinimumHeight(34)
         self.page_url_input.returnPressed.connect(self._add_page)
         self.add_page_button = self._button("Add Page", "secondary", self._add_page)
         self.import_pages_button = self._button("Import CSV", "secondary", self._import_pages)
         for widget in (self.page_url_input, self.add_page_button, self.import_pages_button):
             add_row.addWidget(widget, 1 if widget is self.page_url_input else 0)
-        layout.addLayout(add_row)
+        top_layout.addLayout(add_row)
         self.pages_model = QStandardItemModel(0, 3, self)
         self.pages_model.setHorizontalHeaderLabels(["", "Page", "Facebook Page URL"])
         self.pages = QTableView()
@@ -224,46 +234,64 @@ class ViralReelsPage(QWidget):
         self.pages.setAlternatingRowColors(True)
         self.pages.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.pages.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.pages.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.pages.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.pages.verticalHeader().hide()
+        self.pages.horizontalHeader().setVisible(True)
         self.pages.horizontalHeader().setStretchLastSection(True)
         self.pages.setColumnWidth(0, 36)
         self.pages.setColumnWidth(1, 260)
-        self.pages.verticalHeader().setDefaultSectionSize(26)
-        self.pages.setMinimumHeight(68)
-        self.pages.setMaximumHeight(82)
+        self.pages.verticalHeader().setDefaultSectionSize(24)
+        self.pages.setMinimumHeight(148)
         self.pages_model.itemChanged.connect(self._update_scan_pages_state)
-        layout.addWidget(self.pages, 1)
+        self.pages.clicked.connect(self._on_scan_page_row_clicked)
+        top_layout.addWidget(self.pages, 1)
         select_row = QHBoxLayout()
         self.scan_select_all = QCheckBox("Select all")
-        self.scan_select_all.clicked.connect(self._select_all_scan_pages)
+        self.scan_select_all.toggled.connect(self._select_all_scan_pages)
         self.scan_selected_label = QLabel("Selected: 0 / 0")
         self.delete_pages_button = self._button("Delete selected Pages", "secondary", self._delete_pages)
         select_row.addWidget(self.scan_select_all)
         select_row.addWidget(self.scan_selected_label)
         select_row.addStretch()
         select_row.addWidget(self.delete_pages_button)
-        layout.addLayout(select_row)
+        top_layout.addLayout(select_row)
+        self.scan_splitter.addWidget(top_pane)
 
-        # C. Scan options (+ optional advanced filters)
+        # C, D, E. Scan options, Actions, Results (Bottom pane of splitter)
+        bottom_pane = QWidget()
+        bottom_layout = QVBoxLayout(bottom_pane)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(4)
         options = QHBoxLayout()
-        self.min_views.setMinimumHeight(36)
-        self.max_results.setMinimumHeight(36)
+        self.min_views.setMinimumHeight(34)
+        self.max_results.setMinimumHeight(34)
         for label, widget in (("Maximum results", self.max_results), ("Minimum views", self.min_views), ("Date", self.date_preset)):
             options.addWidget(QLabel(label))
             options.addWidget(widget, 1)
-        layout.addLayout(options)
+        bottom_layout.addLayout(options)
         self.advanced_group = QGroupBox("Advanced filters (apply only when enabled)")
         self.advanced_group.setCheckable(True)
         self.advanced_group.setChecked(False)
-        advanced_filters = QFormLayout(self.advanced_group)
-        for label, widget in (("Country", self.country), ("Language", self.language), ("Topic", self.topic), ("Date from", self.date_from), ("Date to", self.date_to), ("Schedule", self.schedule)):
-            advanced_filters.addRow(label, widget)
+        advanced_filters = QHBoxLayout(self.advanced_group)
+        advanced_filters.setContentsMargins(8, 4, 8, 4)
+        advanced_filters.setSpacing(6)
+        for label, widget in (
+            ("Country", self.country),
+            ("Language", self.language),
+            ("Topic", self.topic),
+            ("From", self.date_from),
+            ("To", self.date_to),
+            ("Schedule", self.schedule),
+        ):
+            advanced_filters.addWidget(QLabel(label))
+            advanced_filters.addWidget(widget, 1)
         self.advanced_group.toggled.connect(lambda on: [advanced_filters.itemAt(i).widget().setVisible(on) for i in range(advanced_filters.count()) if advanced_filters.itemAt(i).widget()])
         self.advanced_group.toggled.connect(lambda on: self.advanced_group.setMaximumHeight(16777215 if on else 22))
+        self.advanced_group.toggled.connect(self._on_advanced_toggled)
         self.advanced_group.toggled.emit(False)
-        layout.addWidget(self.advanced_group)
+        bottom_layout.addWidget(self.advanced_group)
 
-        # D. Actions
         actions = QHBoxLayout()
         self.find_pages_button = self._button("Find Pages", "primary", self._find_pages)
         self.scan_reels_button = self._button("Quét Reels theo Page", "primary", self._scan_reels)
@@ -277,14 +305,14 @@ class ViralReelsPage(QWidget):
             actions.addWidget(button)
         self.find_pages_button.hide()
         actions.addStretch()
-        layout.addLayout(actions)
+        bottom_layout.addLayout(actions)
 
         self.progress_label = QLabel("Pages 0/0 · Reels 0/0 · Results 0")
         self.progress_label.setObjectName("detailMeta")
-        
-        # E. Results
+
         self.table = QTableView()
-        self.table.verticalHeader().setDefaultSectionSize(28)
+        self.table.setMinimumHeight(130)
+        self.table.verticalHeader().setDefaultSectionSize(26)
         self.model = QStandardItemModel(0, len(self.COLUMNS), self)
         self.model.setHorizontalHeaderLabels([label for _, label in self.COLUMNS])
         self.table.setModel(self.model)
@@ -308,7 +336,7 @@ class ViralReelsPage(QWidget):
         header.moveSection(keys.index("reel_url"), 0)
         for key, width in (("reel_url", 300), ("page_name", 160), ("caption", 260), ("views", 80), ("likes", 80), ("comments", 90), ("shares", 80), ("published_at", 150)):
             self.table.setColumnWidth(keys.index(key), width)
-        layout.addWidget(self.table, 4)
+        bottom_layout.addWidget(self.table, 1)
 
         row_actions = QHBoxLayout()
         self.remove_button = self._button("Remove selected", "danger", self.remove_selected)
@@ -316,7 +344,23 @@ class ViralReelsPage(QWidget):
         row_actions.addWidget(self.remove_button)
         row_actions.addWidget(self.clear_button)
         row_actions.insertWidget(0, self.progress_label, 1)
-        layout.addLayout(row_actions)
+        bottom_layout.addLayout(row_actions)
+        self.scan_splitter.addWidget(bottom_pane)
+        self.scan_splitter.setStretchFactor(0, 2)
+        self.scan_splitter.setStretchFactor(1, 3)
+        self.scan_splitter.setSizes([220, 360])
+        layout.addWidget(self.scan_splitter, 1)
+        for signal in (
+            self.min_views.valueChanged,
+            self.max_results.valueChanged,
+            self.date_preset.currentTextChanged,
+            self.date_from.dateChanged,
+            self.date_to.dateChanged,
+            self.country.currentTextChanged,
+            self.language.currentTextChanged,
+            self.topic.textChanged,
+        ):
+            signal.connect(self._emit_filters_changed)
         self._update_result_actions()
         self._update_scan_pages_state()
         self.mode_find.setChecked(True)
@@ -471,6 +515,7 @@ class ViralReelsPage(QWidget):
 
     def _find_mode_toggled(self, checked: bool) -> None:
         self.stack.setCurrentIndex(0 if checked else 1)
+
     def _date_edit(self) -> QDateEdit:
         edit = QDateEdit()
         edit.setCalendarPopup(True)
@@ -496,6 +541,7 @@ class ViralReelsPage(QWidget):
         if preset == "Custom range":
             return
         if preset == "Any time":
+            self._preset_timestamps = None
             self.date_from.setDate(self.date_from.minimumDate())
             self.date_to.setDate(self.date_to.minimumDate())
             return
@@ -505,14 +551,38 @@ class ViralReelsPage(QWidget):
         self.date_from.setDate(QDate.fromString(self._preset_timestamps[0][:10], Qt.DateFormat.ISODate))
         self.date_to.setDate(QDate.currentDate())
 
+    def _on_advanced_toggled(self, on: bool) -> None:
+        self.min_views.setEnabled(on)
+        self.date_preset.setEnabled(on)
+        self._emit_filters_changed()
+
+    def _emit_filters_changed(self, *_args: Any) -> None:
+        if self._worker is None:
+            self.filtersChanged.emit(self.filters())
+
     def filters(self) -> dict[str, Any]:
+        adv = self.advanced_group.isChecked()
+        date_from = (
+            self._preset_timestamps[0]
+            if self._preset_timestamps
+            else ("" if self.date_from.date() == self.date_from.minimumDate() else self.date_from.date().toString(Qt.DateFormat.ISODate))
+        ) if adv else ""
+        date_to = (
+            self._preset_timestamps[1]
+            if self._preset_timestamps
+            else ("" if self.date_to.date() == self.date_to.minimumDate() else self.date_to.date().toString(Qt.DateFormat.ISODate))
+        ) if adv else ""
         return {
-            "country": self.country.currentText() if self.advanced_group.isChecked() else "All", "language": self.language.currentText() if self.advanced_group.isChecked() else "All",
-            "topic": self.topic.text().strip() if self.advanced_group.isChecked() else "", "keywords": self.keywords.text().strip(),
-            "min_views": self.min_views.value(),
-            "date_from": self._preset_timestamps[0] if self._preset_timestamps else ("" if self.date_from.date() == self.date_from.minimumDate() else self.date_from.date().toString(Qt.DateFormat.ISODate)),
-            "date_to": self._preset_timestamps[1] if self._preset_timestamps else ("" if self.date_to.date() == self.date_to.minimumDate() else self.date_to.date().toString(Qt.DateFormat.ISODate)),
-            "max_results": self.max_results.value(), "data_source": self.data_source.currentText(),
+            "advanced_enabled": adv,
+            "country": self.country.currentText() if adv else "All",
+            "language": self.language.currentText() if adv else "All",
+            "topic": self.topic.text().strip() if adv else "",
+            "keywords": self.keywords.text().strip(),
+            "min_views": self.min_views.value() if adv else 0,
+            "date_from": date_from,
+            "date_to": date_to,
+            "max_results": self.max_results.value(),
+            "data_source": self.data_source.currentText(),
             "schedule": self.schedule.currentText(),
         }
 
@@ -541,11 +611,22 @@ class ViralReelsPage(QWidget):
         return [str(self.pages_model.item(r, 0).data(Qt.ItemDataRole.UserRole)) for r in range(self.pages_model.rowCount())
                 if self.pages_model.item(r, 0).checkState() == Qt.CheckState.Checked]
 
+    def _on_scan_page_row_clicked(self, index: Any) -> None:
+        if not index.isValid() or index.column() == 0:
+            return
+        item = self.pages_model.item(index.row(), 0)
+        if item is not None:
+            new_state = Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked else Qt.CheckState.Checked
+            item.setCheckState(new_state)
+
     def _update_scan_pages_state(self, *_args: Any) -> None:
         total, chosen = self.pages_model.rowCount(), len(self.checked_page_urls())
         self.scan_selected_label.setText(f"Selected: {chosen} / {total}")
         self.delete_pages_button.setEnabled(chosen > 0)
+        self.scan_select_all.blockSignals(True)
         self.scan_select_all.setChecked(total > 0 and chosen == total)
+        self.scan_select_all.blockSignals(False)
+        self._emit_filters_changed()
 
     def _select_all_scan_pages(self, checked: bool) -> None:
         state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
@@ -655,6 +736,12 @@ class ViralReelsPage(QWidget):
     def set_progress(self, pages_done: int, pages_total: int, reels_done: int, reels_total: int) -> None:
         self.progress_label.setText(
             f"Pages {pages_done}/{pages_total} · Reels {reels_done}/{reels_total} · Results {len(self._records)}"
+        )
+
+    def set_scan_stats(self, collected: int, valid: int, filtered: int, displayed: int, reason: str = "") -> None:
+        suffix = f" ({reason})" if reason else ""
+        self.progress_label.setText(
+            f"Reels collected: {collected} · Reels valid: {valid} · Reels filtered: {filtered} · Reels displayed: {displayed}{suffix}"
         )
 
     def set_results(self, records: Sequence[Mapping[str, Any]]) -> None:

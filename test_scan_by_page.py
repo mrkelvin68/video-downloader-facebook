@@ -387,6 +387,209 @@ class ScanByPageTests(unittest.TestCase):
         self.assertEqual(abort_called, ["run_second"])
 
 
+
+    def test_page_list_splitter_height_visibility_and_selection_persistence(self):
+        # Populate 99 Pages in SQLite
+        store = ViralReelsStore(self.db)
+        from app.services.viral_reels_service import PageCandidate
+        for idx in range(1, 100):
+            url = f"https://www.facebook.com/PageNumber{idx:02d}"
+            store.upsert_page(PageCandidate(f"pid_{idx}", f"Page Số {idx:02d}", url, "Vietnam", "Vietnamese", "Phim"))
+        self.win.load_viral_pages()
+
+        self.win.resize(1280, 720)
+        self.win.show()
+        self.win.show_viral_reels()
+        self.page.mode_page.setChecked(True)
+        self.app.processEvents()
+
+        # Verify Page list minimum height >= 120, no 82px cap, vertical QSplitter exists
+        self.assertGreaterEqual(self.page.pages.minimumHeight(), 120)
+        self.assertGreater(self.page.pages.maximumHeight(), 1000)
+        self.assertIsNotNone(self.page.scan_splitter)
+        self.assertEqual(self.page.scan_splitter.orientation(), Qt.Orientation.Vertical)
+        self.assertEqual(self.page.pages_model.rowCount(), 99)
+        self.assertTrue(self.page.pages.horizontalHeader().isVisible())
+
+        # Verify at least 4 rows are visible in the Page list viewport at 1280x720
+        row_h = self.page.pages.rowHeight(0) or self.page.pages.verticalHeader().defaultSectionSize()
+        visible_rows = self.page.pages.viewport().height() / max(1, row_h)
+        self.assertGreaterEqual(visible_rows, 4.0)
+
+        # Verify vertical scrollbar is active for 99 Pages
+        vbar = self.page.pages.verticalScrollBar()
+        self.assertGreater(vbar.maximum(), 0)
+        vbar.setValue(vbar.maximum())
+        self.app.processEvents()
+        self.assertEqual(vbar.value(), vbar.maximum())
+        vbar.setValue(0)
+        self.app.processEvents()
+
+        # Select All -> 99/99
+        self.page.scan_select_all.click()
+        self.assertEqual(len(self.page.checked_page_urls()), 99)
+        self.assertIn("Selected: 99 / 99", self.page.scan_selected_label.text())
+
+        # Deselect All -> 0/99
+        self.page.scan_select_all.click()
+        self.assertEqual(len(self.page.checked_page_urls()), 0)
+        self.assertIn("Selected: 0 / 99", self.page.scan_selected_label.text())
+
+        # Click row 0 (column 1) to toggle 1 Page, then row 1 (column 2) to toggle 2nd Page
+        self.page._on_scan_page_row_clicked(self.page.pages_model.index(0, 1))
+        self.assertEqual(len(self.page.checked_page_urls()), 1)
+        self.page._on_scan_page_row_clicked(self.page.pages_model.index(1, 2))
+        self.assertEqual(len(self.page.checked_page_urls()), 2)
+        expected_two = [
+            str(self.page.pages_model.item(0, 0).data(Qt.ItemDataRole.UserRole)),
+            str(self.page.pages_model.item(1, 0).data(Qt.ItemDataRole.UserRole)),
+        ]
+        self.assertEqual(self.page.checked_page_urls(), expected_two)
+
+        # Resize window and switch modes -> selection of 2 Pages is preserved
+        self.win.resize(1366, 768)
+        self.app.processEvents()
+        self.page.mode_find.setChecked(True)
+        self.app.processEvents()
+        self.page.mode_page.setChecked(True)
+        self.app.processEvents()
+        self.win.resize(1920, 1080)
+        self.app.processEvents()
+        self.assertEqual(self.page.checked_page_urls(), expected_two)
+
+        # Splitter resize works and both Page table and Reels table remain visible
+        self.page.scan_splitter.setSizes([320, 320])
+        self.app.processEvents()
+        self.assertGreater(self.page.pages.height(), 140)
+        self.assertGreater(self.page.table.height(), 120)
+
+    def test_advanced_filters_off_vs_on_and_sqlite_re_filtering_without_apify_calls(self):
+        # Dataset A: Phim Ngắn Hạn (10 Reels, views <= 286)
+        # Dataset B: Tụ Phim (10 Reels: 5 Reels >= 1000 views [4700, 4700, 3000, 1700, 1300], 4 Reels < 1000, 1 Reel views=None)
+        page_a = "https://www.facebook.com/people/Phim-Ng%E1%BA%AFn-H%E1%BA%A1n/61591529913294"
+        page_b = "https://www.facebook.com/people/T%E1%BB%A5-Phim/61593880716319"
+        self.add(page_a)
+        self.add(page_b)
+
+        views_a = [286, 135, 114, 107, 89, 65, 60, 57, 49, 40]
+        views_b = [4700, 4700, 3000, 1700, 1300, 625, 620, 563, 272, None]
+
+        store = ViralReelsStore(self.db)
+        from app.services.viral_reels_service import viral_score
+        for i, v in enumerate(views_a, 1):
+            rec = {
+                "reel_id": f"9001{i:02d}",
+                "page_id": "61591529913294",
+                "page_name": "Phim Ngắn Hạn",
+                "page_url": page_a,
+                "reel_url": f"https://www.facebook.com/reel/9001{i:02d}",
+                "caption": f"Phim ngắn tập {i}",
+                "views": v,
+                "likes": 10,
+                "comments": 2,
+                "shares": 1,
+                "published_at": "2026-10-20T10:00:00+00:00",
+                "country": "Unknown",
+                "language": "Vietnamese",
+                "language_confidence": 0.95,
+                "topic": "",
+                "data_source": "Apify Facebook Reels Scraper",
+            }
+            rec["viral_score"] = viral_score(rec)
+            store.upsert_reel(rec)
+
+        for i, v in enumerate(views_b, 1):
+            rec = {
+                "reel_id": f"9002{i:02d}",
+                "page_id": "61593880716319",
+                "page_name": "Tụ Phim",
+                "page_url": page_b,
+                "reel_url": f"https://www.facebook.com/reel/9002{i:02d}",
+                "caption": f"Tụ Phim tập {i} đặc sắc",
+                "views": v,
+                "likes": 50,
+                "comments": 5,
+                "shares": 3,
+                "published_at": "2026-10-21T10:00:00+00:00",
+                "country": "Unknown",
+                "language": "Vietnamese",
+                "language_confidence": 0.95,
+                "topic": "",
+                "data_source": "Apify Facebook Reels Scraper",
+            }
+            rec["viral_score"] = viral_score(rec)
+            store.upsert_reel(rec)
+
+        RecordedProvider.calls.clear()
+
+        # Select both Pages
+        self.page._select_all_scan_pages(True)
+        self.assertEqual(len(self.page.checked_page_urls()), 2)
+
+        # Case 1: Advanced OFF, Maximum results = 10 (even if min_views spinbox holds 10000!)
+        self.page.min_views.setValue(10000)
+        self.page.country.setCurrentText("United States")
+        self.page.advanced_group.setChecked(False)
+        self.page.max_results.setValue(10)
+        self.app.processEvents()
+
+        self.assertFalse(self.page.min_views.isEnabled())
+        self.assertEqual(self.page.filters()["min_views"], 0)
+        self.assertEqual(self.page.filters()["country"], "All")
+        self.assertEqual(len(self.page._records), 10)
+        self.assertIn("Reels collected: 20", self.page.progress_label.text())
+        self.assertIn("Reels valid: 20", self.page.progress_label.text())
+        self.assertIn("Reels filtered: 0", self.page.progress_label.text())
+        self.assertIn("Reels displayed: 10", self.page.progress_label.text())
+
+        # Case 2: Advanced ON, Minimum views = 10000 -> 0 Reels displayed, reason shown
+        self.page.advanced_group.setChecked(True)
+        self.page.country.setCurrentText("All")
+        self.page.min_views.setValue(10000)
+        self.app.processEvents()
+
+        self.assertTrue(self.page.min_views.isEnabled())
+        self.assertEqual(len(self.page._records), 0)
+        self.assertIn("Reels valid: 20", self.page.progress_label.text())
+        self.assertIn("Reels filtered: 20", self.page.progress_label.text())
+        self.assertIn("Reels displayed: 0", self.page.progress_label.text())
+        self.assertIn("Minimum views >= 10,000", self.page.progress_label.text())
+
+        # Case 3: Advanced ON, Minimum views = 1000 -> 5 Reels displayed (and views=None is rejected, not treated as 0 or matched)
+        self.page.min_views.setValue(1000)
+        self.app.processEvents()
+
+        self.assertEqual(len(self.page._records), 5)
+        self.assertTrue(all(r["views"] is not None and int(r["views"]) >= 1000 for r in self.page._records))
+        self.assertIn("Reels valid: 20", self.page.progress_label.text())
+        self.assertIn("Reels filtered: 15", self.page.progress_label.text())
+        self.assertIn("Reels displayed: 5", self.page.progress_label.text())
+
+        # Export CSV while filtered to 5 Reels -> CSV has exactly 5 rows
+        csv_5 = Path(self.tmp.name) / "filtered_5.csv"
+        with patch.object(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(csv_5), ""))):
+            self.page.export_csv_button.click()
+        rows_5 = list(csv.DictReader(csv_5.open(encoding="utf-8-sig")))
+        self.assertEqual(len(rows_5), 5)
+        self.assertEqual(len({r["reel_url"] for r in rows_5}), 5)
+
+        # Case 4: Toggle Advanced OFF again -> restores 10 Reels immediately from SQLite
+        self.page.advanced_group.setChecked(False)
+        self.app.processEvents()
+        self.assertEqual(len(self.page._records), 10)
+        self.assertIn("Reels displayed: 10", self.page.progress_label.text())
+
+        # Export CSV with Advanced OFF (max 10) -> CSV has 10 rows
+        csv_10 = Path(self.tmp.name) / "unfiltered_10.csv"
+        with patch.object(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(csv_10), ""))):
+            self.page.export_csv_button.click()
+        rows_10 = list(csv.DictReader(csv_10.open(encoding="utf-8-sig")))
+        self.assertEqual(len(rows_10), 10)
+
+        # Zero Apify provider calls occurred during all filter changes and exports
+        self.assertEqual(RecordedProvider.calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()
 

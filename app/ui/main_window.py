@@ -137,7 +137,9 @@ class MainWindow(QMainWindow):
         self.viral_reels_page.pageAddRequested.connect(self.add_viral_page)
         self.viral_reels_page.pagesImportRequested.connect(self.import_viral_pages)
         self.viral_reels_page.pagesDeleteRequested.connect(self.delete_viral_pages)
+        self.viral_reels_page.filtersChanged.connect(self.apply_stored_viral_reels_filters)
         self.load_viral_pages()
+        self.apply_stored_viral_reels_filters()
         self._refresh_viral_provider_status()
         self.viral_reels_page.exportCsvRequested.connect(self.export_viral_reels_csv)
         self.viral_reels_page.exportPagesCsvRequested.connect(self.export_viral_pages_csv)
@@ -362,13 +364,49 @@ class MainWindow(QMainWindow):
             parsed = datetime.fromisoformat(value).replace(tzinfo=UTC)
             return parsed + timedelta(days=1) - timedelta(microseconds=1) if end else parsed
 
+        adv = bool(values.get("advanced_enabled", True))
         return ReelFilters(
-            minimum_views=values["min_views"] or None,
-            country=values["country"], language=values["language"], topic=values["topic"],
-            published_from=boundary(values["date_from"]),
-            published_to=boundary(values["date_to"], True),
+            minimum_views=(values["min_views"] or None) if adv else None,
+            country=values["country"] if adv else "All",
+            language=values["language"] if adv else "All",
+            topic=values["topic"] if adv else "",
+            published_from=boundary(values["date_from"]) if adv else None,
+            published_to=boundary(values["date_to"], True) if adv else None,
             maximum_results=values["max_results"],
         )
+
+    @staticmethod
+    def _filter_rejection_reason(filters: ReelFilters) -> str:
+        parts: list[str] = []
+        if filters.minimum_views is not None:
+            parts.append(f"Minimum views >= {filters.minimum_views:,}")
+        if filters.country != "All":
+            parts.append(f"Country = {filters.country}")
+        if filters.language != "All":
+            parts.append(f"Language = {filters.language}")
+        if filters.topic:
+            parts.append(f"Topic = {filters.topic}")
+        if filters.published_from or filters.published_to:
+            parts.append("Date range")
+        return "0 Reels khớp bộ lọc: " + ", ".join(parts) if parts else ""
+
+    def apply_stored_viral_reels_filters(self, values: dict | None = None, collected_override: int | None = None) -> list[dict]:
+        page = self.viral_reels_page
+        vals = values if isinstance(values, dict) else page.filters()
+        filters = self._viral_filters(vals)
+        rows = ViralReelsStore(self.database).list_reels(limit=100000)
+        selected_urls = set(page.checked_page_urls())
+        page_rows = [dict(r) for r in rows if (not selected_urls or str(r["page_url"]) in selected_urls)]
+        deduped_valid = list({str(r.get("reel_id") or r.get("reel_url")): r for r in page_rows if r.get("reel_url")}.values())
+        valid_count = len(deduped_valid)
+        collected_count = collected_override if collected_override is not None else len(page_rows)
+        matched = [r for r in deduped_valid if reel_matches(r, filters)]
+        filtered_count = valid_count - len(matched)
+        displayed = matched[: filters.maximum_results]
+        reason = self._filter_rejection_reason(filters) if (valid_count > 0 and not displayed) else ""
+        page.set_results(displayed)
+        page.set_scan_stats(collected_count, valid_count, filtered_count, len(displayed), reason)
+        return displayed
 
     def _configure_viral_schedule(self, value: str) -> None:
         schedule = self._viral_schedule(value)
@@ -564,17 +602,25 @@ class MainWindow(QMainWindow):
                         progress_callback=progress,
                     )
                 results, state = ReelsCollectionService(store, provider).collect(pages, filters, cancel)
-                return results, list(state.messages), state.errors
+                total_collected = state.reels_collected + state.duplicates_skipped
+                return results, list(state.messages), state.errors, total_collected
             finally:
                 store.close()
 
         def show(payload):
-            results, messages, errors = payload
-            page.set_results(list({str(r.get('reel_id') or r.get('reel_url')): r for r in results}.values()))
+            results, messages, errors, total_collected = payload
+            displayed = self.apply_stored_viral_reels_filters(values, collected_override=total_collected or None)
+            if not displayed and results:
+                deduped = list({str(r.get('reel_id') or r.get('reel_url')): r for r in results}.values())
+                page.set_results(deduped)
+                page.set_scan_stats(total_collected or len(deduped), len(deduped), 0, len(deduped))
+                displayed = deduped
             if errors:
                 QMessageBox.warning(self, "Scan Reels", f"{errors} error(s):\n" + "\n".join(messages[:5]))
-            elif not results:
-                QMessageBox.information(self, "Scan Reels", "The provider returned no Reels matching the filters.")
+            elif not displayed:
+                reason = self._filter_rejection_reason(filters)
+                msg = f"The provider returned no Reels matching the filters ({reason})." if reason else "The provider returned no Reels matching the filters."
+                QMessageBox.information(self, "Scan Reels", msg)
 
         def on_cancelled():
             rows = ViralReelsStore(self.database).list_reels(filters.maximum_results * 10)
@@ -702,7 +748,10 @@ class MainWindow(QMainWindow):
             run_id, dataset_id, raw_count, valid_count, results = payload
             self.load_viral_pages()
             deduped = list({str(r.get("reel_id") or r.get("reel_url")): r for r in results}.values())
+            filtered_out = max(0, valid_count - len(deduped))
+            reason = self._filter_rejection_reason(filters) if (valid_count > 0 and not deduped) else ""
             page.set_results(deduped)
+            page.set_scan_stats(raw_count, valid_count, filtered_out, len(deduped), reason)
             QMessageBox.information(
                 self,
                 "Khôi phục Run thành công",
