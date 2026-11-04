@@ -1,12 +1,19 @@
 """Phase 3.1 download engine tests."""
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from requests.exceptions import ConnectionError as RequestsConnectionError
+
 from app.database.connection import Database
-from app.services.download_service import DownloadError, DownloadService
+from app.services.download_service import (
+    DownloadError,
+    DownloadService,
+    classify_download_error,
+)
 from app.services.project_service import ProjectService
 from app.services.video_service import VideoService
 
@@ -28,6 +35,58 @@ class DownloadTests(unittest.TestCase):
     def tearDown(self):
         self.db.close()
         self.tmp.cleanup()
+
+    def test_download_errors_are_classified_for_retry_policy(self):
+        cases = (
+            ("Connection reset by peer", "network", True),
+            ("The operation timed out", "timeout", True),
+            ("Login required", "authentication", False),
+            ("This video is not available", "unavailable", False),
+            ("HTTP Error 404: Not Found", "unavailable", False),
+            ("HTTP Error 503: Service Unavailable", "network", True),
+            ("Unsupported URL", "unsupported", False),
+            ("ffmpeg not found", "ffmpeg", False),
+            ("No module named yt_dlp", "environment", False),
+        )
+        for message, category, retryable in cases:
+            with self.subTest(message=message):
+                self.assertEqual(
+                    classify_download_error(message), (category, retryable)
+                )
+
+    def test_download_timeout_is_a_retryable_download_error(self):
+        def runner(*_args, **_kwargs):
+            raise subprocess.TimeoutExpired("yt-dlp", 1800)
+
+        with self.assertRaises(DownloadError) as error:
+            DownloadService(self.db, runner=runner).download(
+                self.project, self.video["id"]
+            )
+        self.assertEqual(error.exception.category, "timeout")
+        self.assertTrue(error.exception.retryable)
+        self.assertIn("quá thời gian", str(error.exception))
+
+    def test_ffmpeg_unavailable_is_reported_as_permanent_media_error(self):
+        runner = lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1, stderr="ERROR: ffmpeg not found", stdout=""
+        )
+        service = DownloadService(self.db, runner=runner)
+        with patch.object(service, "_find_ffmpeg", return_value=None):
+            with self.assertRaises(DownloadError) as error:
+                service.download(self.project, self.video["id"])
+        self.assertEqual(error.exception.category, "ffmpeg")
+        self.assertFalse(error.exception.retryable)
+
+    def test_ffmpeg_resolution_network_error_is_retryable(self):
+        with patch(
+            "static_ffmpeg.run.get_or_fetch_platform_executables_else_raise",
+            side_effect=RequestsConnectionError("Connection reset by peer"),
+        ):
+            with self.assertRaises(DownloadError) as error:
+                DownloadService._find_static_ffmpeg()
+
+        self.assertEqual(error.exception.category, "network")
+        self.assertTrue(error.exception.retryable)
 
     def _runner(self, command, **kwargs):
         if "-show_streams" in command:
@@ -97,6 +156,7 @@ class DownloadTests(unittest.TestCase):
                 service.download(self.project, self.video["id"])
         self.assertIn("invalid URL", str(error.exception))
         self.assertIn("database write failed", str(error.exception))
+        self.assertFalse(error.exception.retryable)
         self.assertEqual(
             self.db.list_videos(self.project)[0]["download_status"], "downloading"
         )

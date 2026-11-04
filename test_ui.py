@@ -156,6 +156,30 @@ class ProjectCsvUiTests(unittest.TestCase):
             model.flags(model.index(0, 2)) & Qt.ItemFlag.ItemIsEditable
         )
 
+    def test_project_video_status_tooltip_shows_download_error(self):
+        from PySide6.QtCore import Qt
+
+        VideoService(self.database).import_csv(
+            self.project_id,
+            "stt,title,url\n1,Reel,https://www.facebook.com/reel/1\n",
+        )
+        video = self.database.list_videos(self.project_id)[0]
+        queue = DownloadQueueService(self.database)
+        job_id = queue.enqueue(self.project_id, [video["id"]])[0]
+        queue.claim(job_id)
+        error = "[network] Connection reset by peer"
+        queue.finish(job_id, status="failed", error_message=error)
+
+        window = MainWindow(self.database)
+        self.open_project(window)
+        model = window.detail_page.video_table.model()
+        status_index = model.index(0, 5)
+        self.assertEqual(model.data(status_index), "Lỗi")
+        self.assertEqual(
+            model.data(status_index, Qt.ItemDataRole.ToolTipRole), error
+        )
+        window.close()
+
     def test_preview_dialog_sizes_one_twenty_and_one_thousand_rows(self):
         from PySide6.QtWidgets import QFrame, QPlainTextEdit, QPushButton
 

@@ -492,6 +492,7 @@ class MainWindow(QMainWindow):
                     row["queue_progress"] = job["progress"]
                     row["queue_total_bytes"] = job["total_bytes"]
                     row["queue_downloaded_bytes"] = job["downloaded_bytes"]
+                    row["download_error"] = job["error_message"]
                 decorated.append(row)
             self.detail_page.set_saved_videos(decorated)
             return True

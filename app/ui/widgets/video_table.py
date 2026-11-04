@@ -40,8 +40,11 @@ class VideoTableModel(QAbstractTableModel):
         if column == 0 and role == Qt.ItemDataRole.CheckStateRole:
             checked = self._video_key(video, index.row()) in self._checked
             return Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
-        if role == Qt.ItemDataRole.ToolTipRole and column == 4:
-            return self._value(video, "source_url")
+        if role == Qt.ItemDataRole.ToolTipRole:
+            if column == 4:
+                return self._value(video, "source_url")
+            if column == 5:
+                return self._value(video, "download_error") or None
         if role != Qt.ItemDataRole.DisplayRole:
             return None
         values = (

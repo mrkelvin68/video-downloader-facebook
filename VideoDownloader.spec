@@ -1,17 +1,21 @@
 from pathlib import Path
-
 from PyInstaller.utils.hooks import collect_all
+from static_ffmpeg import run as static_ffmpeg_run
 
 ROOT = Path(SPECPATH)
+ffmpeg_path, ffprobe_path = (
+    static_ffmpeg_run.get_or_fetch_platform_executables_else_raise()
+)
+if not Path(ffmpeg_path).is_file() or not Path(ffprobe_path).is_file():
+    raise FileNotFoundError("static_ffmpeg did not provide FFmpeg and FFprobe")
 app_datas, app_binaries, app_hidden = collect_all("app")
 ytdlp_datas, ytdlp_binaries, ytdlp_hidden = collect_all("yt_dlp")
 static_datas, static_binaries, static_hidden = collect_all("static_ffmpeg")
 
-ffmpeg_dir = Path(__import__("sys").prefix) / "Lib" / "site-packages" / "static_ffmpeg" / "bin" / "win32"
-if ffmpeg_dir.is_dir():
-    for binary in ffmpeg_dir.glob("*"):
-        if binary.is_file() and binary.suffix.lower() in {".exe", ".dll"}:
-            app_binaries.append((str(binary), "static_ffmpeg/bin/win32"))
+ffmpeg_dir = Path(ffmpeg_path).parent
+for binary in ffmpeg_dir.glob("*"):
+    if binary.is_file() and binary.suffix.lower() in {".exe", ".dll"}:
+        app_binaries.append((str(binary), "static_ffmpeg/bin/win32"))
 
 app_datas.append((str(ROOT / "app" / "ui" / "styles.qss"), "app/ui"))
 

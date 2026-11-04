@@ -5,18 +5,11 @@ import uuid
 from datetime import UTC, datetime
 
 from app.database.connection import Database
+from app.services.download_service import classify_download_error
 
 
 ACTIVE_STATUSES = ("queued", "downloading")
 MAX_RETRIES = 3
-PERMANENT_ERROR_MARKERS = (
-    "invalid url",
-    "unsupported url",
-    "not a valid url",
-    "no suitable extractor",
-)
-
-
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
@@ -240,6 +233,34 @@ class DownloadQueueService:
                 ),
             )
 
+    def record_retry(self, job_id: str, error_message: str) -> int | None:
+        connection = self.database.connection
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = connection.execute(
+                """SELECT retry_count FROM download_jobs
+                   WHERE job_id=? AND status='downloading'""",
+                (job_id,),
+            ).fetchone()
+            if row is None or row["retry_count"] >= MAX_RETRIES:
+                connection.commit()
+                return None
+            retry_count = row["retry_count"] + 1
+            cursor = connection.execute(
+                """UPDATE download_jobs
+                   SET retry_count=?, error_message=?
+                   WHERE job_id=? AND status='downloading'""",
+                (retry_count, error_message, job_id),
+            )
+            if cursor.rowcount != 1:
+                connection.commit()
+                return None
+            connection.commit()
+            return retry_count
+        except BaseException:
+            connection.rollback()
+            raise
+
     def finish(
         self,
         job_id: str,
@@ -408,11 +429,7 @@ class DownloadQueueService:
         try:
             failed = list(
                 connection.execute(
-                    f"""SELECT j.project_id, j.video_id,
-                               (SELECT MAX(history.retry_count)
-                                FROM download_jobs AS history
-                                WHERE history.video_id=j.video_id) AS retry_count,
-                               j.error_message
+                    f"""SELECT j.project_id, j.video_id, j.error_message
                         FROM download_jobs AS j
                         WHERE j.status IN ('failed', 'interrupted')
                           AND j.job_id IN ({placeholders})
@@ -423,8 +440,7 @@ class DownloadQueueService:
             failed = [
                 row
                 for row in failed
-                if row["retry_count"] < MAX_RETRIES
-                and not self._is_permanent_error(row["error_message"])
+                if not self._is_permanent_error(row["error_message"])
                 and connection.execute(
                     "SELECT download_status FROM videos WHERE id=? AND project_id=?",
                     (row["video_id"], row["project_id"]),
@@ -457,7 +473,7 @@ class DownloadQueueService:
                         row["project_id"],
                         row["video_id"],
                         bounds["max_order"] + index + 1,
-                        row["retry_count"] + 1,
+                        0,
                         now,
                     ),
                 )
@@ -475,8 +491,14 @@ class DownloadQueueService:
 
     @staticmethod
     def _is_permanent_error(message: str | None) -> bool:
-        normalized = (message or "").casefold()
-        return any(marker in normalized for marker in PERMANENT_ERROR_MARKERS)
+        category, _ = classify_download_error(message or "")
+        return category in {
+            "authentication",
+            "environment",
+            "ffmpeg",
+            "unavailable",
+            "unsupported",
+        }
 
     def recover_interrupted(self) -> int:
         connection = self.database.connection

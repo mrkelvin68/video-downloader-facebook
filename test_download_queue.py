@@ -206,7 +206,7 @@ class DownloadQueueServiceTests(unittest.TestCase):
         self.assertEqual(self.queue.get_job(first)["status"], "queued")
         self.assertEqual(self.queue.get_job(second)["status"], "queued")
 
-    def test_retry_rejects_permanent_errors_and_stops_at_limit(self):
+    def test_retry_rejects_permanent_errors_and_resets_automatic_retry_budget(self):
         permanent = self.queue.enqueue(self.project_id, [self.video_ids[0]])[0]
         self.queue.claim(permanent)
         self.queue.finish(
@@ -216,24 +216,15 @@ class DownloadQueueServiceTests(unittest.TestCase):
         self.assertEqual(self.queue.get_job(permanent)["retry_count"], 0)
 
         current_job = self.queue.enqueue(self.project_id, [self.video_ids[1]])[0]
-        original_job = current_job
-        for retry_number in range(MAX_RETRIES + 1):
-            self.queue.claim(current_job)
-            self.queue.finish(
-                current_job,
-                status="failed",
-                error_message="Network connection reset",
-            )
-            retry_jobs = self.queue.retry([current_job])
-            if retry_number < MAX_RETRIES:
-                self.assertEqual(len(retry_jobs), 1)
-                current_job = retry_jobs[0]
-                self.assertEqual(
-                    self.queue.get_job(current_job)["retry_count"], retry_number + 1
-                )
-            else:
-                self.assertEqual(retry_jobs, [])
-                self.assertEqual(self.queue.retry([original_job]), [])
+        self.queue.claim(current_job)
+        for _ in range(MAX_RETRIES):
+            self.assertIsNotNone(self.queue.record_retry(current_job, "network error"))
+        self.queue.finish(
+            current_job, status="failed", error_message="Network connection reset"
+        )
+        retry_jobs = self.queue.retry([current_job])
+        self.assertEqual(len(retry_jobs), 1)
+        self.assertEqual(self.queue.get_job(retry_jobs[0])["retry_count"], 0)
 
     def test_recovery_marks_worker_crash_interrupted_without_auto_retry(self):
         job_id = self.queue.enqueue(self.project_id, [self.video_ids[0]])[0]
@@ -380,6 +371,111 @@ class DownloadQueueServiceTests(unittest.TestCase):
 
 
 class DownloadWorkerTests(unittest.TestCase):
+    def test_worker_retries_temporary_failures_with_exponential_backoff(self):
+        temp = tempfile.TemporaryDirectory()
+        try:
+            root = Path(temp.name)
+            database = Database(root / "retry.sqlite3")
+            project_id = ProjectService(database).create(
+                "Retry", "retry", str(root / "retry-project")
+            )
+            VideoService(database).import_csv(
+                project_id,
+                "stt,ten_video,url\n1,Video,https://www.facebook.com/reel/1\n",
+            )
+            video = database.list_videos(project_id)[0]
+            job_id = DownloadQueueService(database).enqueue(
+                project_id, [video["id"]]
+            )[0]
+            database.close()
+
+            attempts = []
+
+            class TransientDownloadService:
+                def __init__(self, _database):
+                    pass
+
+                def download(self, *_args, **_kwargs):
+                    attempts.append(None)
+                    if len(attempts) < 3:
+                        raise DownloadError("Connection reset by peer")
+
+            worker = DownloadWorker(str(root / "retry.sqlite3"), job_id)
+            with (
+                patch(
+                    "app.ui.download_worker.DownloadService",
+                    TransientDownloadService,
+                ),
+                patch("app.ui.download_worker.time.sleep") as sleep,
+            ):
+                worker.run()
+
+            verify = Database(root / "retry.sqlite3")
+            job = DownloadQueueService(verify).get_job(job_id)
+            self.assertEqual(len(attempts), 3)
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
+            self.assertEqual(job["status"], "completed")
+            self.assertEqual(job["retry_count"], 2)
+            verify.close()
+        finally:
+            temp.cleanup()
+
+    def test_worker_stops_after_three_retries_or_permanent_error(self):
+        for error_text, expected_attempts, expected_delays in (
+            ("Network connection reset", 4, [1, 2, 4]),
+            ("Login required", 1, []),
+        ):
+            with self.subTest(error=error_text):
+                temp = tempfile.TemporaryDirectory()
+                try:
+                    root = Path(temp.name)
+                    database = Database(root / "retry.sqlite3")
+                    project_id = ProjectService(database).create(
+                        "Retry", "retry", str(root / "retry-project")
+                    )
+                    VideoService(database).import_csv(
+                        project_id,
+                        "stt,ten_video,url\n1,Video,https://www.facebook.com/reel/1\n",
+                    )
+                    video = database.list_videos(project_id)[0]
+                    job_id = DownloadQueueService(database).enqueue(
+                        project_id, [video["id"]]
+                    )[0]
+                    database.close()
+
+                    attempts = []
+
+                    class FailingDownloadService:
+                        def __init__(self, _database):
+                            pass
+
+                        def download(self, *_args, **_kwargs):
+                            attempts.append(None)
+                            raise DownloadError(error_text)
+
+                    worker = DownloadWorker(str(root / "retry.sqlite3"), job_id)
+                    with (
+                        patch(
+                            "app.ui.download_worker.DownloadService",
+                            FailingDownloadService,
+                        ),
+                        patch("app.ui.download_worker.time.sleep") as sleep,
+                    ):
+                        worker.run()
+
+                    verify = Database(root / "retry.sqlite3")
+                    job = DownloadQueueService(verify).get_job(job_id)
+                    self.assertEqual(len(attempts), expected_attempts)
+                    self.assertEqual(job["retry_count"], len(expected_delays))
+                    self.assertEqual(job["status"], "failed")
+                    self.assertEqual(
+                        [call.args[0] for call in sleep.call_args_list],
+                        expected_delays,
+                    )
+                    verify.close()
+                finally:
+                    temp.cleanup()
+
     def test_worker_emits_real_progress_and_finishes_one_job(self):
         from PySide6.QtWidgets import QApplication
 

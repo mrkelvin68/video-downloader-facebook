@@ -4,13 +4,13 @@ from __future__ import annotations
 import json
 import os
 import queue
-import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import zipfile
 from pathlib import Path
 from typing import Callable
 
@@ -18,7 +18,101 @@ from app.database.connection import Database
 
 
 class DownloadError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: str | None = None,
+        retryable: bool | None = None,
+    ) -> None:
+        inferred_category, inferred_retryable = classify_download_error(message)
+        self.category = category or inferred_category
+        self.retryable = (
+            inferred_retryable if retryable is None else retryable
+        )
+        super().__init__(f"[{self.category}] {message}")
+
+
+def classify_download_error(message: str) -> tuple[str, bool]:
+    normalized = message.casefold()
+    if any(
+        marker in normalized
+        for marker in ("timed out", "timeout", "quá thời gian", "hết thời gian")
+    ):
+        return "timeout", True
+    if any(
+        marker in normalized
+        for marker in (
+            "ffmpeg",
+            "ffprobe",
+            "postprocessing",
+            "merging formats",
+            "remux",
+        )
+    ):
+        return "ffmpeg", False
+    if any(
+        marker in normalized
+        for marker in (
+            "login required",
+            "log in",
+            "login",
+            "authentication",
+            "cookies",
+            "checkpoint",
+            "not authorized",
+            "http error 401",
+            "http error 403",
+        )
+    ):
+        return "authentication", False
+    if any(
+        marker in normalized
+        for marker in (
+            "404",
+            "not found",
+            "video unavailable",
+            "content is not available",
+            "private",
+            "removed",
+            "deleted",
+            "does not exist",
+        )
+    ):
+        return "unavailable", False
+    if any(
+        marker in normalized
+        for marker in (
+            "connection",
+            "network",
+            "dns",
+            "name resolution",
+            "ssl",
+            "tls",
+            "http error 429",
+            "http error 5",
+            "temporarily unavailable",
+            "remote end closed",
+            "unable to download webpage",
+        )
+    ):
+        return "network", True
+    if "unavailable" in normalized or "not available" in normalized:
+        return "unavailable", False
+    if any(
+        marker in normalized
+        for marker in (
+            "invalid url",
+            "unsupported url",
+            "not a valid url",
+            "no suitable extractor",
+            "not supported",
+        )
+    ):
+        return "unsupported", False
+    if "no module named yt_dlp" in normalized or "yt-dlp executable" in normalized:
+        return "environment", False
+    return "other", False
 
 
 class DownloadService:
@@ -96,9 +190,16 @@ class DownloadService:
                     else:
                         result = self._run_with_progress(command, progress_callback)
                 except FileNotFoundError as exc:
-                    raise DownloadError("Không tìm thấy Python/yt-dlp. Chạy lại py install.py") from exc
+                    raise DownloadError(
+                        "Không tìm thấy Python/yt-dlp. Chạy lại py install.py",
+                        category="environment",
+                    ) from exc
                 except subprocess.TimeoutExpired as exc:
-                    raise DownloadError("Tải video quá thời gian cho phép") from exc
+                    raise DownloadError(
+                        "Tải video quá thời gian cho phép",
+                        category="timeout",
+                        retryable=True,
+                    ) from exc
                 if result.returncode != 0:
                     reason = (result.stderr or result.stdout or "Không rõ nguyên nhân").strip()
                     raise DownloadError("yt-dlp thất bại: " + reason[-600:])
@@ -131,7 +232,9 @@ class DownloadService:
                 self._set_status(project_id, video_id, "failed")
             except Exception as status_error:
                 raise DownloadError(
-                    f"{download_error}; không thể lưu trạng thái thất bại: {status_error}"
+                    f"{download_error}; không thể lưu trạng thái thất bại: {status_error}",
+                    category="other",
+                    retryable=False,
                 ) from status_error
             raise
 
@@ -233,27 +336,47 @@ class DownloadService:
             raise DownloadError("Tệp MP4 rỗng hoặc không tồn tại")
         probe = self.ffprobe()
         if not probe:
-            raise DownloadError("Không tìm thấy FFprobe; cài FFmpeg hoặc đặt FFPROBE trong PATH")
+            raise DownloadError(
+                "Không tìm thấy FFprobe; cài FFmpeg hoặc đặt FFPROBE trong PATH",
+                category="ffmpeg",
+            )
         try:
             result = self.runner([
                 probe, "-v", "error", "-show_entries", "format=duration,size",
                 "-show_streams", "-of", "json", str(path),
             ], capture_output=True, text=True, timeout=60, check=False)
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            raise DownloadError("FFprobe không thể đọc file MP4") from exc
+        except FileNotFoundError as exc:
+            raise DownloadError(
+                "Không thể chạy FFprobe", category="ffmpeg"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise DownloadError(
+                "FFprobe hết thời gian đọc file MP4",
+                category="timeout",
+                retryable=True,
+            ) from exc
         if result.returncode != 0:
-            raise DownloadError("FFprobe thất bại: " + (result.stderr or "Không rõ nguyên nhân").strip()[-400:])
+            raise DownloadError(
+                "FFprobe thất bại: "
+                + (result.stderr or "Không rõ nguyên nhân").strip()[-400:],
+                category="ffmpeg",
+            )
         try:
             metadata = json.loads(result.stdout)
             streams = metadata.get("streams", [])
             format_info = metadata.get("format", {})
             duration = float(format_info.get("duration", 0))
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise DownloadError("FFprobe trả về metadata không hợp lệ") from exc
+            raise DownloadError(
+                "FFprobe trả về metadata không hợp lệ", category="ffmpeg"
+            ) from exc
 
         video_streams = [s for s in streams if s.get("codec_type") == "video"]
         if not video_streams or duration <= 0:
-            raise DownloadError("MP4 không có video stream hoặc duration không hợp lệ")
+            raise DownloadError(
+                "MP4 không có video stream hoặc duration không hợp lệ",
+                category="ffmpeg",
+            )
 
     @staticmethod
     def _yt_dlp_command() -> list[str]:
@@ -275,12 +398,24 @@ class DownloadService:
         configured = os.environ.get("FFMPEG") or shutil.which("ffmpeg")
         if configured:
             return configured
+        tools = DownloadService._find_static_ffmpeg()
+        return tools[0] if tools else None
+
+    @staticmethod
+    def _find_static_ffmpeg() -> tuple[str, str] | None:
         try:
             from static_ffmpeg import run
-            ffmpeg, _ = run.get_or_fetch_platform_executables_else_raise()
-            return ffmpeg
-        except Exception:
+            from requests.exceptions import RequestException
+        except ImportError:
             return None
+        try:
+            return run.get_or_fetch_platform_executables_else_raise()
+        except RequestException as exc:
+            raise DownloadError(str(exc) or type(exc).__name__) from exc
+        except (OSError, zipfile.BadZipFile) as exc:
+            raise DownloadError(
+                f"FFmpeg/FFprobe không khả dụng: {exc}", category="ffmpeg"
+            ) from exc
 
     @staticmethod
     def _find_ffprobe() -> str | None:
@@ -293,12 +428,8 @@ class DownloadService:
         configured = os.environ.get("FFPROBE") or shutil.which("ffprobe")
         if configured:
             return configured
-        try:
-            from static_ffmpeg import run
-            _ffmpeg, ffprobe = run.get_or_fetch_platform_executables_else_raise()
-            return ffprobe
-        except Exception:
-            return None
+        tools = DownloadService._find_static_ffmpeg()
+        return tools[1] if tools else None
 
     def _set_status(
         self, project_id: str, video_id: str, status: str, video_path: str | None = None, thumb_path: str | None = None

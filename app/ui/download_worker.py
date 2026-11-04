@@ -6,8 +6,8 @@ import time
 from PySide6.QtCore import QThread, Signal
 
 from app.database.connection import Database
-from app.services.download_queue_service import DownloadQueueService
-from app.services.download_service import DownloadService
+from app.services.download_queue_service import MAX_RETRIES, DownloadQueueService
+from app.services.download_service import DownloadError, DownloadService
 
 
 class DownloadWorker(QThread):
@@ -56,11 +56,23 @@ class DownloadWorker(QThread):
                     self.job_id, percent, downloaded, total, speed, eta
                 )
 
-            DownloadService(database).download(
-                job["project_id"],
-                job["video_id"],
-                progress_callback=report_progress,
-            )
+            retry_count = job["retry_count"]
+            downloader = DownloadService(database)
+            while True:
+                try:
+                    downloader.download(
+                        job["project_id"],
+                        job["video_id"],
+                        progress_callback=report_progress,
+                    )
+                    break
+                except DownloadError as exc:
+                    if not exc.retryable or retry_count >= MAX_RETRIES:
+                        raise
+                    retry_count = jobs.record_retry(self.job_id, str(exc))
+                    if retry_count is None:
+                        raise
+                    time.sleep(2 ** (retry_count - 1))
             jobs.finish(self.job_id, status="completed")
             self.jobFinished.emit(self.job_id, True, "")
         except Exception as exc:
