@@ -16,7 +16,7 @@ from app.services.download_service import (
 
 
 class DownloadWorker(QThread):
-    progress = Signal(str, float, int, object, object, object)
+    progress = Signal(str, float, object, object, object, object)
     jobFinished = Signal(str, bool, str)
 
     def __init__(self, database_path: str, job_id: str, parent=None) -> None:
