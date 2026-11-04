@@ -28,6 +28,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QScrollArea,
+    QStackedWidget,
+    QCheckBox,
+    QGroupBox,
     QRadioButton,
     QButtonGroup,
 )
@@ -40,7 +43,29 @@ class _DropdownDelegate(QStyledItemDelegate):
         return size
 
 
+def _arrow_icon_path() -> str:
+    """Render the combo chevron once to a temp PNG so QSS can reference it (works frozen)."""
+    import os
+    import tempfile
+
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+
+    path = os.path.join(tempfile.gettempdir(), "vdf_combo_chevron.png")
+    if not os.path.exists(path):
+        pixmap = QPixmap(12, 12)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor("#475569"), 1.8))
+        painter.drawPolyline([QPointF(2.5, 4.0), QPointF(6.0, 7.5), QPointF(9.5, 4.0)])
+        painter.end()
+        pixmap.save(path)
+    return path.replace("\\", "/")
+
+
 class WorkerSignals(QObject):
+
     progress = Signal(int, int, str)
     result = Signal(object)
     error = Signal(str)
@@ -94,6 +119,8 @@ class ViralReelsPage(QWidget):
     pageAddRequested = Signal(str)
     pagesImportRequested = Signal(str)
     pagesDeleteRequested = Signal(list)
+    exportPagesCsvRequested = Signal(list)
+    recoverRunRequested = Signal()
 
     COLUMNS = (
         ("page_name", "Page"),
@@ -115,12 +142,17 @@ class ViralReelsPage(QWidget):
         super().__init__(parent)
         self._records: list[dict[str, Any]] = []
         self._worker: CancellableWorker | None = None
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(34, 28, 34, 28)
-        layout.setSpacing(12)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 6, 24, 6)
+        root.setSpacing(4)
         title = QLabel("Viral Reels Finder")
         title.setObjectName("title")
-        layout.addWidget(title)
+        root.addWidget(title)
+        self.stack = QStackedWidget()
+        reels_widget = QWidget()
+        layout = QVBoxLayout(reels_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
 
         filters = QFormLayout()
         filters.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
@@ -140,7 +172,7 @@ class ViralReelsPage(QWidget):
         self.date_to.dateChanged.connect(self._date_edited)
         self.max_results = QSpinBox()
         self.max_results.setRange(1, 10_000)
-        self.max_results.setValue(100)
+        self.max_results.setValue(30)
         self.mode_page = QRadioButton("Scan by Page")
         self.mode_discover = QRadioButton("Discover trending Reels")
         self.mode_page.setChecked(True)
@@ -156,69 +188,103 @@ class ViralReelsPage(QWidget):
         self.schedule = QComboBox()
         self.schedule.addItems(["Manual", "Every 6 hours", "Every 12 hours", "Daily"])
         mode_row = QHBoxLayout()
+        self.mode_find = QRadioButton("Find Pages")
+        self.mode_group.addButton(self.mode_find)
+        self.mode_find.toggled.connect(self._find_mode_toggled)
+        mode_row.addWidget(self.mode_find)
         mode_row.addWidget(self.mode_page)
         mode_row.addWidget(self.mode_discover)
         mode_row.addStretch()
-        layout.addLayout(mode_row)
-        provider_card = QVBoxLayout()
-        provider_card.addWidget(QLabel("Provider"))
-        provider_card.addWidget(self.provider_status)
-        provider_card.addWidget(self.provider_button)
-        layout.addLayout(provider_card)
+        root.addLayout(mode_row)
+        self.stack.addWidget(self._build_find_view())
+        self.stack.addWidget(reels_widget)
+        root.addWidget(self.stack, 1)
+        # A. Provider bar
+        provider_bar = QHBoxLayout()
+        self.provider_status.setWordWrap(False)
+        provider_bar.addWidget(self.provider_status, 1)
+        provider_bar.addWidget(self.provider_button)
+        layout.addLayout(provider_bar)
 
-        basic_filters = QFormLayout()
-        basic_filters.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        for label, widget in (("Country", self.country), ("Language", self.language), ("Topic", self.topic), ("Keywords", self.keywords), ("Maximum results", self.max_results)):
-            basic_filters.addRow(label, widget)
-        layout.addLayout(basic_filters)
-
-        advanced_filters = QFormLayout()
-        advanced_filters.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        for label, widget in (("Date preset", self.date_preset), ("Minimum views", self.min_views), ("Date from", self.date_from), ("Date to", self.date_to), ("Schedule", self.schedule)):
-            advanced_filters.addRow(label, widget)
-        advanced_widget = QWidget()
-        advanced_widget.setLayout(advanced_filters)
-        advanced_scroll = QScrollArea()
-        advanced_scroll.setWidgetResizable(True)
-        advanced_scroll.setMaximumHeight(150)
-        advanced_scroll.setWidget(advanced_widget)
-        layout.addWidget(QLabel("Advanced filters"))
-        layout.addWidget(advanced_scroll)
-
-        page_actions = QHBoxLayout()
+        # B. Page selection
+        add_row = QHBoxLayout()
         self.page_url_input = QLineEdit()
-        self.page_url_input.setPlaceholderText("Facebook Page URL")
-        page_actions.addWidget(self.page_url_input)
+        self.page_url_input.setPlaceholderText("Facebook Page URL, e.g. https://www.facebook.com/PageName")
+        self.page_url_input.setMinimumHeight(36)
+        self.page_url_input.returnPressed.connect(self._add_page)
         self.add_page_button = self._button("Add Page", "secondary", self._add_page)
         self.import_pages_button = self._button("Import CSV", "secondary", self._import_pages)
-        self.delete_pages_button = self._button("Delete Pages", "secondary", self._delete_pages)
-        page_actions.addWidget(self.add_page_button)
-        page_actions.addWidget(self.import_pages_button)
-        page_actions.addWidget(self.delete_pages_button)
-        layout.addLayout(page_actions)
-        self.pages = QListView()
-        self.pages_model = QStandardItemModel(self)
+        for widget in (self.page_url_input, self.add_page_button, self.import_pages_button):
+            add_row.addWidget(widget, 1 if widget is self.page_url_input else 0)
+        layout.addLayout(add_row)
+        self.pages_model = QStandardItemModel(0, 3, self)
+        self.pages_model.setHorizontalHeaderLabels(["", "Page", "Facebook Page URL"])
+        self.pages = QTableView()
         self.pages.setModel(self.pages_model)
-        self.pages.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        layout.addWidget(self.pages)
+        self.pages.setAlternatingRowColors(True)
+        self.pages.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.pages.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.pages.verticalHeader().hide()
+        self.pages.horizontalHeader().setStretchLastSection(True)
+        self.pages.setColumnWidth(0, 36)
+        self.pages.setColumnWidth(1, 260)
+        self.pages.verticalHeader().setDefaultSectionSize(26)
+        self.pages.setMinimumHeight(68)
+        self.pages.setMaximumHeight(82)
+        self.pages_model.itemChanged.connect(self._update_scan_pages_state)
+        layout.addWidget(self.pages, 1)
+        select_row = QHBoxLayout()
+        self.scan_select_all = QCheckBox("Select all")
+        self.scan_select_all.clicked.connect(self._select_all_scan_pages)
+        self.scan_selected_label = QLabel("Selected: 0 / 0")
+        self.delete_pages_button = self._button("Delete selected Pages", "secondary", self._delete_pages)
+        select_row.addWidget(self.scan_select_all)
+        select_row.addWidget(self.scan_selected_label)
+        select_row.addStretch()
+        select_row.addWidget(self.delete_pages_button)
+        layout.addLayout(select_row)
+
+        # C. Scan options (+ optional advanced filters)
+        options = QHBoxLayout()
+        self.min_views.setMinimumHeight(36)
+        self.max_results.setMinimumHeight(36)
+        for label, widget in (("Maximum results", self.max_results), ("Minimum views", self.min_views), ("Date", self.date_preset)):
+            options.addWidget(QLabel(label))
+            options.addWidget(widget, 1)
+        layout.addLayout(options)
+        self.advanced_group = QGroupBox("Advanced filters (apply only when enabled)")
+        self.advanced_group.setCheckable(True)
+        self.advanced_group.setChecked(False)
+        advanced_filters = QFormLayout(self.advanced_group)
+        for label, widget in (("Country", self.country), ("Language", self.language), ("Topic", self.topic), ("Date from", self.date_from), ("Date to", self.date_to), ("Schedule", self.schedule)):
+            advanced_filters.addRow(label, widget)
+        self.advanced_group.toggled.connect(lambda on: [advanced_filters.itemAt(i).widget().setVisible(on) for i in range(advanced_filters.count()) if advanced_filters.itemAt(i).widget()])
+        self.advanced_group.toggled.connect(lambda on: self.advanced_group.setMaximumHeight(16777215 if on else 22))
+        self.advanced_group.toggled.emit(False)
+        layout.addWidget(self.advanced_group)
+
+        # D. Actions
         actions = QHBoxLayout()
         self.find_pages_button = self._button("Find Pages", "primary", self._find_pages)
-        self.scan_reels_button = self._button("Scan Reels", "primary", self._scan_reels)
+        self.scan_reels_button = self._button("Quét Reels theo Page", "primary", self._scan_reels)
+        self.recover_run_button = self._button("Khôi phục Run cũ", "secondary", self.recoverRunRequested.emit)
         self.stop_button = self._button("Stop", "danger", self.stopRequested.emit)
         self.stop_button.setEnabled(False)
         self.export_csv_button = self._button("Export CSV", "secondary", self._export_csv)
         self.export_excel_button = self._button("Export Excel", "secondary", self._export_excel)
         self.sync_sheets_button = self._button("Sync Google Sheets", "secondary", self._sync_sheets)
-        for button in (self.find_pages_button, self.scan_reels_button, self.stop_button,
-                       self.export_csv_button, self.export_excel_button, self.sync_sheets_button):
+        for button in (self.scan_reels_button, self.recover_run_button, self.stop_button, self.export_csv_button, self.export_excel_button, self.sync_sheets_button):
             actions.addWidget(button)
+        self.find_pages_button.hide()
         actions.addStretch()
         layout.addLayout(actions)
 
         self.progress_label = QLabel("Pages 0/0 · Reels 0/0 · Results 0")
         self.progress_label.setObjectName("detailMeta")
-        layout.addWidget(self.progress_label)
+        
+        # E. Results
         self.table = QTableView()
+        self.table.verticalHeader().setDefaultSectionSize(28)
         self.model = QStandardItemModel(0, len(self.COLUMNS), self)
         self.model.setHorizontalHeaderLabels([label for _, label in self.COLUMNS])
         self.table.setModel(self.model)
@@ -230,32 +296,181 @@ class ViralReelsPage(QWidget):
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_menu)
         self.table.doubleClicked.connect(self._open_index_url)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.table.horizontalHeader().setMinimumSectionSize(90)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setMinimumSectionSize(70)
+        header.setStretchLastSection(True)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.table, 1)
+        keys = [key for key, _ in self.COLUMNS]
+        for key in ("country", "language", "topic", "data_source"):
+            self.table.setColumnHidden(keys.index(key), True)
+        header.setSectionsMovable(True)
+        header.moveSection(keys.index("reel_url"), 0)
+        for key, width in (("reel_url", 300), ("page_name", 160), ("caption", 260), ("views", 80), ("likes", 80), ("comments", 90), ("shares", 80), ("published_at", 150)):
+            self.table.setColumnWidth(keys.index(key), width)
+        layout.addWidget(self.table, 4)
 
         row_actions = QHBoxLayout()
         self.remove_button = self._button("Remove selected", "danger", self.remove_selected)
         self.clear_button = self._button("Clear", "danger", self.clear_results)
         row_actions.addWidget(self.remove_button)
         row_actions.addWidget(self.clear_button)
-        row_actions.addStretch()
+        row_actions.insertWidget(0, self.progress_label, 1)
         layout.addLayout(row_actions)
         self._update_result_actions()
+        self._update_scan_pages_state()
+        self.mode_find.setChecked(True)
         self.table.selectionModel().selectionChanged.connect(self._update_result_actions)
+
+    COMBO_QSS = (
+        "QComboBox { min-height: 24px; padding: 5px 30px 5px 10px; border: 1px solid #3d4a63; border-radius: 6px; }"
+        "QComboBox:hover, QComboBox:focus { border-color: #6f8fd8; }"
+        "QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: center right; width: 26px; border: none; }"
+        "QComboBox::down-arrow { image: url({ARROW}); width: 12px; height: 12px; margin-right: 8px; }"
+        "QComboBox QAbstractItemView { padding: 4px; outline: 0; selection-background-color: #40506b; }"
+        "QComboBox QAbstractItemView::item { min-height: 28px; padding: 2px 8px; }"
+        "QComboBox QAbstractItemView::item:hover { background: #33415c; }"
+    )
 
     def _dropdown(self, items: Sequence[str]) -> QComboBox:
         combo = QComboBox()
         combo.addItems(items)
-        combo.setView(QListView())
-        combo.view().setItemDelegate(_DropdownDelegate(combo.view()))
-        combo.view().setUniformItemSizes(True)
         combo.setMaxVisibleItems(8)
-        combo.setStyleSheet("QComboBox { padding: 6px 8px; } QComboBox QAbstractItemView { padding: 4px; selection-background-color: #40506b; }")
+        combo.setMinimumHeight(36)
+        combo.setMinimumContentsLength(max((len(item) for item in items), default=8))
+        combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        combo.setStyleSheet(self.COMBO_QSS.replace("{ARROW}", _arrow_icon_path()))
         return combo
 
+    PAGE_COLUMNS = (("", ""), ("Page Name", "page_name"), ("Facebook Page URL", "page_url"), ("Page ID", "page_id"), ("Data Source", "data_source"))
+
+    def _build_find_view(self) -> QWidget:
+        view = QWidget()
+        box = QVBoxLayout(view)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(10)
+        self.find_keywords = QLineEdit()
+        self.find_keywords.setPlaceholderText("Keywords, comma separated")
+        self.find_country = self._dropdown(["All", "Vietnam", "United States", "China", "Thailand", "South Korea", "Japan", "Other"])
+        self.find_max = QSpinBox()
+        self.find_max.setRange(1, 100)
+        self.find_max.setValue(50)
+        self.find_max.setMinimumHeight(36)
+        self.find_keywords.setMinimumHeight(36)
+        self.find_provider_status = QLabel("Provider: not configured")
+        self.find_provider_status.setWordWrap(True)
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.addRow("Keywords", self.find_keywords)
+        form.addRow("Country", self.find_country)
+        form.addRow("Maximum results", self.find_max)
+        box.addLayout(form)
+        provider_row = QHBoxLayout()
+        provider_row.addWidget(self.find_provider_status, 1)
+        provider_row.addWidget(self._button("Configure provider", "secondary", self.providerRequested.emit))
+        self.find_pages_button2 = self._button("Find Pages", "primary", self._find_pages)
+        provider_row.addWidget(self.find_pages_button2)
+        box.addLayout(provider_row)
+        self.found_model = QStandardItemModel(0, len(self.PAGE_COLUMNS), self)
+        self.found_model.setHorizontalHeaderLabels([label for label, _ in self.PAGE_COLUMNS])
+        self.found_table = QTableView()
+        self.found_table.setModel(self.found_model)
+        self.found_table.setAlternatingRowColors(True)
+        self.found_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.found_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.found_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.found_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.found_table.verticalHeader().hide()
+        header = self.found_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
+        for column, width in enumerate((36, 260, 420, 160, 120)):
+            self.found_table.setColumnWidth(column, width)
+        self.found_table.doubleClicked.connect(self._open_found_url)
+        self.found_model.itemChanged.connect(self._update_found_actions)
+        self.found_table.selectionModel().selectionChanged.connect(self._update_found_actions)
+        box.addWidget(self.found_table, 1)
+        actions = QHBoxLayout()
+        self.found_count = QLabel("Pages: 0")
+        self.select_all_box = QCheckBox("Select all")
+        self.select_all_box.clicked.connect(self._select_all_found)
+        self.copy_url_button = self._button("Copy Page URL", "secondary", self.copy_found_urls)
+        self.export_pages_button = self._button("Export CSV", "secondary", self._export_pages_csv)
+        self.export_selected_button = self._button("Export Selected", "secondary", lambda: self._export_pages_csv(True))
+        for widget in (self.found_count, self.select_all_box):
+            actions.addWidget(widget)
+        actions.addStretch()
+        for widget in (self.copy_url_button, self.export_selected_button, self.export_pages_button):
+            actions.addWidget(widget)
+        box.addLayout(actions)
+        self._update_found_actions()
+        return view
+
+    def set_found_pages(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        self._bulk = True
+        self.found_model.removeRows(0, self.found_model.rowCount())
+        seen: set[str] = set()
+        for row in rows:
+            url = str(row.get("page_url") or "")
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            check = QStandardItem()
+            check.setCheckable(True)
+            check.setEditable(False)
+            cells = [check]
+            for _, key in self.PAGE_COLUMNS[1:]:
+                item = QStandardItem(str(row.get(key) or ""))
+                item.setEditable(False)
+                item.setToolTip(item.text())
+                cells.append(item)
+            self.found_model.appendRow(cells)
+        self._bulk = False
+        self.select_all_box.setChecked(False)
+        self._update_found_actions()
+
+    def found_records(self, selected_only: bool = False) -> list[dict[str, str]]:
+        rows = range(self.found_model.rowCount())
+        if selected_only:
+            checked = {r for r in rows if self.found_model.item(r, 0).checkState() == Qt.CheckState.Checked}
+            highlighted = {i.row() for i in self.found_table.selectionModel().selectedRows()}
+            rows = sorted(checked | highlighted)
+        return [{key: self.found_model.item(r, c).text() for c, (_, key) in enumerate(self.PAGE_COLUMNS) if c} for r in rows]
+
+    def _update_found_actions(self, *_args: Any) -> None:
+        if getattr(self, "_bulk", False):
+            return
+        total = self.found_model.rowCount()
+        selected = len(self.found_records(True)) if total else 0
+        self.found_count.setText(f"Pages: {total}" + (f" · Selected: {selected}" if selected else ""))
+        self.export_pages_button.setEnabled(total > 0)
+        self.export_selected_button.setEnabled(selected > 0)
+        self.copy_url_button.setEnabled(total > 0)
+
+    def _select_all_found(self, checked: bool) -> None:
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        self._bulk = True
+        for row in range(self.found_model.rowCount()):
+            self.found_model.item(row, 0).setCheckState(state)
+        self._bulk = False
+        self._update_found_actions()
+
+    def copy_found_urls(self) -> None:
+        rows = self.found_records(True) or self.found_records()
+        QGuiApplication.clipboard().setText("\n".join(row["page_url"] for row in rows))
+
+    def _open_found_url(self, index: Any) -> None:
+        url = self.found_model.item(index.row(), 2).text()
+        if url:
+            webbrowser.open(url)
+
+    def _export_pages_csv(self, selected_only: bool = False) -> None:
+        rows = self.found_records(selected_only is True)
+        if rows:
+            self.exportPagesCsvRequested.emit(rows)
+
+    def _find_mode_toggled(self, checked: bool) -> None:
+        self.stack.setCurrentIndex(0 if checked else 1)
     def _date_edit(self) -> QDateEdit:
         edit = QDateEdit()
         edit.setCalendarPopup(True)
@@ -292,14 +507,54 @@ class ViralReelsPage(QWidget):
 
     def filters(self) -> dict[str, Any]:
         return {
-            "country": self.country.currentText(), "language": self.language.currentText(),
-            "topic": self.topic.text().strip(), "keywords": self.keywords.text().strip(),
+            "country": self.country.currentText() if self.advanced_group.isChecked() else "All", "language": self.language.currentText() if self.advanced_group.isChecked() else "All",
+            "topic": self.topic.text().strip() if self.advanced_group.isChecked() else "", "keywords": self.keywords.text().strip(),
             "min_views": self.min_views.value(),
             "date_from": self._preset_timestamps[0] if self._preset_timestamps else ("" if self.date_from.date() == self.date_from.minimumDate() else self.date_from.date().toString(Qt.DateFormat.ISODate)),
             "date_to": self._preset_timestamps[1] if self._preset_timestamps else ("" if self.date_to.date() == self.date_to.minimumDate() else self.date_to.date().toString(Qt.DateFormat.ISODate)),
             "max_results": self.max_results.value(), "data_source": self.data_source.currentText(),
             "schedule": self.schedule.currentText(),
         }
+
+    def set_scan_pages(self, rows: Sequence[Mapping[str, Any]], select_urls: Sequence[str] = ()) -> None:
+        keep = set(select_urls) | set(self.checked_page_urls())
+        self.pages_model.blockSignals(True)
+        self.pages_model.removeRows(0, self.pages_model.rowCount())
+        for row in rows:
+            url = str(row.get("page_url") or "")
+            check = QStandardItem()
+            check.setCheckable(True)
+            check.setCheckState(Qt.CheckState.Checked if url in keep else Qt.CheckState.Unchecked)
+            check.setData(url, Qt.ItemDataRole.UserRole)
+            cells = [check]
+            for text in (str(row.get("page_name") or url), url):
+                item = QStandardItem(text)
+                item.setToolTip(text)
+                item.setData(url, Qt.ItemDataRole.UserRole)
+                cells.append(item)
+            self.pages_model.appendRow(cells)
+        self.pages_model.blockSignals(False)
+        self.pages_model.layoutChanged.emit()
+        self._update_scan_pages_state()
+
+    def checked_page_urls(self) -> list[str]:
+        return [str(self.pages_model.item(r, 0).data(Qt.ItemDataRole.UserRole)) for r in range(self.pages_model.rowCount())
+                if self.pages_model.item(r, 0).checkState() == Qt.CheckState.Checked]
+
+    def _update_scan_pages_state(self, *_args: Any) -> None:
+        total, chosen = self.pages_model.rowCount(), len(self.checked_page_urls())
+        self.scan_selected_label.setText(f"Selected: {chosen} / {total}")
+        self.delete_pages_button.setEnabled(chosen > 0)
+        self.scan_select_all.setChecked(total > 0 and chosen == total)
+
+    def _select_all_scan_pages(self, checked: bool) -> None:
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        self.pages_model.blockSignals(True)
+        for row in range(self.pages_model.rowCount()):
+            self.pages_model.item(row, 0).setCheckState(state)
+        self.pages_model.blockSignals(False)
+        self.pages_model.layoutChanged.emit()
+        self._update_scan_pages_state()
 
     def _add_page(self) -> None:
         url = self.page_url_input.text().strip()
@@ -313,14 +568,17 @@ class ViralReelsPage(QWidget):
             self.pagesImportRequested.emit(path)
 
     def _delete_pages(self) -> None:
-        urls = [str(index.data(Qt.ItemDataRole.UserRole)) for index in self.pages.selectionModel().selectedIndexes()]
-        if urls:
+        urls = self.checked_page_urls()
+        if urls and QMessageBox.question(self, "Delete Pages", f"Delete {len(urls)} selected Page(s) from the saved list?") == QMessageBox.StandardButton.Yes:
             self.pagesDeleteRequested.emit(urls)
 
     def set_provider_status(self, provider_name: str, status: str, capabilities: str) -> None:
-        self.provider_status.setText(f"Provider: {provider_name}\nStatus: {status}\nCapabilities: {capabilities}")
+        self.find_provider_status.setText(f"Provider: {provider_name} · {status} · {capabilities}")
+        self.provider_status.setText(f"Provider: {provider_name} · {status} · {capabilities}")
 
     def _mode_changed(self, page_mode: bool) -> None:
+        if self.mode_find.isChecked():
+            return
         self.page_url_input.setEnabled(page_mode)
         self.pages.setEnabled(page_mode)
         self.find_pages_button.setEnabled(page_mode and self._worker is None)
@@ -328,16 +586,18 @@ class ViralReelsPage(QWidget):
 
     def _find_pages(self) -> None:
         self.set_busy(True)
-        self.findPagesRequested.emit(self.filters())
+        values = self.filters()
+        values.update(keywords=self.find_keywords.text().strip(), country=self.find_country.currentText(), max_results=self.find_max.value())
+        self.findPagesRequested.emit(values)
 
     def _scan_reels(self) -> None:
-        selected = [str(index.data(Qt.ItemDataRole.UserRole)) for index in self.pages.selectionModel().selectedIndexes()]
+        selected = self.checked_page_urls()
         values = self.filters()
         values["mode"] = "scan_by_page" if self.mode_page.isChecked() else "discover_trending"
         if self.mode_page.isChecked():
             if not selected:
                 self.set_busy(False)
-                self.progress_label.setText("Pages required: nhập hoặc chọn ít nhất một Facebook Page URL để quét Reels.")
+                self.progress_label.setText("Pages required: tick ít nhất một Facebook Page trong danh sách (hoặc Add Page) để quét Reels.")
                 return
             values["selected_page_urls"] = selected
         self.set_busy(True)
@@ -357,6 +617,7 @@ class ViralReelsPage(QWidget):
             lambda done, total, message: self.progress_label.setText(f"{message}: {done}/{total}")
         )
         worker.signals.result.connect(result_handler)
+        worker.signals.cancelled.connect(lambda: self.progress_label.setText("Operation cancelled."))
         worker.signals.error.connect(lambda message: QMessageBox.warning(self, "Viral Reels Finder", message))
         worker.signals.finished.connect(self._operation_finished)
         QThreadPool.globalInstance().start(worker)
@@ -386,7 +647,9 @@ class ViralReelsPage(QWidget):
 
     def set_busy(self, busy: bool) -> None:
         self.find_pages_button.setEnabled(not busy)
+        self.find_pages_button2.setEnabled(not busy)
         self.scan_reels_button.setEnabled(not busy)
+        self.recover_run_button.setEnabled(not busy)
         self.stop_button.setEnabled(busy)
 
     def set_progress(self, pages_done: int, pages_total: int, reels_done: int, reels_total: int) -> None:
@@ -402,7 +665,7 @@ class ViralReelsPage(QWidget):
             for key, _ in self.COLUMNS:
                 value = record.get(key, "")
                 item = QStandardItem(str(value if value is not None else ""))
-                if key in {"views", "likes", "comments", "shares", "viral_score"}:
+                if key in {"views", "likes", "comments", "shares", "viral_score"} and value not in (None, ""):
                     item.setData(float(value or 0), Qt.ItemDataRole.DisplayRole)
                 item.setData(record.get("reel_url", ""), Qt.ItemDataRole.UserRole)
                 item.setData(index, Qt.ItemDataRole.UserRole + 1)

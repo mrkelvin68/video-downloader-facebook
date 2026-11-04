@@ -1,4 +1,5 @@
 import csv
+from urllib.parse import unquote, urlsplit
 import sqlite3
 import sys
 from dataclasses import asdict
@@ -31,6 +32,7 @@ from app.services.project_service import ProjectService
 from app.services.video_service import VideoService
 from app.services.download_queue_service import DownloadQueueService
 from app.services.matrix_service import MatrixService
+from app.services.page_export_service import export_pages_csv
 from app.services.viral_reels_export_service import export_csv as export_reels_csv, export_xlsx as export_reels_xlsx
 from app.services.viral_reels_scheduler import ViralReelsScheduler
 from app.services.viral_reels_service import (
@@ -38,6 +40,7 @@ from app.services.viral_reels_service import (
     PageCandidate,
     PageDiscoveryProvider,
     PageDiscoveryService,
+    normalize_facebook_url,
     ReelFilters,
     ReelsCollectionService,
     reel_matches,
@@ -129,13 +132,15 @@ class MainWindow(QMainWindow):
         self.viral_reels_page.findPagesRequested.connect(self.find_viral_pages)
         self.viral_reels_page.providerRequested.connect(self.configure_viral_provider)
         self.viral_reels_page.scanReelsRequested.connect(self.scan_viral_reels)
-        self.viral_reels_page.stopRequested.connect(self.viral_reels_page.cancel_operation)
+        self.viral_reels_page.recoverRunRequested.connect(self.recover_apify_reels_run)
+        self.viral_reels_page.stopRequested.connect(self.stop_viral_operation)
         self.viral_reels_page.pageAddRequested.connect(self.add_viral_page)
         self.viral_reels_page.pagesImportRequested.connect(self.import_viral_pages)
         self.viral_reels_page.pagesDeleteRequested.connect(self.delete_viral_pages)
         self.load_viral_pages()
         self._refresh_viral_provider_status()
         self.viral_reels_page.exportCsvRequested.connect(self.export_viral_reels_csv)
+        self.viral_reels_page.exportPagesCsvRequested.connect(self.export_viral_pages_csv)
         self.viral_reels_page.exportExcelRequested.connect(self.export_viral_reels_xlsx)
         self.detail_page.csvChosen.connect(self.choose_csv)
         self.detail_page.csvDropped.connect(self.load_csv)
@@ -377,23 +382,25 @@ class MainWindow(QMainWindow):
             "Scheduled Viral Reels scan blocked: configure an authorized Facebook API or licensed provider.",
         ))
 
-    def load_viral_pages(self) -> None:
-        self.viral_reels_page.pages_model.clear()
-        for row in ViralReelsStore(self.database).list_pages(limit=500):
-            item = QStandardItem(str(row["page_name"] or row["page_url"]))
-            item.setData(str(row["page_url"]), Qt.ItemDataRole.UserRole)
-            self.viral_reels_page.pages_model.appendRow(item)
+    def load_viral_pages(self, select: tuple[str, ...] = ()) -> None:
+        rows = ViralReelsStore(self.database).list_pages(limit=100000)
+        self.viral_reels_page.set_found_pages([{"page_name": r["page_name"], "page_url": r["page_url"], "page_id": r["page_id"], "data_source": r["source"]} for r in rows])
+        self.viral_reels_page.set_scan_pages([{"page_name": r["page_name"], "page_url": r["page_url"]} for r in rows], select)
 
     def add_viral_page(self, url: str) -> None:
         try:
             normalized = normalize_facebook_url(url)
-            page_id = normalized.rstrip("/").rsplit("/", 1)[-1]
+            segments = [unquote(part) for part in urlsplit(normalized).path.split("/") if part]
+            if not segments:
+                raise ValueError("Facebook URL has no Page name")
             store = ViralReelsStore(self.database)
-            store.upsert_page(PageCandidate(page_id, page_id, normalized, "Unknown", "Unknown", ""))
-            self.load_viral_pages()
+            if not any(str(row["page_url"]) == normalized for row in store.list_pages(limit=100000)):
+                numeric = next((part for part in reversed(segments) if part.isdigit()), "")
+                name = next((part for part in reversed(segments) if not part.isdigit()), segments[-1])
+                store.upsert_page(PageCandidate(numeric or f"manual:{normalized}", name, normalized, "Unknown", "Unknown", ""))
+            self.load_viral_pages((normalized,))
         except Exception as error:
             QMessageBox.warning(self, "Invalid Page", str(error))
-
     def import_viral_pages(self, path: str) -> None:
         with open(path, newline="", encoding="utf-8-sig") as handle:
             for row in csv.reader(handle):
@@ -473,27 +480,8 @@ class MainWindow(QMainWindow):
                 self.viral_reels_page.set_provider_status(provider.name, "Unsupported", "Page scanning only")
                 QMessageBox.information(self, "Discover Trending Reels", f"{provider.name} does not support Discover Trending. Select Scan by Page.")
             return
-        if values["data_source"] in {"Provider", "Meta Graph API"}:
-            token = get_meta_token() if values["data_source"] == "Meta Graph API" else get_apify_token()
-            if not token:
-                self.viral_reels_page.set_busy(False)
-                QMessageBox.information(self, "Provider required", "Configure provider token first.")
-                return
-            if values["data_source"] == "Provider" and QMessageBox.question(self, "Charge approval", "This live scan may incur Apify usage charges. Continue?") != QMessageBox.StandardButton.Yes:
-                self.viral_reels_page.set_busy(False)
-                return
-            selected_urls = set(values.get("selected_page_urls", []))
-            pages = [PageCandidate(str(row["page_id"]), str(row["page_name"]), str(row["page_url"]), str(row["country"] or "Unknown"), str(row["language"] or "Unknown"), str(row["topic"] or "")) for row in ViralReelsStore(self.database).list_pages(values["country"], values["language"], values["topic"], values["max_results"]) if str(row["page_url"]) in selected_urls]
-            filters = self._viral_filters(values)
-            def collect(cancel, progress):
-                store = ViralReelsStore.for_thread(self.database.path)
-                try:
-                    provider = MetaGraphReelsProvider(token) if values["data_source"] == "Meta Graph API" else ApifyFacebookReelsProvider(token)
-                    results, _ = ReelsCollectionService(store, provider).collect(pages, filters, cancel)
-                    return results
-                finally:
-                    store.close()
-            self.viral_reels_page.run_operation(collect, self.viral_reels_page.set_results)
+        if values.get("data_source") != "Database":
+            self._scan_selected_pages(values)
             return
         filters = self._viral_filters(values)
 
@@ -515,11 +503,234 @@ class MainWindow(QMainWindow):
 
         self.viral_reels_page.run_operation(load, self.viral_reels_page.set_results)
 
+    MAX_SCAN_PAGES_PER_RUN = 10
+
+    def _build_apify_reels_provider(self, token: str, **kwargs):
+        try:
+            return ApifyFacebookReelsProvider(token, **kwargs)
+        except TypeError:
+            return ApifyFacebookReelsProvider(token)
+
+    def _scan_selected_pages(self, values: dict) -> None:
+        """Scan the checked Pages with the ACTIVE provider (never depends on hidden data_source)."""
+        page = self.viral_reels_page
+        provider_name = viral_settings().value("viral_reels/provider", "Apify Facebook Reels Scraper", type=str)
+        meta = provider_name == "Meta Graph API"
+        token = get_meta_token() if meta else get_apify_token()
+        if not token:
+            page.set_busy(False)
+            QMessageBox.information(self, "Provider required", f"Configure the {provider_name} token first (Configure provider).")
+            return
+        selected = list(dict.fromkeys(values.get("selected_page_urls", [])))
+        if len(selected) > self.MAX_SCAN_PAGES_PER_RUN:
+            page.set_busy(False)
+            QMessageBox.warning(
+                self,
+                "Scan Reels",
+                f"To protect against excessive Apify costs, select at most {self.MAX_SCAN_PAGES_PER_RUN} Pages per scan (selected: {len(selected)}).",
+            )
+            return
+        rows = {str(row["page_url"]): row for row in ViralReelsStore(self.database).list_pages(limit=100000)}
+        pages = [PageCandidate(str(rows[u]["page_id"]), str(rows[u]["page_name"]), u, str(rows[u]["country"] or "Unknown"), str(rows[u]["language"] or "Unknown"), str(rows[u]["topic"] or "")) for u in selected if u in rows]
+        if not pages:
+            page.set_busy(False)
+            QMessageBox.information(self, "Scan Reels", "Selected Pages were not found in the saved list.")
+            return
+        results_limit = max(1, min(int(values.get("max_results", 30)), 100))
+        if not meta:
+            names = "\n".join(f"• {p.page_name}" for p in pages[:10]) + (f"\n… +{len(pages) - 10} more" if len(pages) > 10 else "")
+            answer = QMessageBox.question(
+                self,
+                "Charge approval",
+                f"This live Apify scan may incur charges.\nPages to scan: {len(pages)}\n{names}\n\n"
+                f"Actor resultsLimit: {results_limit} Reels per Page (max 100).\nContinue?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                page.set_busy(False)
+                return
+        filters = self._viral_filters(values)
+
+        def collect(cancel, progress):
+            store = ViralReelsStore.for_thread(self.database.path)
+            try:
+                if meta:
+                    provider = MetaGraphReelsProvider(token)
+                else:
+                    provider = self._build_apify_reels_provider(
+                        token,
+                        results_limit=results_limit,
+                        store=store,
+                        cancel_event=cancel,
+                        progress_callback=progress,
+                    )
+                results, state = ReelsCollectionService(store, provider).collect(pages, filters, cancel)
+                return results, list(state.messages), state.errors
+            finally:
+                store.close()
+
+        def show(payload):
+            results, messages, errors = payload
+            page.set_results(list({str(r.get('reel_id') or r.get('reel_url')): r for r in results}.values()))
+            if errors:
+                QMessageBox.warning(self, "Scan Reels", f"{errors} error(s):\n" + "\n".join(messages[:5]))
+            elif not results:
+                QMessageBox.information(self, "Scan Reels", "The provider returned no Reels matching the filters.")
+
+        def on_cancelled():
+            rows = ViralReelsStore(self.database).list_reels(filters.maximum_results * 10)
+            matched = [dict(r) for r in rows if str(r["page_url"]) in selected and reel_matches(dict(r), filters)]
+            if matched:
+                page.set_results(list({str(r.get("reel_id") or r.get("reel_url")): r for r in matched[: filters.maximum_results]}.values()))
+
+        if page.run_operation(collect, show) and page._worker is not None:
+            page._worker.signals.cancelled.connect(on_cancelled)
+
+    def stop_viral_operation(self) -> None:
+        """Stop local worker tracking; only abort remote Apify Actor if user explicitly confirms."""
+        self.viral_reels_page.cancel_operation()
+        cfg = ViralReelsStore(self.database).provider_configuration("apify_reels_last_run")
+        run_id = str(cfg.get("run_id") or "")
+        status = str(cfg.get("status") or "")
+        if run_id and status in {"READY", "RUNNING"}:
+            answer = QMessageBox.question(
+                self,
+                "Stop Apify Run",
+                f"Đã dừng theo dõi trên ứng dụng.\n\n"
+                f"Apify Run {run_id} có thể vẫn đang chạy trên Apify Cloud.\n"
+                f"Bạn có muốn gửi lệnh HỦY (Abort) Actor thật trên Apify luôn không?\n"
+                f"(Chọn No để giữ Actor chạy tiếp trên Apify và khôi phục kết quả sau)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                token = get_apify_token()
+                if token:
+                    try:
+                        self._build_apify_reels_provider(token, store=ViralReelsStore(self.database)).abort_run(run_id)
+                    except Exception:
+                        pass
+
+    def recover_apify_reels_run(self, run_id_override: str | None = None) -> None:
+        """Recover Reels from an existing Apify Run ID or Dataset without starting a new Actor run."""
+        page = self.viral_reels_page
+        token = get_apify_token()
+        if not token:
+            QMessageBox.information(self, "Provider required", "Configure the Apify token first (Configure provider).")
+            return
+        store_main = ViralReelsStore(self.database)
+        saved_cfg = store_main.provider_configuration("apify_reels_last_run")
+        default_run = str(saved_cfg.get("run_id") or "")
+        if not isinstance(run_id_override, str):
+            text, ok = QInputDialog.getText(
+                self,
+                "Khôi phục Apify Run",
+                "Nhập Apify Run ID (hoặc để trống để lấy Run gần nhất từ Apify):",
+                text=default_run,
+            )
+            if not ok:
+                return
+            target_run_id = text.strip()
+        else:
+            target_run_id = run_id_override.strip()
+
+        values = page.filters()
+        filters = self._viral_filters(values)
+
+        def recover(cancel, progress):
+            store = ViralReelsStore.for_thread(self.database.path)
+            try:
+                provider = self._build_apify_reels_provider(
+                    token,
+                    store=store,
+                    cancel_event=cancel,
+                    progress_callback=progress,
+                )
+                run_id = target_run_id
+                if not run_id:
+                    recent = provider.list_recent_runs(limit=1)
+                    if not recent:
+                        raise RuntimeError("Không tìm thấy Apify Run nào trước đó.")
+                    run_id = str(recent[0].get("id") or "")
+                progress(0, 1, f"Đang kiểm tra Apify Run {run_id}...")
+                run_data = provider.poll_run_until_done(run_id)
+                dataset_id = str(run_data.get("defaultDatasetId") or "")
+                progress(0, 1, f"Đang tải Dataset {dataset_id} của Run {run_id}...")
+                items = provider.fetch_dataset_items(dataset_id)
+                pages_by_url = {
+                    str(r["page_url"]): PageCandidate(
+                        str(r["page_id"]),
+                        str(r["page_name"]),
+                        str(r["page_url"]),
+                        str(r["country"] or "Unknown"),
+                        str(r["language"] or "Unknown"),
+                        str(r["topic"] or ""),
+                    )
+                    for r in store.list_pages(limit=100000)
+                }
+                fallback_page = next(iter(pages_by_url.values()), PageCandidate("recovered", "Recovered Page", "https://www.facebook.com/facebook", "Unknown", "Unknown", ""))
+                raw_reels = provider.parse_reel_items(items, fallback_page, pages_by_url)
+                results: list[dict[str, object]] = []
+                from app.services.viral_reels_service import classify_language, viral_score
+                for idx, raw in enumerate(raw_reels, 1):
+                    if cancel.is_set():
+                        break
+                    if raw.page_url not in pages_by_url:
+                        store.upsert_page(PageCandidate(raw.page_id, raw.page_name, raw.page_url, raw.country, raw.language, raw.topic))
+                        pages_by_url[raw.page_url] = PageCandidate(raw.page_id, raw.page_name, raw.page_url, raw.country, raw.language, raw.topic)
+                    language, confidence = classify_language(raw.caption)
+                    record = {
+                        **raw.__dict__,
+                        "published_at": raw.published_at.isoformat() if raw.published_at else None,
+                        "country": raw.country or "Unknown",
+                        "language": raw.language or language,
+                        "language_confidence": confidence,
+                    }
+                    store.upsert_reel(record)
+                    store.record_metrics_snapshot(raw.reel_id, raw.views, raw.likes, raw.comments, raw.shares)
+                    record["viral_score"] = viral_score(record, store.metrics_history(raw.reel_id))
+                    store.update_viral_score(raw.reel_id, float(record["viral_score"]))
+                    if reel_matches(record, filters):
+                        results.append(record)
+                    if idx % 25 == 0 or idx == len(raw_reels):
+                        progress(idx, len(raw_reels), f"Đã lưu {idx}/{len(raw_reels)} Reels từ Run {run_id}")
+                results.sort(key=lambda item: float(item["viral_score"]), reverse=True)
+                return run_id, dataset_id, len(items), len(raw_reels), results[: filters.maximum_results]
+            finally:
+                store.close()
+
+        def show_recovered(payload):
+            run_id, dataset_id, raw_count, valid_count, results = payload
+            self.load_viral_pages()
+            deduped = list({str(r.get("reel_id") or r.get("reel_url")): r for r in results}.values())
+            page.set_results(deduped)
+            QMessageBox.information(
+                self,
+                "Khôi phục Run thành công",
+                f"Run ID: {run_id}\nDataset ID: {dataset_id}\nTổng item: {raw_count} · Reels hợp lệ (không trùng): {valid_count}\nHiển thị theo bộ lọc: {len(deduped)}",
+            )
+
+        page.run_operation(recover, show_recovered)
+
     def export_viral_reels_csv(self, records: list[dict]) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "Export Viral Reels", "viral-reels.csv", "CSV (*.csv)")
-        if path:
-            export_reels_csv(path, records)
-
+        if not path:
+            return
+        try:
+            count = export_reels_csv(path, records)
+        except OSError as error:
+            QMessageBox.warning(self, "Export failed", f"Cannot write {path}: {error}")
+            return
+        QMessageBox.information(self, "Export CSV", f"Exported {count} Reels to {Path(path).name}")
+    def export_viral_pages_csv(self, pages: list[dict]) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Export Facebook Pages", "facebook-pages.csv", "CSV (*.csv)")
+        if not path:
+            return
+        try:
+            count = export_pages_csv(path, pages)
+        except OSError as error:
+            QMessageBox.warning(self, "Export failed", f"Cannot write {path}: {error}")
+            return
+        QMessageBox.information(self, "Export CSV", f"Exported {count} Pages to {Path(path).name}")
     def export_viral_reels_xlsx(self, records: list[dict]) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "Export Viral Reels", "viral-reels.xlsx", "Excel (*.xlsx)")
         if not path:

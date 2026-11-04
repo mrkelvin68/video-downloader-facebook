@@ -24,6 +24,7 @@ class TestViralReelsUi(unittest.TestCase):
         self.page.close()
 
     def test_filter_fields_exist_and_return_expected_dict(self) -> None:
+        self.page.advanced_group.setChecked(True)
         self.page.country.setCurrentText("Vietnam")
         self.page.language.setCurrentText("Vietnamese")
         self.page.topic.setText("Gaming")
