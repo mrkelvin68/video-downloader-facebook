@@ -44,7 +44,7 @@ def parse_video_csv(text: str) -> tuple[list[dict[str, object]], list[str]]:
     if len(set(normalized_headers)) != len(normalized_headers):
         return [], ["CSV có tên cột trùng"]
     if len(headers) != 3:
-        return [], ["CSV cần đúng 3 cột: stt,ten_video,url"]
+        return [], ["CSV cần đúng 3 cột: stt,title,url"]
     positions = {header: index for index, header in enumerate(normalized_headers)}
     rows: list[dict[str, object]] = []
     errors: list[str] = []
@@ -129,13 +129,13 @@ def export_video_csv(rows: list[object]) -> str:
     output = StringIO(newline="")
     output.write("\ufeff")
     writer = csv.writer(output)
-    writer.writerow(("stt", "ten_video", "url"))
+    writer.writerow(("stt", "title", "url"))
     writer.writerows(rows)
     return output.getvalue()
 
 
 def sample_video_csv() -> str:
     return (
-        "stt,ten_video,url\n"
+        "stt,title,url\n"
         "1,Video mẫu,https://www.facebook.com/watch/?v=example\n"
     )

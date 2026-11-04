@@ -1,4 +1,4 @@
-from PySide6.QtCore import QSize
+from PySide6.QtCore import QSize, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -15,6 +15,9 @@ def button_icon(widget: QWidget, icon: QStyle.StandardPixmap):
 
 
 class Sidebar(QFrame):
+    projectsRequested = Signal()
+    queueRequested = Signal()
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("sidebar")
@@ -41,7 +44,7 @@ class Sidebar(QFrame):
         for text, icon, active, available in (
             ("Dashboard", QStyle.StandardPixmap.SP_ComputerIcon, False, False),
             ("Quản lý dự án", QStyle.StandardPixmap.SP_FileDialogContentsView, True, True),
-            ("Hàng đợi tải video", QStyle.StandardPixmap.SP_ArrowDown, False, False),
+            ("Hàng đợi tải video", QStyle.StandardPixmap.SP_ArrowDown, False, True),
             ("Live Logs", QStyle.StandardPixmap.SP_FileDialogDetailedView, False, False),
             ("Cài đặt", QStyle.StandardPixmap.SP_FileDialogInfoView, False, False),
         ):
@@ -52,6 +55,12 @@ class Sidebar(QFrame):
             button.setEnabled(available)
             if not available:
                 button.setToolTip("Chức năng sẽ có ở giai đoạn sau")
+            elif text == "Quản lý dự án":
+                self.projects_button = button
+                button.clicked.connect(self.projectsRequested.emit)
+            elif text == "Hàng đợi tải video":
+                self.queue_button = button
+                button.clicked.connect(self.queueRequested.emit)
             layout.addWidget(button)
         layout.addStretch()
         status = QFrame()
@@ -62,5 +71,12 @@ class Sidebar(QFrame):
         live = QLabel("SQLite đang hoạt động")
         live.setObjectName("storageTitle")
         status_layout.addWidget(live)
-        status_layout.addWidget(QLabel("Phase 1 · Quản lý dự án"))
+        status_layout.addWidget(QLabel("Phase 1–3.2 · Quản lý tải video"))
         layout.addWidget(status)
+
+    def set_active(self, section: str) -> None:
+        self.projects_button.setProperty("active", section == "projects")
+        self.queue_button.setProperty("active", section == "queue")
+        for button in (self.projects_button, self.queue_button):
+            button.style().unpolish(button)
+            button.style().polish(button)

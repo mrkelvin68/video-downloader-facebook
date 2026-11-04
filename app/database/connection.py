@@ -24,7 +24,10 @@ class Database:
     def list_projects(self) -> list[sqlite3.Row]:
         return list(
             self.connection.execute(
-                "SELECT * FROM projects ORDER BY name COLLATE NOCASE"
+                """SELECT p.*,
+                          (SELECT COUNT(*) FROM matrices m
+                           WHERE m.project_id=p.uuid) AS matrix_count
+                   FROM projects p ORDER BY p.name COLLATE NOCASE"""
             )
         )
 
@@ -78,6 +81,13 @@ class Database:
                 (project_id,),
             ).fetchone()
             is None
+            and self.connection.execute(
+                """SELECT 1 FROM download_jobs
+                   WHERE project_id=? AND status IN ('queued', 'downloading')
+                   LIMIT 1""",
+                (project_id,),
+            ).fetchone()
+            is None
         )
 
     def replace_videos(
@@ -111,7 +121,13 @@ class Database:
                    LIMIT 1""",
                 (project_id,),
             ).fetchone()
-            if blocked_video is not None:
+            active_job = self.connection.execute(
+                """SELECT 1 FROM download_jobs
+                   WHERE project_id=? AND status IN ('queued', 'downloading')
+                   LIMIT 1""",
+                (project_id,),
+            ).fetchone()
+            if blocked_video is not None or active_job is not None:
                 raise ImportBlockedError(
                     "Không thể thay thế: dự án có video đang tải/đã tải hoặc có tệp liên kết."
                 )
@@ -156,6 +172,70 @@ class Database:
                 (project_id,),
             )
         )
+
+    def set_video_facebook_uploaded(
+        self, project_id: str, video_id: str, uploaded: bool
+    ) -> None:
+        with self.connection:
+            cursor = self.connection.execute(
+                """UPDATE videos
+                   SET facebook_uploaded=?, updated_at=?
+                   WHERE id=? AND project_id=?""",
+                (
+                    int(uploaded),
+                    datetime.now(UTC).isoformat(timespec="seconds"),
+                    video_id,
+                    project_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Video không tồn tại trong dự án này.")
+
+    def update_video_field(
+        self, project_id: str, video_id: str, field: str, value: str
+    ) -> None:
+        columns = {
+            "video_code": "video_code",
+            "title": "title",
+            "thumbnail_path": "thumbnail_path",
+        }
+        column = columns.get(field)
+        if column is None:
+            raise ValueError("Trường video không hợp lệ.")
+        with self.connection:
+            video = self.connection.execute(
+                """SELECT download_status FROM videos
+                   WHERE id=? AND project_id=?""",
+                (video_id, project_id),
+            ).fetchone()
+            if video is None:
+                raise ValueError("Video không tồn tại trong dự án này.")
+            if field in ("video_code", "thumbnail_path"):
+                active_job = self.connection.execute(
+                    """SELECT 1 FROM download_jobs
+                       WHERE video_id=? AND status IN ('queued', 'downloading')
+                       LIMIT 1""",
+                    (video_id,),
+                ).fetchone()
+                if (
+                    active_job is not None
+                    or video["download_status"] == "downloading"
+                ):
+                    raise ValueError(
+                        "Không thể sửa mã hoặc ảnh khi video đang tải hoặc trong hàng đợi."
+                    )
+            cursor = self.connection.execute(
+                f"""UPDATE videos SET {column}=?, updated_at=?
+                    WHERE id=? AND project_id=?""",
+                (
+                    value,
+                    datetime.now(UTC).isoformat(timespec="seconds"),
+                    video_id,
+                    project_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Video không tồn tại trong dự án này.")
 
     def close(self) -> None:
         self.connection.close()

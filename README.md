@@ -1,6 +1,6 @@
 # Video Downloader Facebook
 
-Ứng dụng desktop Windows viết bằng Python và PySide6 để quản lý dự án video, kiểm tra danh sách Facebook từ CSV và lưu danh sách video theo từng dự án trong SQLite. Phiên bản hiện tại dừng ở Phase 2; ứng dụng chưa tải video.
+Ứng dụng desktop Windows viết bằng Python và PySide6 để quản lý dự án video, kiểm tra danh sách Facebook từ CSV, tải từng video Facebook và lưu trạng thái trong SQLite.
 
 ## Chức năng hiện có
 
@@ -10,24 +10,42 @@
 - Đọc trước CSV, kiểm tra toàn bộ dữ liệu, rồi mới cho phép import.
 - Hỗ trợ dấu phẩy hoặc chấm phẩy, UTF-8/UTF-8 BOM, CSV Excel và trường có dấu ngoặc kép.
 - Hiển thị video trong `QTableView`; dữ liệu nhiều dòng không tạo widget riêng cho từng video.
-- Xuất CSV từ dữ liệu SQLite của dự án đang mở.
+- Xuất CSV từ dữ liệu SQLite của dự án đang mở, với cột `title` có thể nhập lại cùng `stt` và `url`.
+- Tải đơn lẻ từng video Facebook (Phase 3.1): tải video chất lượng cao nhất bằng yt-dlp, gom file MP4 và thumbnail vào thư mục riêng theo prefix, kiểm tra hợp lệ bằng FFprobe và cập nhật SQLite.
+- Hàng đợi tuần tự Phase 3.2 với **Chạy ngay**, **Thêm vào hàng đợi**, ưu tiên job, tạm dừng sau video hiện tại, tiếp tục và retry. Tiến độ/tốc độ lấy từ yt-dlp; job lưu trong SQLite và được phục hồi an toàn sau restart.
+- Ma trận lịch đăng local (Phase 4.1): tạo nhiều lịch cho từng dự án, cấu hình Page/khung giờ/ngày, phân bổ video theo quy tắc, sửa video/caption từng ô, đánh dấu trạng thái và xuất CSV UTF-8 BOM. Tab video có nút copy title/MP4 ngay trên từng dòng, cho sửa mã/tên và chọn thumbnail; trạng thái “Đã tải lên Facebook” do người dùng tự cập nhật, lưu cục bộ. Màn hình có tab lịch đăng và danh sách video riêng của dự án đang mở; CSV lịch có cột `Title`. Không kết nối Facebook/Google Sheets API hoặc tự động đăng.
 
 ## Chức năng chưa triển khai
 
-- Tải video Facebook, hàng đợi tải, tiến độ thực tế, retry và quản lý file video.
+- Tải song song (concurrency luôn bằng 1), scheduler hoặc Facebook Publisher.
+- Facebook API/Google Sheets API và tự động đăng video.
 - Dashboard, live logs và cài đặt.
 - Xóa dự án hoặc di chuyển dữ liệu của dự án.
-
-Không có Download Engine trong phiên bản này.
 
 ## Yêu cầu
 
 - Windows 10/11.
 - Python 3.11 trở lên.
-- PySide6 (cài tự động từ `requirements.txt`).
+- PySide6, yt-dlp, static-ffmpeg (cài tự động từ `requirements.txt`).
 
-## Cài đặt và khởi chạy nhanh
+## Cài đặt và phát hành Windows
 
+Nhà phát triển cài môi trường bằng:
+
+```text
+py install.py
+py run.py
+```
+
+Tạo bản phát hành onedir (mặc định):
+
+```text
+py build.py
+```
+
+Tùy chọn onefile: `py build.py --onefile`. Bản phát hành nằm trong `dist/`, cùng ZIP `VideoDownloader-Windows-x64.zip`. Người dùng cuối chỉ cần giải nén ZIP và chạy `VideoDownloader.exe`; không cần Python, pip hoặc FFmpeg.
+
+## Cài đặt và khởi chạy nhanh
 Yêu cầu Windows 10/11 và Python 3.11 trở lên có trong `PATH` (Python Launcher `py` được khuyến nghị). Tại thư mục repository, cài lần đầu bằng:
 
 ```powershell
@@ -51,7 +69,7 @@ Hoặc nhấp đúp `start.bat`. Không cần tự activate môi trường hoặ
 3. Chọn một đường dẫn tuyệt đối cho thư mục lưu video. Thư mục đích phải chưa tồn tại để tránh ghi đè.
 4. Lưu dự án. Ứng dụng tự tạo thư mục đích và lưu thông tin trong SQLite.
 
-Mã video được tạo theo `{prefix}-{stt}`, ví dụ `ep1-6-1`. Khi dự án đã có video, ứng dụng từ chối đổi prefix hoặc thư mục output để tránh làm sai mã và liên kết dữ liệu.
+Mã video được tạo theo `{prefix}-{stt}`, ví dụ `ep1-6-1`. Trong tab **Video theo dự án** của Ma trận, nhấp đúp mã hoặc tên để sửa; mã phải hợp lệ và không trùng trong dự án. Không thể sửa mã khi video đang tải hoặc nằm trong hàng đợi. Khi dự án đã có video, ứng dụng từ chối đổi prefix hoặc thư mục output để tránh làm sai mã và liên kết dữ liệu.
 
 ## Định dạng CSV
 
@@ -72,6 +90,25 @@ stt,ten_video,url
 3. Chọn **Xác nhận import** để lưu. Nếu dự án đã có danh sách, ứng dụng yêu cầu xác nhận trước khi thay thế.
 4. Nếu có video đã tải/đang tải hoặc có đường dẫn file liên kết, thao tác thay thế bị chặn. Việc import diễn ra trong một transaction; lỗi sẽ rollback dữ liệu cũ.
 5. **Xuất CSV** lấy dữ liệu đã lưu trong SQLite của dự án hiện tại, theo STT tăng dần và có UTF-8 BOM. Preview chưa xác nhận không được export.
+
+## Download Queue
+
+1. Trong trang dự án, chọn một hoặc nhiều video bằng checkbox. Có thể dùng **Chọn tất cả** hoặc **Bỏ chọn tất cả**.
+2. **Chạy ngay** đưa video đã chọn lên đầu hàng đợi và bắt đầu queue. Video đang chạy không bị ngắt.
+3. **Thêm vào hàng đợi** chỉ lưu job, không tự bắt đầu tải.
+4. Mở **Hàng đợi tải video** ở sidebar hoặc **Xem hàng đợi** để theo dõi trạng thái, progress bar, tốc độ, dung lượng, ETA từ yt-dlp (hoặc ước tính từ tốc độ) và lỗi. Khi yt-dlp chưa cung cấp tổng dung lượng, tiến độ hiển thị không xác định thay vì 0%.
+5. Queue chạy từng video một. **Tạm dừng sau video hiện tại** không ngắt file đang tải; **Tiếp tục** bắt đầu các job còn chờ.
+6. Job gián đoạn khi ứng dụng đóng bất thường được đánh dấu để người dùng chủ động Retry/tiếp tục. Ứng dụng không tự tải lại job đó. Retry thủ công tối đa 3 lần cho mỗi video; lỗi URL không hợp lệ/không hỗ trợ không được retry.
+7. Xóa job đang chờ chỉ bỏ job khỏi queue, không xóa file video. Job đang tải không thể bị xóa bằng thao tác này.
+
+## Ma trận lịch đăng
+
+1. Từ thẻ dự án, chọn **Ma trận**. Mỗi ma trận chỉ thuộc dự án đó và được lưu trong SQLite.
+2. Tạo ma trận hoặc mở **Cấu hình slot & page** để chỉnh tên, danh sách Page, khung giờ, ngày bắt đầu, số ngày và quy tắc phân bổ. Mặc định là 4 Page, 05:00/10:00/17:00/22:00 và 5 ngày.
+3. Lịch được sinh tuần tự theo ngày, khung giờ rồi Page. Chế độ không lặp dùng mỗi video tối đa một lần; chế độ lặp cho phép dùng video trên Page khác nhưng không lặp cùng Page trong cùng ngày. Video đã tải có MP4 tồn tại được ưu tiên.
+4. Nhấp đúp ô lịch hoặc dùng **Chọn video / sửa caption**. Menu chuột phải và **Copy caption** sao chép caption. Đánh dấu Đã đăng/Chưa đăng là thao tác quản lý thủ công; sinh lại không sửa ô Đã đăng.
+5. Sinh lại và lưu cấu hình yêu cầu xác nhận, có thể hoàn tác một lần. Chỉnh tay hoặc thay đổi trạng thái sẽ xóa lịch sử hoàn tác để tránh mất chỉnh sửa.
+6. **Xuất file CSV** ghi Ngày, Giờ, Page, video, đường dẫn MP4/thumbnail, caption và trạng thái. CSV chỉ là tệp xuất cục bộ; không đồng bộ Sheets hoặc đăng video.
 
 ## Cấu trúc source code
 

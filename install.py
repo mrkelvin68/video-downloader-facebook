@@ -108,7 +108,7 @@ def install(root: Path = ROOT) -> None:
                 "QtCore.__version__ if hasattr(QtCore, '__version__') else '')"
             ),
         ],
-        "kiểm tra PySide6",
+        "kiểm tra dependencies và công cụ media",
     )
 
 

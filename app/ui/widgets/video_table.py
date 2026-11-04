@@ -50,8 +50,33 @@ class VideoTableModel(QAbstractTableModel):
             self._value(video, "video_code"),
             self._value(video, "title", self._value(video, "ten_video")),
             self._compact_url(str(self._value(video, "source_url", self._value(video, "url")))),
-            "Chờ tải",
-            "—",
+            {
+                "queued": "Trong hàng đợi",
+                "downloading": "Đang tải",
+                "completed": "Đã tải",
+                "failed": "Lỗi",
+                "interrupted": "Bị gián đoạn",
+                "cancelled": "Chờ tải",
+            }.get(
+                str(
+                    self._value(
+                        video,
+                        "queue_status",
+                        self._value(video, "download_status", "pending"),
+                    )
+                ),
+                "Chờ tải",
+            ),
+            (
+                "Đang tải…"
+                if self._value(video, "queue_status") == "downloading"
+                and self._value(video, "queue_total_bytes") is None
+                else f"{float(self._value(video, 'queue_progress', 0)):.0f}%"
+                if self._value(video, "queue_status") == "downloading"
+                else "100%"
+                if self._value(video, "download_status") == "completed"
+                else "—"
+            ),
         )
         return str(values[column])
 
@@ -82,12 +107,43 @@ class VideoTableModel(QAbstractTableModel):
         self.dataChanged.emit(index, index, [Qt.ItemDataRole.CheckStateRole])
         return True
 
+    def selected_video_ids(self) -> list[str]:
+        return [
+            self._video_key(video, row)
+            for row, video in enumerate(self._videos)
+            if self._video_key(video, row) in self._checked
+        ]
+
     def set_videos(self, videos: list[object]) -> None:
+        selected = self._checked
         self.beginResetModel()
         self._videos = list(videos)
-        self._checked.clear()
+        self._checked = {
+            self._video_key(video, row)
+            for row, video in enumerate(self._videos)
+            if self._video_key(video, row) in selected
+        }
         self.endResetModel()
 
+    def select_all(self) -> None:
+        self._checked = {
+            self._video_key(video, row) for row, video in enumerate(self._videos)
+        }
+        if self._videos:
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(len(self._videos) - 1, 0),
+                [Qt.ItemDataRole.CheckStateRole],
+            )
+
+    def clear_selection(self) -> None:
+        self._checked.clear()
+        if self._videos:
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(len(self._videos) - 1, 0),
+                [Qt.ItemDataRole.CheckStateRole],
+            )
 
 class VideoTable(QTableView):
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -110,5 +166,14 @@ class VideoTable(QTableView):
         self.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
         self.setMinimumHeight(190)
 
+    def selected_video_ids(self) -> list[str]:
+        return self.video_model.selected_video_ids()
+
     def set_videos(self, videos: list[object]) -> None:
         self.video_model.set_videos(videos)
+
+    def select_all(self) -> None:
+        self.video_model.select_all()
+
+    def clear_selection(self) -> None:
+        self.video_model.clear_selection()

@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-from app import ProjectStore, validate_output_dir, validate_windows_name
+from app import ProjectStore, parse_video_csv, validate_output_dir, validate_windows_name
 from app.core.exceptions import ImportBlockedError, ImportConfirmationRequired
 
 
@@ -103,6 +103,53 @@ class ProjectManagementTests(unittest.TestCase):
                 ).fetchone(),
                 None,
             )
+        finally:
+            migrated.close()
+
+    def test_existing_project_video_schema_adds_facebook_status(self):
+        self.store.close()
+        path = self.root / "pre-facebook-status.sqlite3"
+        connection = sqlite3.connect(path)
+        project_id = str(uuid.uuid4())
+        now = "2026-01-01T00:00:00+00:00"
+        connection.execute(
+            """CREATE TABLE projects (
+                uuid TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+                prefix TEXT NOT NULL, output_dir TEXT NOT NULL UNIQUE,
+                notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL)"""
+        )
+        connection.execute(
+            "INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (project_id, "Before Facebook status", "old", str(self.root / "old"), "", now, now),
+        )
+        connection.execute(
+            """CREATE TABLE videos (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+                sequence_number INTEGER NOT NULL, video_code TEXT NOT NULL,
+                title TEXT NOT NULL, source_url TEXT NOT NULL,
+                normalized_url TEXT NOT NULL,
+                download_status TEXT NOT NULL DEFAULT 'pending',
+                local_video_path TEXT, thumbnail_path TEXT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                FOREIGN KEY(project_id) REFERENCES projects(uuid))"""
+        )
+        connection.execute(
+            """INSERT INTO videos
+               (id, project_id, sequence_number, video_code, title, source_url,
+                normalized_url, created_at, updated_at)
+               VALUES ('video-1', ?, 1, 'old-1', 'Keep title', 'https://facebook.com/v',
+                       'https://facebook.com/v', ?, ?)""",
+            (project_id, now, now),
+        )
+        connection.commit()
+        connection.close()
+
+        migrated = ProjectStore(path)
+        try:
+            row = migrated.list_videos(project_id)[0]
+            self.assertEqual(row["title"], "Keep title")
+            self.assertEqual(row["facebook_uploaded"], 0)
         finally:
             migrated.close()
 
@@ -270,7 +317,10 @@ class DatabaseTransactionTests(unittest.TestCase):
         self.assertEqual(imported, 1000)
         self.assertEqual(len(self.store.list_videos(project_b)), 0)
         exported = self.store.export_csv(self.project_id)
-        self.assertTrue(exported.startswith("\ufeffstt,ten_video,url\r\n"))
+        self.assertTrue(exported.startswith("\ufeffstt,title,url\r\n"))
+        parsed, errors = parse_video_csv(exported)
+        self.assertEqual(errors, [])
+        self.assertEqual(parsed[0]["ten_video"], "Video 1")
         self.assertIn("1,Video 1,https://www.facebook.com/watch/?v=1", exported)
         self.assertLess(exported.index(",Video 1,"), exported.index(",Video 1000,"))
 
