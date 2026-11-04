@@ -191,6 +191,136 @@ def _create_matrices_tables(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_discovered_pages_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+    CREATE TABLE IF NOT EXISTS discovered_pages (
+        page_id TEXT PRIMARY KEY,
+        page_name TEXT NOT NULL,
+        page_url TEXT NOT NULL,
+        country TEXT NOT NULL,
+        language TEXT NOT NULL,
+        topic TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL,
+        discovered_at TEXT NOT NULL,
+        UNIQUE(page_url)
+    )
+    """
+    )
+
+
+def _create_reels_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+    CREATE TABLE IF NOT EXISTS reels (
+        reel_id TEXT PRIMARY KEY,
+        reel_url TEXT NOT NULL,
+        page_id TEXT NOT NULL,
+        page_name TEXT NOT NULL,
+        page_url TEXT NOT NULL,
+        caption TEXT NOT NULL DEFAULT '',
+        views INTEGER,
+        likes INTEGER,
+        comments INTEGER,
+        shares INTEGER,
+        published_at TEXT,
+        collected_at TEXT NOT NULL,
+        country TEXT,
+        language TEXT,
+        topic TEXT NOT NULL DEFAULT '',
+        viral_score REAL DEFAULT 0,
+        data_source TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'collected',
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(page_id) REFERENCES discovered_pages(page_id),
+        UNIQUE(reel_id),
+        UNIQUE(reel_url)
+    )
+    """
+    )
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(reels)")}
+    if "updated_at" not in columns:
+        connection.execute("ALTER TABLE reels ADD COLUMN updated_at TEXT")
+        connection.execute("UPDATE reels SET updated_at=collected_at WHERE updated_at IS NULL")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS ix_reels_filters ON reels(country, language, topic, published_at)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS ix_reels_rank ON reels(viral_score DESC, views DESC)"
+    )
+
+
+def _create_reel_metrics_history_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+    CREATE TABLE IF NOT EXISTS reel_metrics_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        reel_id TEXT NOT NULL,
+        views INTEGER,
+        likes INTEGER,
+        comments INTEGER,
+        shares INTEGER,
+        measured_at TEXT NOT NULL,
+        FOREIGN KEY(reel_id) REFERENCES reels(reel_id) ON DELETE CASCADE
+    )
+    """
+    )
+
+
+def _create_collection_jobs_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+    CREATE TABLE IF NOT EXISTS collection_jobs (
+        job_id TEXT PRIMARY KEY,
+        project_id TEXT,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+        pages_discovered INTEGER NOT NULL DEFAULT 0,
+        reels_collected INTEGER NOT NULL DEFAULT 0,
+        reels_qualified INTEGER NOT NULL DEFAULT 0,
+        errors INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY(project_id) REFERENCES projects(uuid) ON DELETE CASCADE
+    )
+    """
+    )
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(collection_jobs)")}
+    if "schedule" not in columns:
+        connection.execute("ALTER TABLE collection_jobs ADD COLUMN schedule TEXT NOT NULL DEFAULT 'manual'")
+    if "last_success_at" not in columns:
+        connection.execute("ALTER TABLE collection_jobs ADD COLUMN last_success_at TEXT")
+
+
+def _create_export_history_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+    CREATE TABLE IF NOT EXISTS export_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id TEXT NOT NULL,
+        export_type TEXT NOT NULL CHECK(export_type IN ('csv', 'xlsx', 'google_sheets')),
+        export_path TEXT,
+        row_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(job_id) REFERENCES collection_jobs(job_id) ON DELETE CASCADE
+    )
+    """
+    )
+
+
+def _create_provider_configuration_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+    CREATE TABLE IF NOT EXISTS provider_configuration (
+        provider_name TEXT PRIMARY KEY,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        last_configured_at TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+        UNIQUE(provider_name)
+    )
+    """
+    )
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("BEGIN IMMEDIATE")
@@ -257,6 +387,12 @@ def migrate(connection: sqlite3.Connection) -> None:
             )
         _create_download_jobs_table(connection)
         _create_matrices_tables(connection)
+        _create_discovered_pages_table(connection)
+        _create_reels_table(connection)
+        _create_reel_metrics_history_table(connection)
+        _create_collection_jobs_table(connection)
+        _create_export_history_table(connection)
+        _create_provider_configuration_table(connection)
         connection.commit()
     except BaseException:
         connection.rollback()

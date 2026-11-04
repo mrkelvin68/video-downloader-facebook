@@ -1,11 +1,12 @@
+import csv
 import sqlite3
 import sys
 from dataclasses import asdict
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import QTimer
-from PySide6.QtGui import QImageReader
+from PySide6.QtCore import QSettings, QTimer, Qt
+from PySide6.QtGui import QImageReader, QStandardItem
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -23,12 +24,28 @@ from PySide6.QtWidgets import (
 from app.core.exceptions import ImportBlockedError, ImportConfirmationRequired
 from app.core.single_instance import acquire_single_instance
 from app.database.connection import Database
+from app.database.viral_reels_store import ViralReelsStore
 from app.models.project import Project
 from app.services.csv_service import parse_video_csv, sample_video_csv
 from app.services.project_service import ProjectService
 from app.services.video_service import VideoService
 from app.services.download_queue_service import DownloadQueueService
 from app.services.matrix_service import MatrixService
+from app.services.viral_reels_export_service import export_csv as export_reels_csv, export_xlsx as export_reels_xlsx
+from app.services.viral_reels_scheduler import ViralReelsScheduler
+from app.services.viral_reels_service import (
+    DiscoveryRequest,
+    PageCandidate,
+    PageDiscoveryProvider,
+    PageDiscoveryService,
+    ReelFilters,
+    ReelsCollectionService,
+    reel_matches,
+)
+from app.services.apify_facebook_provider import ApifyFacebookPageSearchProvider, ApifyFacebookReelsProvider
+from app.services.meta_graph_provider import MetaGraphReelsProvider
+from app.services.credential_service import get_apify_token, get_meta_token
+from app.ui.dialogs.viral_provider_dialog import ViralProviderDialog, viral_settings
 from app.ui.dialogs.csv_preview_dialog import CsvPreviewDialog
 from app.ui.dialogs.matrix_configuration_dialog import (
     MatrixConfigurationDialog,
@@ -40,6 +57,7 @@ from app.ui.pages.project_detail_page import ProjectDetailPage
 from app.ui.pages.project_page import ProjectPage
 from app.ui.pages.download_queue_page import DownloadQueuePage
 from app.ui.pages.matrix_page import MatrixPage
+from app.ui.pages.viral_reels_page import ViralReelsPage
 from app.ui.widgets.sidebar import Sidebar
 from app.ui.download_worker import DownloadWorker
 
@@ -55,6 +73,8 @@ class MainWindow(QMainWindow):
         self.videos = VideoService(database)
         self.download_queue = DownloadQueueService(database)
         self.matrices = MatrixService(database)
+        self.viral_reels = ViralReelsStore(database)
+        self.viral_reels_scheduler = ViralReelsScheduler(self._run_scheduled_viral_scan)
         self.current_project: Project | None = None
         self.current_matrix_id: str | None = None
         self.pending_csv_text: str | None = None
@@ -88,10 +108,12 @@ class MainWindow(QMainWindow):
         self.detail_page = ProjectDetailPage()
         self.queue_page = DownloadQueuePage()
         self.matrix_page = MatrixPage()
+        self.viral_reels_page = ViralReelsPage()
         self.pages.addWidget(self.project_page)
         self.pages.addWidget(self.detail_page)
         self.pages.addWidget(self.queue_page)
         self.pages.addWidget(self.matrix_page)
+        self.pages.addWidget(self.viral_reels_page)
         workspace_layout.addWidget(self.pages, 1)
         root_layout.addWidget(workspace, 1)
         self.setCentralWidget(root)
@@ -103,6 +125,18 @@ class MainWindow(QMainWindow):
         self.detail_page.backRequested.connect(self.show_projects)
         self.sidebar.projectsRequested.connect(self.show_projects)
         self.sidebar.queueRequested.connect(self.show_queue)
+        self.sidebar.viralReelsRequested.connect(self.show_viral_reels)
+        self.viral_reels_page.findPagesRequested.connect(self.find_viral_pages)
+        self.viral_reels_page.providerRequested.connect(self.configure_viral_provider)
+        self.viral_reels_page.scanReelsRequested.connect(self.scan_viral_reels)
+        self.viral_reels_page.stopRequested.connect(self.viral_reels_page.cancel_operation)
+        self.viral_reels_page.pageAddRequested.connect(self.add_viral_page)
+        self.viral_reels_page.pagesImportRequested.connect(self.import_viral_pages)
+        self.viral_reels_page.pagesDeleteRequested.connect(self.delete_viral_pages)
+        self.load_viral_pages()
+        self._refresh_viral_provider_status()
+        self.viral_reels_page.exportCsvRequested.connect(self.export_viral_reels_csv)
+        self.viral_reels_page.exportExcelRequested.connect(self.export_viral_reels_xlsx)
         self.detail_page.csvChosen.connect(self.choose_csv)
         self.detail_page.csvDropped.connect(self.load_csv)
         self.detail_page.sampleRequested.connect(self.save_sample_csv)
@@ -303,6 +337,197 @@ class MainWindow(QMainWindow):
         self.refresh_queue()
         self.pages.setCurrentIndex(2)
         self.sidebar.set_active("queue")
+
+    def show_viral_reels(self) -> None:
+        self.pages.setCurrentWidget(self.viral_reels_page)
+        self.sidebar.set_active("viral-reels")
+
+    @staticmethod
+    def _viral_schedule(value: str) -> str:
+        return {
+            "Manual": "manual", "Every 6 hours": "6h",
+            "Every 12 hours": "12h", "Daily": "daily",
+        }.get(value, "manual")
+
+    @staticmethod
+    def _viral_filters(values: dict) -> ReelFilters:
+        def boundary(value: str, end: bool = False) -> datetime | None:
+            if not value:
+                return None
+            parsed = datetime.fromisoformat(value).replace(tzinfo=UTC)
+            return parsed + timedelta(days=1) - timedelta(microseconds=1) if end else parsed
+
+        return ReelFilters(
+            minimum_views=values["min_views"] or None,
+            country=values["country"], language=values["language"], topic=values["topic"],
+            published_from=boundary(values["date_from"]),
+            published_to=boundary(values["date_to"], True),
+            maximum_results=values["max_results"],
+        )
+
+    def _configure_viral_schedule(self, value: str) -> None:
+        schedule = self._viral_schedule(value)
+        self.viral_reels.set_schedule(schedule)
+        self.viral_reels_scheduler.start(schedule)
+
+    def _run_scheduled_viral_scan(self) -> None:
+        # No authorized provider is configured; never substitute mock data.
+        QTimer.singleShot(0, lambda: QMessageBox.information(
+            self, "Authorized provider required",
+            "Scheduled Viral Reels scan blocked: configure an authorized Facebook API or licensed provider.",
+        ))
+
+    def load_viral_pages(self) -> None:
+        self.viral_reels_page.pages_model.clear()
+        for row in ViralReelsStore(self.database).list_pages(limit=500):
+            item = QStandardItem(str(row["page_name"] or row["page_url"]))
+            item.setData(str(row["page_url"]), Qt.ItemDataRole.UserRole)
+            self.viral_reels_page.pages_model.appendRow(item)
+
+    def add_viral_page(self, url: str) -> None:
+        try:
+            normalized = normalize_facebook_url(url)
+            page_id = normalized.rstrip("/").rsplit("/", 1)[-1]
+            store = ViralReelsStore(self.database)
+            store.upsert_page(PageCandidate(page_id, page_id, normalized, "Unknown", "Unknown", ""))
+            self.load_viral_pages()
+        except Exception as error:
+            QMessageBox.warning(self, "Invalid Page", str(error))
+
+    def import_viral_pages(self, path: str) -> None:
+        with open(path, newline="", encoding="utf-8-sig") as handle:
+            for row in csv.reader(handle):
+                if row and row[0].strip():
+                    self.add_viral_page(row[0].strip())
+
+    def delete_viral_pages(self, urls: list) -> None:
+        store = ViralReelsStore(self.database)
+        store.delete_pages(urls)
+        self.load_viral_pages()
+
+    def configure_viral_provider(self) -> None:
+        if ViralProviderDialog(self).exec() == ViralProviderDialog.DialogCode.Accepted:
+            self._refresh_viral_provider_status()
+
+    def _refresh_viral_provider_status(self) -> None:
+        provider_name = viral_settings().value("viral_reels/provider", "Apify Facebook Reels Scraper", type=str)
+        provider = self._viral_provider()
+        if provider is None:
+            self.viral_reels_page.set_provider_status(provider_name, "Not configured", "Unavailable")
+            return
+        capabilities = "Scan authorized Pages" if provider_name == "Meta Graph API" else "Scan Page Reels"
+        self.viral_reels_page.set_provider_status(provider.name, "Configured; connection unverified", capabilities)
+
+    def _viral_provider(self):
+        provider_name = viral_settings().value("viral_reels/provider", "Apify Facebook Reels Scraper", type=str)
+        token = get_meta_token() if provider_name == "Meta Graph API" else get_apify_token()
+        if not token:
+            return None
+        return MetaGraphReelsProvider(token) if provider_name == "Meta Graph API" else ApifyFacebookReelsProvider(token)
+
+    def find_viral_pages(self, values: dict) -> None:
+        token = get_apify_token()
+        keywords = tuple(item.strip() for item in values.get("keywords", "").split(",") if item.strip())
+        maximum = max(1, min(int(values.get("max_results", 50)), 100))
+        if not token:
+            self.viral_reels_page.set_busy(False)
+            QMessageBox.information(self, "Find Pages", "Configure Apify token first.")
+            return
+        if not keywords:
+            self.viral_reels_page.set_busy(False)
+            QMessageBox.information(self, "Find Pages", "Enter at least one keyword.")
+            return
+        if QMessageBox.question(self, "Charge approval", "Facebook Page Search may incur Apify charges. Continue?") != QMessageBox.StandardButton.Yes:
+            self.viral_reels_page.set_busy(False)
+            return
+
+        def discover(cancel, progress):
+            if cancel.is_set():
+                return []
+            provider = ApifyFacebookPageSearchProvider(token)
+            provider.test_connection()
+            progress(0, 1, "Searching Facebook Pages")
+            request = DiscoveryRequest(country=values.get("country", "All"), keywords=keywords, maximum_pages=maximum)
+            store = ViralReelsStore.for_thread(self.database.path)
+            try:
+                return PageDiscoveryService(store, [provider]).discover(request)
+            finally:
+                store.close()
+
+        def show_pages(pages):
+            self.load_viral_pages()
+            self.viral_reels_page.set_progress(0, 0, 0, 0)
+            if not pages:
+                QMessageBox.information(self, "Find Pages", "No Facebook Pages found.")
+
+        self.viral_reels_page.run_operation(discover, show_pages)
+
+    def scan_viral_reels(self, values: dict) -> None:
+        self._configure_viral_schedule(values["schedule"])
+        if values.get("mode") == "discover_trending":
+            self.viral_reels_page.set_busy(False)
+            provider = self._viral_provider()
+            if provider is None:
+                self.viral_reels_page.set_provider_status("Not configured", "Unsupported", "Discover Trending unavailable")
+            else:
+                self.viral_reels_page.set_provider_status(provider.name, "Unsupported", "Page scanning only")
+                QMessageBox.information(self, "Discover Trending Reels", f"{provider.name} does not support Discover Trending. Select Scan by Page.")
+            return
+        if values["data_source"] in {"Provider", "Meta Graph API"}:
+            token = get_meta_token() if values["data_source"] == "Meta Graph API" else get_apify_token()
+            if not token:
+                self.viral_reels_page.set_busy(False)
+                QMessageBox.information(self, "Provider required", "Configure provider token first.")
+                return
+            if values["data_source"] == "Provider" and QMessageBox.question(self, "Charge approval", "This live scan may incur Apify usage charges. Continue?") != QMessageBox.StandardButton.Yes:
+                self.viral_reels_page.set_busy(False)
+                return
+            selected_urls = set(values.get("selected_page_urls", []))
+            pages = [PageCandidate(str(row["page_id"]), str(row["page_name"]), str(row["page_url"]), str(row["country"] or "Unknown"), str(row["language"] or "Unknown"), str(row["topic"] or "")) for row in ViralReelsStore(self.database).list_pages(values["country"], values["language"], values["topic"], values["max_results"]) if str(row["page_url"]) in selected_urls]
+            filters = self._viral_filters(values)
+            def collect(cancel, progress):
+                store = ViralReelsStore.for_thread(self.database.path)
+                try:
+                    provider = MetaGraphReelsProvider(token) if values["data_source"] == "Meta Graph API" else ApifyFacebookReelsProvider(token)
+                    results, _ = ReelsCollectionService(store, provider).collect(pages, filters, cancel)
+                    return results
+                finally:
+                    store.close()
+            self.viral_reels_page.run_operation(collect, self.viral_reels_page.set_results)
+            return
+        filters = self._viral_filters(values)
+
+        def load(cancel, progress):
+            worker_store = ViralReelsStore.for_thread(self.database.path)
+            try:
+                rows = worker_store.list_reels(values["max_results"] * 10)
+                results = []
+                for index, row in enumerate(rows, 1):
+                    if cancel.is_set():
+                        break
+                    record = dict(row)
+                    if reel_matches(record, filters):
+                        results.append(record)
+                    progress(index, len(rows), "Filtering stored Reels")
+                return results[: filters.maximum_results]
+            finally:
+                worker_store.close()
+
+        self.viral_reels_page.run_operation(load, self.viral_reels_page.set_results)
+
+    def export_viral_reels_csv(self, records: list[dict]) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Export Viral Reels", "viral-reels.csv", "CSV (*.csv)")
+        if path:
+            export_reels_csv(path, records)
+
+    def export_viral_reels_xlsx(self, records: list[dict]) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Export Viral Reels", "viral-reels.xlsx", "Excel (*.xlsx)")
+        if not path:
+            return
+        try:
+            export_reels_xlsx(path, records)
+        except RuntimeError as error:
+            QMessageBox.warning(self, "Excel export unavailable", str(error))
 
     def show_matrices(self, project: Project) -> None:
         self.current_project = project
@@ -1172,6 +1397,7 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event) -> None:
+        self.viral_reels_scheduler.stop()
         if self.queue_worker is not None:
             QMessageBox.information(
                 self,
@@ -1195,6 +1421,8 @@ def main() -> int:
         )
         return 0
     application = QApplication(sys.argv)
+    application.setOrganizationName("VideoDownloader")
+    application.setApplicationName("VideoDownloaderFacebook")
     style_path = Path(__file__).with_name("styles.qss")
     application.setStyleSheet(style_path.read_text(encoding="utf-8"))
     database = Database(DB_PATH)

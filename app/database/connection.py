@@ -13,7 +13,7 @@ class Database:
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(self.path)
+        self.connection = sqlite3.connect(self.path, timeout=10.0)
         self.connection.row_factory = sqlite3.Row
         try:
             migrate(self.connection)
