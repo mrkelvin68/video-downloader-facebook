@@ -40,6 +40,7 @@ from app.services.viral_reels_service import (
     PageCandidate,
     PageDiscoveryProvider,
     PageDiscoveryService,
+    extract_page_identity,
     normalize_facebook_url,
     ReelFilters,
     ReelsCollectionService,
@@ -427,15 +428,11 @@ class MainWindow(QMainWindow):
 
     def add_viral_page(self, url: str) -> None:
         try:
-            normalized = normalize_facebook_url(url)
-            segments = [unquote(part) for part in urlsplit(normalized).path.split("/") if part]
-            if not segments:
-                raise ValueError("Facebook URL has no Page name")
+            page_id, name, normalized = extract_page_identity(url)
             store = ViralReelsStore(self.database)
-            if not any(str(row["page_url"]) == normalized for row in store.list_pages(limit=100000)):
-                numeric = next((part for part in reversed(segments) if part.isdigit()), "")
-                name = next((part for part in reversed(segments) if not part.isdigit()), segments[-1])
-                store.upsert_page(PageCandidate(numeric or f"manual:{normalized}", name, normalized, "Unknown", "Unknown", ""))
+            pages = store.list_pages(limit=100000)
+            if not any(str(row["page_url"]) == normalized or (page_id and str(row["page_id"]) == page_id) for row in pages):
+                store.upsert_page(PageCandidate(page_id, name, normalized, "Unknown", "Unknown", ""))
             self.load_viral_pages((normalized,))
         except Exception as error:
             QMessageBox.warning(self, "Invalid Page", str(error))

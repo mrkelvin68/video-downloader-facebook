@@ -18,6 +18,7 @@ class ViralReelsStore:
     def __init__(self, database: Database) -> None:
         self.connection = database.connection
         self._database_path = database.path
+        self.repair_legacy_pages()
 
     @classmethod
     def for_thread(cls, database_path: str) -> "ViralReelsStore":
@@ -26,15 +27,81 @@ class ViralReelsStore:
     def close(self) -> None:
         self.connection.close()
 
+    def repair_legacy_pages(self) -> int:
+        repaired = 0
+        try:
+            rows = self.connection.execute("SELECT page_id, page_name, page_url FROM discovered_pages").fetchall()
+        except sqlite3.OperationalError:
+            return 0
+        from urllib.parse import parse_qs, urlsplit
+        for row in rows:
+            old_id = str(row["page_id"])
+            old_name = str(row["page_name"])
+            old_url = str(row["page_url"])
+
+            recovered_id = None
+            for candidate in (old_url, old_id):
+                if "profile.php" in candidate and "id=" in candidate:
+                    try:
+                        p_parts = urlsplit(candidate if "://" in candidate else f"https://{candidate}")
+                        qs = parse_qs(p_parts.query)
+                        cand_id = qs.get("id", [""])[0]
+                        if cand_id and cand_id.isdigit():
+                            recovered_id = cand_id
+                            break
+                    except Exception:
+                        pass
+
+            if not recovered_id and "profile.php" in old_url:
+                try:
+                    reel_row = self.connection.execute(
+                        "SELECT page_id FROM reels WHERE page_url=? AND page_id NOT LIKE 'manual:%' AND page_id != ''",
+                        (old_url,),
+                    ).fetchone()
+                    if reel_row and str(reel_row["page_id"]).isdigit():
+                        recovered_id = str(reel_row["page_id"])
+                except Exception:
+                    pass
+
+            if recovered_id:
+                new_url = f"https://www.facebook.com/profile.php?id={recovered_id}"
+                new_name = old_name if old_name and old_name != "profile.php" else f"Page {recovered_id}"
+                with self.connection:
+                    self.connection.execute(
+                        "UPDATE discovered_pages SET page_id=?, page_name=?, page_url=? WHERE page_id=?",
+                        (recovered_id, new_name, new_url, old_id),
+                    )
+                repaired += 1
+        return repaired
+
     def upsert_page(self, page: PageCandidate) -> bool:
         with self.connection:
+            existing = None
+            if page.page_id:
+                existing = self.connection.execute(
+                    "SELECT page_id, page_url FROM discovered_pages WHERE page_id=?",
+                    (page.page_id,),
+                ).fetchone()
+            if not existing and page.page_url:
+                existing = self.connection.execute(
+                    "SELECT page_id, page_url FROM discovered_pages WHERE page_url=?",
+                    (page.page_url,),
+                ).fetchone()
+            if existing:
+                self.connection.execute(
+                    """UPDATE discovered_pages SET
+                         page_id=?, page_name=?, page_url=?, country=?,
+                         language=?, topic=?, source=?
+                       WHERE page_id=?""",
+                    (page.page_id or existing["page_id"], page.page_name, page.page_url, page.country,
+                     page.language, page.topic, page.source,
+                     existing["page_id"]),
+                )
+                return True
             cursor = self.connection.execute(
                 """INSERT INTO discovered_pages
                    (page_id, page_name, page_url, country, language, topic, source, discovered_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(page_url) DO UPDATE SET
-                     page_name=excluded.page_name, country=excluded.country,
-                     language=excluded.language, topic=excluded.topic, source=excluded.source""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (page.page_id, page.page_name, page.page_url, page.country, page.language,
                  page.topic, page.source, _now()),
             )

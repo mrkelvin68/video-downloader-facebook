@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Callable, Iterable, Mapping, Sequence
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
 
 COUNTRIES = ("All", "Vietnam", "China", "United States", "Thailand", "South Korea", "Japan", "Other", "Unknown")
 
@@ -120,12 +120,45 @@ def normalize_facebook_url(url: str) -> str:
     value = url.strip()
     if not value:
         raise ValueError("Facebook URL is required")
-    parts = urlsplit(value if "://" in value else f"https://{value}")
+    if value.startswith(("/", "profile.php")):
+        value = f"https://www.facebook.com/{value.lstrip('/')}"
+    elif "://" not in value:
+        value = f"https://{value}"
+    parts = urlsplit(value)
     host = parts.netloc.lower().removeprefix("www.").removeprefix("m.")
     if host not in {"facebook.com", "fb.com", "fb.watch"}:
         raise ValueError("Only Facebook URLs are supported")
     path = re.sub(r"/+", "/", parts.path).rstrip("/") or "/"
-    return urlunsplit(("https", "www.facebook.com" if host in {"facebook.com", "fb.com"} else host, path, "", ""))
+
+    query = ""
+    if path == "/profile.php":
+        qs = parse_qs(parts.query)
+        id_values = qs.get("id")
+        if not id_values or not id_values[0] or not id_values[0].isdigit():
+            raise ValueError("Facebook profile.php URL requires a valid numeric 'id' parameter")
+        query = f"id={id_values[0]}"
+
+    return urlunsplit(("https", "www.facebook.com" if host in {"facebook.com", "fb.com"} else host, path, query, ""))
+
+
+def extract_page_identity(url: str) -> tuple[str, str, str]:
+    normalized = normalize_facebook_url(url)
+    parts = urlsplit(normalized)
+    path = parts.path
+    if path == "/profile.php":
+        qs = parse_qs(parts.query)
+        page_id = qs.get("id", [""])[0]
+        if not page_id or not page_id.isdigit():
+            raise ValueError("Facebook profile.php URL requires a valid numeric 'id' parameter")
+        return page_id, f"Page {page_id}", normalized
+
+    segments = [unquote(part) for part in path.split("/") if part]
+    if not segments:
+        raise ValueError("Facebook URL has no Page name")
+    numeric = next((part for part in reversed(segments) if part.isdigit()), "")
+    name = next((part for part in reversed(segments) if not part.isdigit()), segments[-1])
+    page_id = numeric or f"manual:{normalized}"
+    return page_id, name, normalized
 
 
 def stable_reel_id(url: str) -> str:
