@@ -35,6 +35,7 @@ from app.ui.dialogs.matrix_configuration_dialog import (
     MatrixEntryDialog,
 )
 from app.ui.dialogs.project_dialog import ProjectDialog
+from app.ui.dialogs.project_delete_dialog import ProjectDeleteDialog
 from app.ui.pages.project_detail_page import ProjectDetailPage
 from app.ui.pages.project_page import ProjectPage
 from app.ui.pages.download_queue_page import DownloadQueuePage
@@ -64,6 +65,8 @@ class MainWindow(QMainWindow):
         self.pause_after_current = False
         self.queue_job_id: str | None = None
         self.queue_error: str | None = None
+        self.pending_project_delete: tuple[str, bool] | None = None
+        self.pending_queue_delete: tuple[list[str], str] | None = None
         self.download_queue.recover_interrupted()
         self.setWindowTitle("Video Downloader")
         self.resize(1366, 768)
@@ -96,6 +99,7 @@ class MainWindow(QMainWindow):
         self.project_page.editRequested.connect(self.edit_project)
         self.project_page.openRequested.connect(self.show_detail)
         self.project_page.matrixRequested.connect(self.show_matrices)
+        self.project_page.deleteRequested.connect(self.delete_project)
         self.detail_page.backRequested.connect(self.show_projects)
         self.sidebar.projectsRequested.connect(self.show_projects)
         self.sidebar.queueRequested.connect(self.show_queue)
@@ -119,6 +123,18 @@ class MainWindow(QMainWindow):
         self.queue_page.retryRequested.connect(self.retry_queue_jobs)
         self.queue_page.cancelRequested.connect(self.cancel_queue_jobs)
         self.queue_page.prioritizeRequested.connect(self.prioritize_queue_jobs)
+        self.queue_page.deleteSelectedRequested.connect(
+            self.delete_selected_queue_jobs
+        )
+        self.queue_page.deleteFailedRequested.connect(
+            self.delete_failed_queue_jobs
+        )
+        self.queue_page.deleteCompletedRequested.connect(
+            self.delete_completed_queue_jobs
+        )
+        self.queue_page.deleteInactiveRequested.connect(
+            self.delete_inactive_queue_jobs
+        )
         self.matrix_page.backRequested.connect(self.show_projects)
         self.matrix_page.matrixChanged.connect(self._refresh_matrices)
         self.matrix_page.newMatrixRequested.connect(self._create_matrix)
@@ -162,6 +178,112 @@ class MainWindow(QMainWindow):
         except sqlite3.Error as exc:
             QMessageBox.critical(self, "Lỗi cơ sở dữ liệu", str(exc))
             return False
+
+    def delete_project(self, project: Project) -> None:
+        try:
+            details = self.projects.deletion_details(project.uuid)
+        except (ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "Không thể xóa dự án", str(exc))
+            return
+        dialog = ProjectDeleteDialog(
+            str(details["name"]),
+            str(details["output_dir"]),
+            int(details["video_count"]),
+            int(details["job_count"]),
+            self,
+        )
+        if dialog.exec() != ProjectDeleteDialog.DialogCode.Accepted:
+            return
+        delete_files = dialog.delete_files_radio.isChecked()
+        if delete_files:
+            answer = QMessageBox.warning(
+                self,
+                "Xác nhận xóa tệp",
+                "Thao tác này sẽ xóa vĩnh viễn toàn bộ thư mục dự án. "
+                "Bạn có chắc chắn muốn tiếp tục?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        try:
+            downloading = self.database.connection.execute(
+                """SELECT job_id FROM download_jobs
+                   WHERE project_id=? AND status='downloading' LIMIT 1""",
+                (project.uuid,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            QMessageBox.critical(self, "Lỗi hàng đợi", str(exc))
+            return
+        if downloading is not None:
+            worker = self.queue_worker
+            if worker is None or worker.job_id != downloading["job_id"]:
+                QMessageBox.warning(
+                    self,
+                    "Không thể dừng tải",
+                    "Không tìm thấy worker đang sở hữu job tải của dự án. "
+                    "Dự án chưa bị xóa.",
+                )
+                return
+            answer = QMessageBox.question(
+                self,
+                "Dừng video đang tải",
+                "Dự án đang có video được tải. Hủy job hiện tại, chờ worker dừng "
+                "hoàn toàn rồi mới xóa?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self.pending_project_delete = (project.uuid, delete_files)
+            self.queue_running = False
+            self.pause_after_current = False
+            self.setEnabled(False)
+            self.queue_page.queue_status.setText(
+                "Đang dừng worker trước khi xóa dự án…"
+            )
+            worker.request_cancel()
+            return
+        self._perform_project_deletion(project.uuid, delete_files)
+
+    def _perform_project_deletion(self, project_id: str, delete_files: bool) -> None:
+        try:
+            result = self.projects.delete(project_id, delete_files=delete_files)
+        except (ValueError, OSError, sqlite3.Error, RuntimeError) as exc:
+            QMessageBox.warning(self, "Không thể xóa dự án", str(exc))
+            self.refresh()
+            self.refresh_queue()
+            return
+        if self.current_project is not None and self.current_project.uuid == project_id:
+            self.current_project = None
+            self.current_matrix_id = None
+            self.pending_csv_text = None
+            self.pending_csv_rows = []
+            self.pending_csv_errors = []
+            self.show_projects()
+        self.refresh()
+        self.refresh_queue()
+        if result.cleanup_error:
+            QMessageBox.warning(
+                self,
+                "Đã xóa metadata, chưa xóa hết tệp",
+                "Thông tin dự án đã được xóa khỏi SQLite nhưng không thể dọn "
+                "thư mục video hoàn toàn.\n"
+                f"Thư mục còn lại: {result.remaining_files_path}\n"
+                f"Chi tiết: {result.cleanup_error}",
+            )
+        elif delete_files:
+            QMessageBox.information(
+                self, "Đã xóa dự án", "Metadata và thư mục video đã được xóa."
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Đã xóa dự án",
+                "Metadata và job đã được xóa khỏi ứng dụng. "
+                "Các tệp video trên ổ đĩa được giữ nguyên.",
+            )
 
     def show_projects(self) -> None:
         self.pending_csv_text = None
@@ -809,6 +931,20 @@ class MainWindow(QMainWindow):
         self.refresh_queue()
         if self.current_project is not None:
             self._refresh_project_videos()
+        if self.pending_project_delete is not None:
+            project_id, delete_files = self.pending_project_delete
+            self.pending_project_delete = None
+            self.queue_running = False
+            self.setEnabled(True)
+            self._perform_project_deletion(project_id, delete_files)
+            return
+        if self.pending_queue_delete is not None:
+            job_ids, description = self.pending_queue_delete
+            self.pending_queue_delete = None
+            self.queue_running = False
+            self.setEnabled(True)
+            self._perform_queue_job_deletion(job_ids, description)
+            return
         if not succeeded:
             status = f"Job lỗi: {message}"
             self.queue_page.queue_status.setText(status)
@@ -848,6 +984,20 @@ class MainWindow(QMainWindow):
         self.queue_job_id = None
         self.refresh_queue()
         self._refresh_project_videos()
+        if self.pending_project_delete is not None:
+            project_id, delete_files = self.pending_project_delete
+            self.pending_project_delete = None
+            self.queue_running = False
+            self.setEnabled(True)
+            self._perform_project_deletion(project_id, delete_files)
+            return
+        if self.pending_queue_delete is not None:
+            job_ids, description = self.pending_queue_delete
+            self.pending_queue_delete = None
+            self.queue_running = False
+            self.setEnabled(True)
+            self._perform_queue_job_deletion(job_ids, description)
+            return
         self.queue_page.queue_status.setText(
             "Worker bị gián đoạn; các job còn lại vẫn được giữ."
         )
@@ -878,7 +1028,8 @@ class MainWindow(QMainWindow):
             return
         self.refresh_queue()
         self.queue_page.queue_status.setText(
-            f"Đã tạo {len(created)} job retry. Bấm Bắt đầu hàng đợi để chạy."
+            f"Đã đưa {len(created)} job vào hàng đợi. "
+            "Bấm Bắt đầu hàng đợi để chạy."
         )
 
     def cancel_queue_jobs(self) -> None:
@@ -907,6 +1058,118 @@ class MainWindow(QMainWindow):
             return
         self.refresh_queue()
         self.queue_page.queue_status.setText(f"Đã ưu tiên {count} job đang chờ.")
+
+    def delete_selected_queue_jobs(self) -> None:
+        selected = self._selected_queue_job_ids()
+        if selected:
+            self._request_queue_job_deletion(selected, "job đã chọn")
+
+    def delete_failed_queue_jobs(self) -> None:
+        self._delete_queue_jobs_with_statuses(
+            ("failed", "interrupted"), "job thất bại/gián đoạn"
+        )
+
+    def delete_completed_queue_jobs(self) -> None:
+        self._delete_queue_jobs_with_statuses(
+            ("completed",), "lịch sử hoàn tất"
+        )
+
+    def delete_inactive_queue_jobs(self) -> None:
+        self._delete_queue_jobs_with_statuses(
+            ("completed", "failed", "interrupted", "cancelled"),
+            "job không hoạt động",
+        )
+
+    def _delete_queue_jobs_with_statuses(
+        self, statuses: tuple[str, ...], description: str
+    ) -> None:
+        try:
+            job_ids = self.download_queue.job_ids_with_statuses(statuses)
+        except sqlite3.Error as exc:
+            QMessageBox.warning(self, "Không thể đọc hàng đợi", str(exc))
+            return
+        self._request_queue_job_deletion(job_ids, description)
+
+    def _request_queue_job_deletion(
+        self, job_ids: list[str], description: str
+    ) -> None:
+        job_ids = list(dict.fromkeys(job_ids))
+        if not job_ids:
+            self.queue_page.queue_status.setText(
+                f"Không có {description} cần xóa."
+            )
+            return
+        try:
+            jobs = [
+                job
+                for job_id in job_ids
+                if (job := self.download_queue.get_job(job_id)) is not None
+            ]
+        except sqlite3.Error as exc:
+            QMessageBox.warning(self, "Không thể đọc hàng đợi", str(exc))
+            return
+        if not jobs:
+            self.refresh_queue()
+            return
+        counts = {}
+        for job in jobs:
+            counts[job["status"]] = counts.get(job["status"], 0) + 1
+        details = ", ".join(
+            f"{count} {status}" for status, count in sorted(counts.items())
+        )
+        message = f"Xóa {len(jobs)} {description} khỏi lịch sử?\n({details})"
+        active = [job for job in jobs if job["status"] == "downloading"]
+        if active:
+            message += (
+                "\nJob đang tải sẽ được hủy và chờ worker dừng trước khi xóa."
+            )
+        answer = QMessageBox.question(
+            self,
+            "Xác nhận xóa job",
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if active:
+            worker = self.queue_worker
+            if (
+                len(active) != 1
+                or worker is None
+                or worker.job_id != active[0]["job_id"]
+            ):
+                QMessageBox.warning(
+                    self,
+                    "Không thể dừng tải",
+                    "Không tìm thấy worker tương ứng; không có job nào bị xóa.",
+                )
+                return
+            self.pending_queue_delete = (job_ids, description)
+            self.queue_running = False
+            self.pause_after_current = False
+            self.setEnabled(False)
+            self.queue_page.queue_status.setText(
+                "Đang dừng worker trước khi xóa job…"
+            )
+            worker.request_cancel()
+            return
+        self._perform_queue_job_deletion(job_ids, description)
+
+    def _perform_queue_job_deletion(
+        self, job_ids: list[str], description: str
+    ) -> None:
+        try:
+            deleted = self.download_queue.delete_jobs(job_ids)
+        except (ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "Không thể xóa job", str(exc))
+            return
+        self.refresh_queue()
+        if self.current_project is not None:
+            self._refresh_project_videos()
+        self.queue_page.queue_status.setText(
+            f"Đã xóa {deleted} {description}. Tệp video không bị xóa."
+        )
 
     def closeEvent(self, event) -> None:
         if self.queue_worker is not None:

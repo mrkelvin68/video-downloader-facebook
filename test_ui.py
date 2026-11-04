@@ -1,16 +1,23 @@
+import threading
+import time
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from PySide6.QtWidgets import QLabel, QPushButton
+
 from app.database.connection import Database
 from app.services.project_service import ProjectService
 from app.services.download_queue_service import DownloadQueueService
+from app.services.download_service import DownloadCancelled
 from app.services.video_service import VideoService
 from app.ui.dialogs.csv_preview_dialog import CsvPreviewDialog, CsvPreviewModel
+from app.ui.dialogs.project_delete_dialog import ProjectDeleteDialog
 from app.ui.main_window import MainWindow
 from app.ui.pages.download_queue_page import DownloadQueuePage
+from app.ui.widgets.project_card import ProjectCard
 
 
 class ProjectCsvUiTests(unittest.TestCase):
@@ -178,6 +185,288 @@ class ProjectCsvUiTests(unittest.TestCase):
         self.assertEqual(
             model.data(status_index, Qt.ItemDataRole.ToolTipRole), error
         )
+        window.close()
+
+    def test_project_delete_button_and_dialog_default_to_metadata_only(self):
+        project = ProjectService(self.database).list_projects()[0]
+        card = ProjectCard(project)
+        buttons = card.findChildren(QPushButton)
+        self.assertEqual(
+            [button.text() for button in buttons[:4]],
+            ["Chỉnh sửa", "Mở dự án", "Ma trận", "🗑 Xóa"],
+        )
+        self.assertEqual(buttons[3].objectName(), "danger")
+        dialog = ProjectDeleteDialog(
+            project.name, project.output_dir, 4, 2
+        )
+        self.assertTrue(dialog.delete_metadata.isChecked())
+        self.assertFalse(dialog.delete_files_radio.isChecked())
+        rendered = [label.text() for label in dialog.findChildren(QLabel)]
+        self.assertTrue(any(project.name in text for text in rendered))
+        self.assertTrue(any(project.output_dir in text for text in rendered))
+        self.assertIn("Số video: 4", rendered)
+        self.assertIn("Số job tải liên quan: 2", rendered)
+        dialog.close()
+        card.close()
+
+    def test_project_delete_cancel_and_metadata_only_refresh_immediately(self):
+        from PySide6.QtWidgets import QMessageBox
+
+        marker = self.root / "videos" / "keep.mp4"
+        marker.write_bytes(b"keep")
+        window = MainWindow(self.database)
+        project = ProjectService(self.database).list_projects()[0]
+        with patch(
+            "app.ui.main_window.ProjectDeleteDialog.exec",
+            return_value=ProjectDeleteDialog.DialogCode.Rejected,
+        ):
+            window.delete_project(project)
+        self.assertIsNotNone(self.database.get_project(self.project_id))
+        self.assertTrue(marker.exists())
+
+        with (
+            patch(
+                "app.ui.main_window.ProjectDeleteDialog.exec",
+                return_value=ProjectDeleteDialog.DialogCode.Accepted,
+            ),
+            patch("app.ui.main_window.QMessageBox.information") as information,
+        ):
+            window.delete_project(project)
+        self.assertIsNone(self.database.get_project(self.project_id))
+        self.assertTrue(marker.exists())
+        self.assertEqual(ProjectService(self.database).list_projects(), [])
+        cards_in_layout = [
+            window.project_page.project_layout.itemAt(index).widget()
+            for index in range(window.project_page.project_layout.count())
+        ]
+        self.assertFalse(
+            any(isinstance(widget, ProjectCard) for widget in cards_in_layout)
+        )
+        information.assert_called_once()
+        window.close()
+        self.database.close()
+        self.database = Database(self.database_path)
+        self.assertEqual(self.database.list_projects(), [])
+        self.assertTrue(marker.exists())
+
+    def test_physical_project_delete_requires_second_confirmation(self):
+        from PySide6.QtWidgets import QMessageBox
+
+        marker = self.root / "videos" / "keep.mp4"
+        marker.write_bytes(b"keep")
+        project = ProjectService(self.database).list_projects()[0]
+        window = MainWindow(self.database)
+
+        def choose_files(dialog):
+            dialog.delete_files_radio.setChecked(True)
+            return ProjectDeleteDialog.DialogCode.Accepted
+
+        with (
+            patch("app.ui.main_window.ProjectDeleteDialog.exec", new=choose_files),
+            patch(
+                "app.ui.main_window.QMessageBox.warning",
+                return_value=QMessageBox.StandardButton.No,
+            ),
+        ):
+            window.delete_project(project)
+        self.assertIsNotNone(self.database.get_project(self.project_id))
+        self.assertEqual(marker.read_bytes(), b"keep")
+
+        with (
+            patch("app.ui.main_window.ProjectDeleteDialog.exec", new=choose_files),
+            patch(
+                "app.ui.main_window.QMessageBox.warning",
+                return_value=QMessageBox.StandardButton.Yes,
+            ),
+            patch("app.ui.main_window.QMessageBox.information"),
+        ):
+            window.delete_project(project)
+        self.assertIsNone(self.database.get_project(self.project_id))
+        self.assertFalse((self.root / "videos").exists())
+        window.close()
+
+    def test_queue_deletion_controls_and_context_menu_are_available(self):
+        from PySide6.QtWidgets import QPushButton
+
+        VideoService(self.database).import_csv(
+            self.project_id,
+            "stt,title,url\n1,First,https://www.facebook.com/reel/1\n"
+            "2,Second,https://www.facebook.com/reel/2\n",
+        )
+        videos = self.database.list_videos(self.project_id)
+        queue = DownloadQueueService(self.database)
+        failed, completed = queue.enqueue(
+            self.project_id, [videos[0]["id"], videos[1]["id"]]
+        )
+        queue.claim(failed)
+        queue.finish(failed, status="failed", error_message="Network error")
+        queue.claim(completed)
+        queue.finish(completed, status="completed")
+        window = MainWindow(self.database)
+        window.refresh_queue()
+        page = window.queue_page
+        self.assertTrue(page.delete_failed_button.isEnabled())
+        self.assertTrue(page.delete_completed_button.isEnabled())
+        self.assertTrue(page.delete_inactive_button.isEnabled())
+        self.assertFalse(page.delete_selected_button.isEnabled())
+        row = page.table.queue_model.row_for_job(failed)
+        page.table.selectRow(row)
+        self.assertTrue(page.delete_selected_button.isEnabled())
+        menu = page._create_context_menu()
+        actions = [action.text() for action in menu.actions()]
+        self.assertIn("Xóa job đã chọn", actions)
+        self.assertIn("Xóa tất cả job thất bại", actions)
+        self.assertIn("Xóa lịch sử job hoàn tất", actions)
+        self.assertIn("Xóa toàn bộ job không hoạt động", actions)
+        window.close()
+
+    def test_bulk_failed_job_delete_confirms_count_and_keeps_video_files(self):
+        from PySide6.QtWidgets import QMessageBox
+
+        VideoService(self.database).import_csv(
+            self.project_id,
+            "stt,title,url\n1,Failed,https://www.facebook.com/reel/1\n",
+        )
+        video = self.database.list_videos(self.project_id)[0]
+        queue = DownloadQueueService(self.database)
+        job_id = queue.enqueue(self.project_id, [video["id"]])[0]
+        queue.claim(job_id)
+        queue.finish(job_id, status="failed", error_message="Network error")
+        marker = self.root / "videos" / "keep.mp4"
+        marker.write_bytes(b"keep")
+        window = MainWindow(self.database)
+
+        with patch(
+            "app.ui.main_window.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.No,
+        ) as question:
+            window.delete_failed_queue_jobs()
+        self.assertIn("1 job", question.call_args.args[2])
+        self.assertIsNotNone(queue.get_job(job_id))
+
+        with patch(
+            "app.ui.main_window.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ):
+            window.delete_failed_queue_jobs()
+        self.assertIsNone(queue.get_job(job_id))
+        self.assertEqual(marker.read_bytes(), b"keep")
+        self.assertEqual(
+            self.database.list_videos(self.project_id)[0]["download_status"],
+            "pending",
+        )
+        window.close()
+
+    def test_project_delete_cancels_active_worker_and_waits_for_completion(self):
+        from PySide6.QtWidgets import QMessageBox
+
+        VideoService(self.database).import_csv(
+            self.project_id,
+            "stt,title,url\n1,Active,https://www.facebook.com/reel/1\n",
+        )
+        video = self.database.list_videos(self.project_id)[0]
+        DownloadQueueService(self.database).enqueue(
+            self.project_id, [video["id"]]
+        )
+        project = ProjectService(self.database).list_projects()[0]
+        window = MainWindow(self.database)
+        started = threading.Event()
+
+        class BlockingDownloadService:
+            def __init__(self, _database):
+                pass
+
+            def download(self, *_args, cancel_event=None, **_kwargs):
+                started.set()
+                if cancel_event is None or not cancel_event.wait(5):
+                    raise AssertionError("Cancellation was not delivered")
+                raise DownloadCancelled("Đã hủy tải theo yêu cầu.")
+
+        with (
+            patch(
+                "app.ui.download_worker.DownloadService",
+                BlockingDownloadService,
+            ),
+            patch(
+                "app.ui.main_window.ProjectDeleteDialog.exec",
+                return_value=ProjectDeleteDialog.DialogCode.Accepted,
+            ),
+            patch(
+                "app.ui.main_window.QMessageBox.question",
+                return_value=QMessageBox.StandardButton.Yes,
+            ),
+            patch("app.ui.main_window.QMessageBox.information"),
+        ):
+            window.start_queue()
+            self.assertTrue(started.wait(5))
+            window.delete_project(project)
+            self.assertFalse(window.isEnabled())
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline and self.database.get_project(
+                self.project_id
+            ):
+                self.application.processEvents()
+                time.sleep(0.01)
+
+        self.assertIsNone(self.database.get_project(self.project_id))
+        self.assertIsNone(window.queue_worker)
+        self.assertTrue(window.isEnabled())
+        self.assertTrue((self.root / "videos").exists())
+        window.close()
+
+    def test_selected_active_job_is_cancelled_before_deletion(self):
+        from PySide6.QtWidgets import QMessageBox
+
+        VideoService(self.database).import_csv(
+            self.project_id,
+            "stt,title,url\n1,Active,https://www.facebook.com/reel/1\n",
+        )
+        video = self.database.list_videos(self.project_id)[0]
+        queue = DownloadQueueService(self.database)
+        job_id = queue.enqueue(self.project_id, [video["id"]])[0]
+        marker = self.root / "videos" / "existing.mp4"
+        marker.parent.mkdir(exist_ok=True)
+        marker.write_bytes(b"keep")
+        window = MainWindow(self.database)
+        started = threading.Event()
+
+        class BlockingDownloadService:
+            def __init__(self, _database):
+                pass
+
+            def download(self, *_args, cancel_event=None, **_kwargs):
+                started.set()
+                if cancel_event is None or not cancel_event.wait(5):
+                    raise AssertionError("Cancellation was not delivered")
+                raise DownloadCancelled("Đã hủy tải theo yêu cầu.")
+
+        with (
+            patch(
+                "app.ui.download_worker.DownloadService",
+                BlockingDownloadService,
+            ),
+            patch(
+                "app.ui.main_window.QMessageBox.question",
+                return_value=QMessageBox.StandardButton.Yes,
+            ),
+        ):
+            window.start_queue()
+            self.assertTrue(started.wait(5))
+            window.refresh_queue()
+            row = window.queue_page.table.queue_model.row_for_job(job_id)
+            window.queue_page.table.selectRow(row)
+            window.delete_selected_queue_jobs()
+            self.assertFalse(window.isEnabled())
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline and queue.get_job(job_id) is not None:
+                self.application.processEvents()
+                time.sleep(0.01)
+
+        self.assertIsNone(queue.get_job(job_id))
+        self.assertIsNone(window.queue_worker)
+        self.assertTrue(window.isEnabled())
+        self.assertEqual(marker.read_bytes(), b"keep")
+        self.assertIsNotNone(self.database.get_project(self.project_id))
         window.close()
 
     def test_preview_dialog_sizes_one_twenty_and_one_thousand_rows(self):

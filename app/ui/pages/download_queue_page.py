@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMenu,
     QPushButton,
     QStyledItemDelegate,
     QTableView,
@@ -199,6 +200,7 @@ class DownloadQueueTable(QTableView):
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.setWordWrap(False)
         self.verticalHeader().hide()
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         header = self.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         for column, width in {
@@ -241,6 +243,10 @@ class DownloadQueuePage(QWidget):
     retryRequested = Signal()
     cancelRequested = Signal()
     prioritizeRequested = Signal()
+    deleteSelectedRequested = Signal()
+    deleteFailedRequested = Signal()
+    deleteCompletedRequested = Signal()
+    deleteInactiveRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -285,12 +291,75 @@ class DownloadQueuePage(QWidget):
         controls.addWidget(self.cancel_button)
         layout.addLayout(controls)
 
+        delete_controls = QHBoxLayout()
+        self.delete_selected_button = QPushButton("🗑 Xóa job đã chọn")
+        self.delete_selected_button.setObjectName("danger")
+        self.delete_selected_button.clicked.connect(
+            self.deleteSelectedRequested.emit
+        )
+        self.delete_failed_button = QPushButton("Xóa job thất bại")
+        self.delete_failed_button.setObjectName("danger")
+        self.delete_failed_button.clicked.connect(self.deleteFailedRequested.emit)
+        self.delete_completed_button = QPushButton("Xóa lịch sử hoàn tất")
+        self.delete_completed_button.setObjectName("danger")
+        self.delete_completed_button.clicked.connect(
+            self.deleteCompletedRequested.emit
+        )
+        self.delete_inactive_button = QPushButton("Xóa toàn bộ job không hoạt động")
+        self.delete_inactive_button.setObjectName("danger")
+        self.delete_inactive_button.clicked.connect(
+            self.deleteInactiveRequested.emit
+        )
+        delete_controls.addWidget(self.delete_selected_button)
+        delete_controls.addWidget(self.delete_failed_button)
+        delete_controls.addWidget(self.delete_completed_button)
+        delete_controls.addWidget(self.delete_inactive_button)
+        delete_controls.addStretch()
+        layout.addLayout(delete_controls)
+
         self.queue_status = QLabel("Hàng đợi đang dừng")
         self.queue_status.setObjectName("detailMeta")
         layout.addWidget(self.queue_status)
         self.table = DownloadQueueTable(self)
         self.table.setMinimumHeight(190)
         layout.addWidget(self.table, 1)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
+        self.table.selectionModel().selectionChanged.connect(
+            self._update_delete_buttons
+        )
+        self._job_counts = {}
+        self._update_delete_buttons()
+
+    def _show_context_menu(self, position) -> None:
+        index = self.table.indexAt(position)
+        if index.isValid() and not self.table.selectionModel().isSelected(index):
+            self.table.selectRow(index.row())
+        self._create_context_menu().exec(self.table.viewport().mapToGlobal(position))
+
+    def _create_context_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.addAction("Xóa job đã chọn", self.deleteSelectedRequested.emit)
+        menu.addSeparator()
+        menu.addAction("Xóa tất cả job thất bại", self.deleteFailedRequested.emit)
+        menu.addAction(
+            "Xóa lịch sử job hoàn tất", self.deleteCompletedRequested.emit
+        )
+        menu.addAction(
+            "Xóa toàn bộ job không hoạt động", self.deleteInactiveRequested.emit
+        )
+        return menu
+
+    def _update_delete_buttons(self, *_args) -> None:
+        self.delete_selected_button.setEnabled(
+            bool(self.table.selected_job_ids())
+        )
+        self.delete_failed_button.setEnabled(self._job_counts.get("failed", 0) > 0)
+        self.delete_completed_button.setEnabled(
+            self._job_counts.get("completed", 0) > 0
+        )
+        self.delete_inactive_button.setEnabled(
+            self._job_counts.get("inactive", 0) > 0
+        )
 
     def set_jobs(self, jobs: list[Mapping]) -> None:
         self.table.set_jobs(jobs)
@@ -298,10 +367,20 @@ class DownloadQueuePage(QWidget):
         failed = sum(job["status"] in ("failed", "interrupted") for job in jobs)
         waiting = sum(job["status"] == "queued" for job in jobs)
         active = sum(job["status"] == "downloading" for job in jobs)
+        self._job_counts = {
+            "failed": failed,
+            "completed": completed,
+            "inactive": sum(
+                job["status"]
+                in ("completed", "failed", "interrupted", "cancelled")
+                for job in jobs
+            ),
+        }
         self.summary.setText(
             f"{len(jobs)} job · Hoàn tất {completed} · Lỗi {failed} · "
             f"Đang tải {active} · Đang chờ {waiting}"
         )
+        self._update_delete_buttons()
 
 
 class _ProgressBarDelegate(QStyledItemDelegate):

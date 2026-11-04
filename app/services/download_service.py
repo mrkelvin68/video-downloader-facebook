@@ -33,6 +33,10 @@ class DownloadError(RuntimeError):
         super().__init__(f"[{self.category}] {message}")
 
 
+class DownloadCancelled(RuntimeError):
+    pass
+
+
 def classify_download_error(message: str) -> tuple[str, bool]:
     normalized = message.casefold()
     if any(
@@ -128,6 +132,7 @@ class DownloadService:
         *,
         progress_callback: Callable[[float, int, int | None, float | None, int | None], None]
         | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> tuple[Path, Path | None]:
         project = self.database.get_project(project_id)
         video = self.database.connection.execute(
@@ -180,6 +185,8 @@ class DownloadService:
 
                 try:
                     if progress_callback is None:
+                        if cancel_event is not None and cancel_event.is_set():
+                            raise DownloadCancelled("Đã hủy tải theo yêu cầu.")
                         result = self.runner(
                             command,
                             capture_output=True,
@@ -188,7 +195,9 @@ class DownloadService:
                             check=False,
                         )
                     else:
-                        result = self._run_with_progress(command, progress_callback)
+                        result = self._run_with_progress(
+                            command, progress_callback, cancel_event
+                        )
                 except FileNotFoundError as exc:
                     raise DownloadError(
                         "Không tìm thấy Python/yt-dlp. Chạy lại py install.py",
@@ -244,6 +253,7 @@ class DownloadService:
         progress_callback: Callable[
             [float, int, int | None, float | None, int | None], None
         ],
+        cancel_event: threading.Event | None = None,
     ) -> subprocess.CompletedProcess:
         try:
             process = subprocess.Popen(
@@ -278,14 +288,13 @@ class DownloadService:
         output_tail: list[str] = []
         reader_finished = False
         while not reader_finished or process.poll() is None:
+            if cancel_event is not None and cancel_event.is_set():
+                DownloadService._terminate_process_tree(process)
+                reader.join(timeout=5)
+                raise DownloadCancelled("Đã hủy tải theo yêu cầu.")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
+                DownloadService._terminate_process_tree(process)
                 reader.join(timeout=5)
                 raise subprocess.TimeoutExpired(command, 1800)
             try:
@@ -314,12 +323,7 @@ class DownloadService:
             try:
                 progress_callback(percent, downloaded, total, speed, eta)
             except BaseException:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
+                DownloadService._terminate_process_tree(process)
                 reader.join(timeout=5)
                 raise
 
@@ -330,6 +334,26 @@ class DownloadService:
             stdout="\n".join(output_tail),
             stderr="",
         )
+
+    @staticmethod
+    def _terminate_process_tree(process: subprocess.Popen) -> None:
+        if os.name == "nt" and process.poll() is None:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
 
     def _validate_media(self, path: Path) -> None:
         if not path.is_file() or path.stat().st_size == 0:

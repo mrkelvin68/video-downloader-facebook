@@ -2,12 +2,17 @@
 from __future__ import annotations
 
 import time
+import threading
 
 from PySide6.QtCore import QThread, Signal
 
 from app.database.connection import Database
 from app.services.download_queue_service import MAX_RETRIES, DownloadQueueService
-from app.services.download_service import DownloadError, DownloadService
+from app.services.download_service import (
+    DownloadCancelled,
+    DownloadError,
+    DownloadService,
+)
 
 
 class DownloadWorker(QThread):
@@ -18,6 +23,10 @@ class DownloadWorker(QThread):
         super().__init__(parent)
         self.database_path = database_path
         self.job_id = job_id
+        self.cancel_event = threading.Event()
+
+    def request_cancel(self) -> None:
+        self.cancel_event.set()
 
     def run(self) -> None:
         database = None
@@ -64,6 +73,7 @@ class DownloadWorker(QThread):
                         job["project_id"],
                         job["video_id"],
                         progress_callback=report_progress,
+                        cancel_event=self.cancel_event,
                     )
                     break
                 except DownloadError as exc:
@@ -72,9 +82,22 @@ class DownloadWorker(QThread):
                     retry_count = jobs.record_retry(self.job_id, str(exc))
                     if retry_count is None:
                         raise
-                    time.sleep(2 ** (retry_count - 1))
+                    if self.cancel_event.wait(2 ** (retry_count - 1)):
+                        raise DownloadCancelled("Đã hủy tải theo yêu cầu.")
             jobs.finish(self.job_id, status="completed")
             self.jobFinished.emit(self.job_id, True, "")
+        except DownloadCancelled as exc:
+            error_message = str(exc)
+            if database is not None and claimed:
+                try:
+                    DownloadQueueService(database).finish(
+                        self.job_id,
+                        status="cancelled",
+                        error_message=error_message,
+                    )
+                except Exception as status_error:
+                    error_message += f"; không lưu được trạng thái hủy: {status_error}"
+            self.jobFinished.emit(self.job_id, False, error_message)
         except Exception as exc:
             error_message = str(exc)
             if database is not None and claimed:

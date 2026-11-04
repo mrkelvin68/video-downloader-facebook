@@ -18,6 +18,7 @@ class ProjectCard(QFrame):
     editRequested = Signal(object)
     openRequested = Signal(object)
     matrixRequested = Signal(object)
+    deleteRequested = Signal(object)
 
     def __init__(self, project: Project, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -63,7 +64,13 @@ class ProjectCard(QFrame):
         matrix.setObjectName("secondary")
         matrix.setIcon(button_icon(self, QStyle.StandardPixmap.SP_FileDialogListView))
         matrix.clicked.connect(lambda: self.matrixRequested.emit(project))
+        delete = QPushButton("🗑 Xóa")
+        delete.setObjectName("danger")
+        delete.setIcon(button_icon(self, QStyle.StandardPixmap.SP_TrashIcon))
+        delete.setToolTip("Xóa dự án khỏi ứng dụng hoặc xóa cả thư mục video")
+        delete.clicked.connect(lambda: self.deleteRequested.emit(project))
         bottom.addWidget(edit)
         bottom.addWidget(open_project)
         bottom.addWidget(matrix)
+        bottom.addWidget(delete)
         layout.addLayout(bottom)

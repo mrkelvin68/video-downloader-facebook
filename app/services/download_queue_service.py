@@ -10,6 +10,8 @@ from app.services.download_service import classify_download_error
 
 ACTIVE_STATUSES = ("queued", "downloading")
 MAX_RETRIES = 3
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
@@ -103,6 +105,37 @@ class DownloadQueueService:
                     continue
                 if existing_status == "downloading":
                     continue
+                retry = connection.execute(
+                    """SELECT job_id, error_message FROM download_jobs
+                       WHERE project_id=? AND video_id=?
+                         AND status IN ('failed', 'interrupted')
+                       ORDER BY rowid DESC LIMIT 1""",
+                    (project_id, row["id"]),
+                ).fetchone()
+                if retry is not None and self._is_permanent_error(
+                    retry["error_message"]
+                ):
+                    raise ValueError(
+                        "Không thể thêm video có lỗi tải vĩnh viễn vào hàng đợi."
+                    )
+                if retry is not None:
+                    job_id = retry["job_id"]
+                    connection.execute(
+                        """UPDATE download_jobs
+                           SET status='queued', priority=?, queue_order=?,
+                               progress=0, downloaded_bytes=0, total_bytes=NULL,
+                               speed=NULL, eta_seconds=NULL, retry_count=0,
+                               error_message=NULL, started_at=NULL, finished_at=NULL
+                           WHERE job_id=? AND status IN ('failed', 'interrupted')""",
+                        (priority, start_order + index, job_id),
+                    )
+                    connection.execute(
+                        """UPDATE videos SET download_status='waiting', updated_at=?
+                           WHERE id=? AND project_id=?""",
+                        (now, row["id"], project_id),
+                    )
+                    created_ids.append(job_id)
+                    continue
                 job_id = str(uuid.uuid4())
                 connection.execute(
                     """INSERT INTO download_jobs
@@ -146,6 +179,100 @@ class DownloadQueueService:
                              j.priority DESC, j.queue_order, j.created_at DESC"""
             )
         )
+
+    def job_ids_with_statuses(self, statuses: tuple[str, ...]) -> list[str]:
+        if not statuses:
+            return []
+        placeholders = ",".join("?" for _ in statuses)
+        return [
+            row["job_id"]
+            for row in self.database.connection.execute(
+                f"SELECT job_id FROM download_jobs WHERE status IN ({placeholders})",
+                statuses,
+            )
+        ]
+
+    def count_jobs(self, statuses: tuple[str, ...] | None = None) -> int:
+        if not statuses:
+            return int(
+                self.database.connection.execute(
+                    "SELECT COUNT(*) FROM download_jobs"
+                ).fetchone()[0]
+            )
+        placeholders = ",".join("?" for _ in statuses)
+        return int(
+            self.database.connection.execute(
+                f"SELECT COUNT(*) FROM download_jobs WHERE status IN ({placeholders})",
+                statuses,
+            ).fetchone()[0]
+        )
+
+    def delete_jobs(self, job_ids: list[str]) -> int:
+        unique_ids = list(dict.fromkeys(job_ids))
+        if not unique_ids:
+            return 0
+        placeholders = ",".join("?" for _ in unique_ids)
+        connection = self.database.connection
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            jobs = list(
+                connection.execute(
+                    f"""SELECT job_id, video_id, status FROM download_jobs
+                        WHERE job_id IN ({placeholders})""",
+                    unique_ids,
+                )
+            )
+            if any(job["status"] == "downloading" for job in jobs):
+                raise ValueError("Không thể xóa job đang chạy khi worker chưa dừng.")
+            if jobs:
+                connection.executemany(
+                    "DELETE FROM download_jobs WHERE job_id=?",
+                    [(job["job_id"],) for job in jobs],
+                )
+                self._refresh_video_statuses(
+                    connection, {job["video_id"] for job in jobs}
+                )
+            connection.commit()
+            return len(jobs)
+        except BaseException:
+            connection.rollback()
+            raise
+
+    def delete_jobs_with_statuses(self, statuses: tuple[str, ...]) -> int:
+        return self.delete_jobs(self.job_ids_with_statuses(statuses))
+
+    @staticmethod
+    def _refresh_video_statuses(
+        connection: sqlite3.Connection, video_ids: set[str]
+    ) -> None:
+        now = _now()
+        for video_id in video_ids:
+            video = connection.execute(
+                "SELECT download_status FROM videos WHERE id=?", (video_id,)
+            ).fetchone()
+            if video is None or video["download_status"] == "completed":
+                continue
+            jobs = {
+                row["status"]
+                for row in connection.execute(
+                    "SELECT status FROM download_jobs WHERE video_id=?",
+                    (video_id,),
+                )
+            }
+            if "completed" in jobs:
+                status = "completed"
+            elif "downloading" in jobs:
+                status = "downloading"
+            elif "queued" in jobs:
+                status = "waiting"
+            elif jobs.intersection({"failed", "interrupted"}):
+                status = "failed"
+            else:
+                status = "pending"
+            connection.execute(
+                "UPDATE videos SET download_status=?, updated_at=? WHERE id=?",
+                (status, now, video_id),
+            )
 
     def get_job(self, job_id: str) -> sqlite3.Row | None:
         return self.database.connection.execute(
@@ -268,7 +395,7 @@ class DownloadQueueService:
         status: str,
         error_message: str | None = None,
     ) -> None:
-        if status not in ("completed", "failed", "interrupted"):
+        if status not in ("completed", "failed", "interrupted", "cancelled"):
             raise ValueError(f"Trạng thái kết thúc không hợp lệ: {status}")
         now = _now()
         connection = self.database.connection
@@ -300,7 +427,10 @@ class DownloadQueueService:
                     (status, error_message, now, job_id),
                 )
             if cursor.rowcount == 1:
-                video_status = "completed" if status == "completed" else "failed"
+                video_status = {
+                    "completed": "completed",
+                    "cancelled": "pending",
+                }.get(status, "failed")
                 connection.execute(
                     """UPDATE videos SET download_status=?, updated_at=?
                        WHERE id=? AND project_id=?""",
@@ -429,31 +559,33 @@ class DownloadQueueService:
         try:
             failed = list(
                 connection.execute(
-                    f"""SELECT j.project_id, j.video_id, j.error_message
+                    f"""SELECT j.job_id, j.project_id, j.video_id,
+                               j.error_message
                         FROM download_jobs AS j
                         WHERE j.status IN ('failed', 'interrupted')
                           AND j.job_id IN ({placeholders})
-                        ORDER BY j.queue_order""",
+                        ORDER BY j.created_at DESC, j.rowid DESC""",
                     tuple(job_ids),
                 )
             )
-            failed = [
-                row
-                for row in failed
-                if not self._is_permanent_error(row["error_message"])
-                and connection.execute(
-                    "SELECT download_status FROM videos WHERE id=? AND project_id=?",
-                    (row["video_id"], row["project_id"]),
-                ).fetchone()["download_status"]
-                != "completed"
-            ]
+            selected_by_video = {}
+            for row in failed:
+                selected_by_video.setdefault(row["video_id"], row)
             bounds = connection.execute(
                 """SELECT COALESCE(MAX(queue_order), 0) AS max_order
                    FROM download_jobs WHERE status IN ('queued', 'downloading')"""
             ).fetchone()
             created: list[str] = []
             now = _now()
-            for index, row in enumerate(failed):
+            for index, row in enumerate(selected_by_video.values()):
+                if self._is_permanent_error(row["error_message"]):
+                    continue
+                video = connection.execute(
+                    "SELECT download_status FROM videos WHERE id=? AND project_id=?",
+                    (row["video_id"], row["project_id"]),
+                ).fetchone()
+                if video is None or video["download_status"] == "completed":
+                    continue
                 active = connection.execute(
                     """SELECT 1 FROM download_jobs
                        WHERE video_id=? AND status IN ('queued', 'downloading')
@@ -462,20 +594,15 @@ class DownloadQueueService:
                 ).fetchone()
                 if active:
                     continue
-                job_id = str(uuid.uuid4())
+                job_id = row["job_id"]
                 connection.execute(
-                    """INSERT INTO download_jobs
-                       (job_id, project_id, video_id, status, queue_order,
-                        retry_count, created_at)
-                       VALUES (?, ?, ?, 'queued', ?, ?, ?)""",
-                    (
-                        job_id,
-                        row["project_id"],
-                        row["video_id"],
-                        bounds["max_order"] + index + 1,
-                        0,
-                        now,
-                    ),
+                    """UPDATE download_jobs
+                       SET status='queued', priority=0, queue_order=?,
+                           progress=0, downloaded_bytes=0, total_bytes=NULL,
+                           speed=NULL, eta_seconds=NULL, retry_count=0,
+                           error_message=NULL, started_at=NULL, finished_at=NULL
+                       WHERE job_id=? AND status IN ('failed', 'interrupted')""",
+                    (bounds["max_order"] + index + 1, job_id),
                 )
                 connection.execute(
                     """UPDATE videos SET download_status='waiting', updated_at=?
@@ -491,14 +618,8 @@ class DownloadQueueService:
 
     @staticmethod
     def _is_permanent_error(message: str | None) -> bool:
-        category, _ = classify_download_error(message or "")
-        return category in {
-            "authentication",
-            "environment",
-            "ffmpeg",
-            "unavailable",
-            "unsupported",
-        }
+        _, retryable = classify_download_error(message or "")
+        return not retryable
 
     def recover_interrupted(self) -> int:
         connection = self.database.connection

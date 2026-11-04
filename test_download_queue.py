@@ -12,7 +12,11 @@ from unittest.mock import patch
 from app.core.exceptions import ImportBlockedError
 from app.database.connection import Database
 from app.services.download_queue_service import MAX_RETRIES, DownloadQueueService
-from app.services.download_service import DownloadError, DownloadService
+from app.services.download_service import (
+    DownloadCancelled,
+    DownloadError,
+    DownloadService,
+)
 from app.services.project_service import ProjectService
 from app.services.video_service import VideoService
 from app.ui.download_worker import DownloadWorker
@@ -178,6 +182,98 @@ class DownloadQueueServiceTests(unittest.TestCase):
         self.assertEqual(
             self.db.list_videos(self.project_id)[0]["download_status"], "pending"
         )
+
+    def test_retry_reuses_failed_job_and_enqueue_does_not_duplicate_it(self):
+        job_id = self.queue.enqueue(self.project_id, [self.video_ids[0]])[0]
+        self.queue.claim(job_id)
+        self.queue.finish(
+            job_id, status="failed", error_message="Network connection reset"
+        )
+
+        self.assertEqual(self.queue.retry([job_id, job_id]), [job_id])
+        self.assertEqual(self.queue.get_job(job_id)["status"], "queued")
+        self.assertEqual(self.queue.count_jobs(), 1)
+
+        self.queue.claim(job_id)
+        self.queue.finish(
+            job_id, status="failed", error_message="Network connection reset"
+        )
+        self.assertEqual(
+            self.queue.enqueue(self.project_id, [self.video_ids[0]]), [job_id]
+        )
+        self.assertEqual(self.queue.count_jobs(), 1)
+
+    def test_delete_failed_job_preserves_video_files_and_other_project_jobs(self):
+        failed = self.queue.enqueue(self.project_id, [self.video_ids[0]])[0]
+        other = self.queue.enqueue(self.other_project_id, [self.other_video_id])[0]
+        self.queue.claim(failed)
+        self.queue.finish(failed, status="failed", error_message="Network error")
+        marker = self.root / "queue-project" / "existing" / "video.mp4"
+        marker.parent.mkdir()
+        marker.write_bytes(b"keep")
+
+        self.assertEqual(self.queue.delete_jobs([failed]), 1)
+
+        self.assertIsNone(self.queue.get_job(failed))
+        self.assertEqual(self.queue.get_job(other)["status"], "queued")
+        self.assertEqual(marker.read_bytes(), b"keep")
+        self.assertEqual(
+            self.db.list_videos(self.project_id)[0]["download_status"], "pending"
+        )
+        self.assertEqual(
+            DownloadQueueService(self.db).video_job_info(self.other_project_id)[
+                self.other_video_id
+            ]["job_id"],
+            other,
+        )
+
+    def test_delete_completed_history_keeps_downloaded_video_and_file_after_restart(self):
+        job_id = self.queue.enqueue(self.project_id, [self.video_ids[0]])[0]
+        self.queue.claim(job_id)
+        self.queue.finish(job_id, status="completed")
+        marker = self.root / "queue-project" / "queue-1" / "queue-1.mp4"
+        marker.parent.mkdir()
+        marker.write_bytes(b"downloaded")
+        with self.db.connection:
+            self.db.connection.execute(
+                """UPDATE videos SET local_video_path=?, download_status='completed'
+                   WHERE id=?""",
+                (str(marker), self.video_ids[0]),
+            )
+
+        self.assertEqual(
+            self.queue.delete_jobs_with_statuses(("completed",)), 1
+        )
+        self.db.close()
+        self.db = Database(self.db_path)
+        self.queue = DownloadQueueService(self.db)
+        self.assertEqual(self.queue.count_jobs(), 0)
+        self.assertEqual(marker.read_bytes(), b"downloaded")
+        self.assertEqual(
+            self.db.list_videos(self.project_id)[0]["download_status"], "completed"
+        )
+
+    def test_bulk_delete_rollback_and_active_job_guard(self):
+        first, second = self.queue.enqueue(
+            self.project_id, self.video_ids[:2]
+        )
+        self.db.connection.execute(
+            """CREATE TRIGGER reject_job_delete
+               BEFORE DELETE ON download_jobs
+               BEGIN SELECT RAISE(ABORT, 'delete rejected'); END"""
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.queue.delete_jobs_with_statuses(("queued",))
+        self.assertIsNotNone(self.queue.get_job(first))
+        self.assertIsNotNone(self.queue.get_job(second))
+
+        self.db.connection.execute("DROP TRIGGER reject_job_delete")
+        self.queue.claim(first)
+        with self.assertRaisesRegex(ValueError, "đang chạy"):
+            self.queue.delete_jobs([first])
+        self.assertIsNotNone(self.queue.get_job(first))
+        self.assertEqual(self.queue.delete_jobs_with_statuses(("queued",)), 1)
+        self.assertEqual(self.queue.get_job(first)["status"], "downloading")
 
     def test_import_replacement_is_blocked_while_jobs_are_queued(self):
         self.queue.enqueue(self.project_id, [self.video_ids[0]])
@@ -371,6 +467,63 @@ class DownloadQueueServiceTests(unittest.TestCase):
 
 
 class DownloadWorkerTests(unittest.TestCase):
+    def test_worker_cancellation_finishes_before_job_can_be_deleted(self):
+        temp = tempfile.TemporaryDirectory()
+        try:
+            root = Path(temp.name)
+            database = Database(root / "cancel.sqlite3")
+            project_id = ProjectService(database).create(
+                "Cancel", "cancel", str(root / "cancel-project")
+            )
+            VideoService(database).import_csv(
+                project_id,
+                "stt,title,url\n1,Video,https://www.facebook.com/reel/1\n",
+            )
+            video = database.list_videos(project_id)[0]
+            queue = DownloadQueueService(database)
+            job_id = queue.enqueue(project_id, [video["id"]])[0]
+            database.close()
+            started = threading.Event()
+
+            class BlockingDownloadService:
+                def __init__(self, _database):
+                    pass
+
+                def download(
+                    self,
+                    *_args,
+                    cancel_event=None,
+                    **_kwargs,
+                ):
+                    started.set()
+                    self.assert_cancelled(cancel_event)
+
+                @staticmethod
+                def assert_cancelled(cancel_event):
+                    if cancel_event is None or not cancel_event.wait(5):
+                        raise AssertionError("Cancellation was not delivered")
+                    raise DownloadCancelled("Đã hủy tải theo yêu cầu.")
+
+            worker = DownloadWorker(str(root / "cancel.sqlite3"), job_id)
+            with patch(
+                "app.ui.download_worker.DownloadService", BlockingDownloadService
+            ):
+                worker.start()
+                self.assertTrue(started.wait(5))
+                worker.request_cancel()
+                self.assertTrue(worker.wait(10000))
+
+            verify = Database(root / "cancel.sqlite3")
+            jobs = DownloadQueueService(verify)
+            self.assertEqual(jobs.get_job(job_id)["status"], "cancelled")
+            self.assertEqual(
+                verify.list_videos(project_id)[0]["download_status"], "pending"
+            )
+            self.assertEqual(jobs.delete_jobs([job_id]), 1)
+            verify.close()
+        finally:
+            temp.cleanup()
+
     def test_worker_retries_temporary_failures_with_exponential_backoff(self):
         temp = tempfile.TemporaryDirectory()
         try:
@@ -526,7 +679,14 @@ class DownloadWorkerTests(unittest.TestCase):
                 def __init__(self, worker_db):
                     self.database = worker_db
 
-                def download(self, worker_project_id, worker_video_id, *, progress_callback):
+                def download(
+                    self,
+                    worker_project_id,
+                    worker_video_id,
+                    *,
+                    progress_callback,
+                    cancel_event=None,
+                ):
                     progress_callback(10.0, 10, 100, 50.0, 2)
                     progress_callback(20.0, 20, 100, 50.0, 2)
                     progress_callback(100.0, 100, 100, None, 0)

@@ -22,6 +22,9 @@ QPushButton#primary { background:#2563eb; border:1px solid #3b82f6; color:#fff; 
 QPushButton#primary:hover { background:#1d4ed8; }
 QPushButton#secondary { background:#14223a; border:1px solid #2b4264; color:#c6d7ee; }
 QPushButton#secondary:hover { background:#1b3151; }
+QPushButton#danger { background:#3a202c; border:1px solid #713342; color:#fca5a5; }
+QPushButton#danger:hover:enabled { background:#512634; border-color:#a34357; color:#fff; }
+QPushButton#danger:disabled { background:#241b25; border-color:#49303a; color:#806b75; }
 QPushButton#back { color:#93c5fd; padding-left:0; }
 QScrollArea { background:transparent; }
 QScrollBar:vertical { background:#0d1526; width:9px; margin:4px; }

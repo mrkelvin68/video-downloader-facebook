@@ -1,6 +1,8 @@
 """Phase 3.1 download engine tests."""
 import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +13,7 @@ from requests.exceptions import ConnectionError as RequestsConnectionError
 from app.database.connection import Database
 from app.services.download_service import (
     DownloadError,
+    DownloadCancelled,
     DownloadService,
     classify_download_error,
 )
@@ -65,6 +68,20 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(error.exception.category, "timeout")
         self.assertTrue(error.exception.retryable)
         self.assertIn("quá thời gian", str(error.exception))
+
+    def test_progress_runner_terminates_process_when_cancelled(self):
+        cancel_event = threading.Event()
+        timer = threading.Timer(0.2, cancel_event.set)
+        timer.start()
+        try:
+            with self.assertRaises(DownloadCancelled):
+                DownloadService._run_with_progress(
+                    [sys.executable, "-c", "import time; time.sleep(20)"],
+                    lambda *_args: None,
+                    cancel_event,
+                )
+        finally:
+            timer.cancel()
 
     def test_ffmpeg_unavailable_is_reported_as_permanent_media_error(self):
         runner = lambda *_args, **_kwargs: SimpleNamespace(

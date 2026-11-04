@@ -20,6 +20,7 @@ class ProjectPage(QWidget):
     editRequested = Signal(object)
     openRequested = Signal(object)
     matrixRequested = Signal(object)
+    deleteRequested = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -94,5 +95,6 @@ class ProjectPage(QWidget):
             card.editRequested.connect(self.editRequested)
             card.openRequested.connect(self.openRequested)
             card.matrixRequested.connect(self.matrixRequested)
+            card.deleteRequested.connect(self.deleteRequested)
             self.project_layout.addWidget(card)
         self.project_layout.addStretch()
