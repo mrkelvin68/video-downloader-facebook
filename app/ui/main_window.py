@@ -571,7 +571,12 @@ class MainWindow(QMainWindow):
             page.set_busy(False)
             QMessageBox.information(self, "Scan Reels", "Selected Pages were not found in the saved list.")
             return
-        results_limit = max(1, min(int(values.get("max_results", 30)), 100))
+        max_res = max(1, min(int(values.get("max_results", 30)), 100))
+        min_v = values.get("min_views")
+        if min_v and int(min_v) > 0:
+            results_limit = min(max(max_res * 4, 30), ApifyFacebookReelsProvider.MAX_RESULTS_LIMIT)
+        else:
+            results_limit = max_res
         if not meta:
             names = "\n".join(f"• {p.page_name}" for p in pages[:10]) + (f"\n… +{len(pages) - 10} more" if len(pages) > 10 else "")
             answer = QMessageBox.question(
@@ -606,12 +611,13 @@ class MainWindow(QMainWindow):
 
         def show(payload):
             results, messages, errors, total_collected = payload
-            displayed = self.apply_stored_viral_reels_filters(values, collected_override=total_collected or None)
-            if not displayed and results:
-                deduped = list({str(r.get('reel_id') or r.get('reel_url')): r for r in results}.values())
-                page.set_results(deduped)
-                page.set_scan_stats(total_collected or len(deduped), len(deduped), 0, len(deduped))
-                displayed = deduped
+            deduped = list({str(r.get('reel_id') or r.get('reel_url')): r for r in results if reel_matches(r, filters)}.values())
+            displayed = deduped[: filters.maximum_results]
+            valid_count = total_collected or len(results)
+            filtered_count = max(0, valid_count - len(displayed))
+            reason = self._filter_rejection_reason(filters) if (valid_count > 0 and not displayed) else ""
+            page.set_results(displayed)
+            page.set_scan_stats(valid_count, valid_count, filtered_count, len(displayed), reason)
             if errors:
                 QMessageBox.warning(self, "Scan Reels", f"{errors} error(s):\n" + "\n".join(messages[:5]))
             elif not displayed:

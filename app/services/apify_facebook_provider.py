@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 
 from app.services.viral_reels_service import (
     DiscoveryRequest, PageCandidate, PageDiscoveryProvider, ReelMetadata, ReelsProvider,
-    ProviderAuthenticationError, ProviderError, normalize_facebook_url, stable_reel_id,
+    ProviderAuthenticationError, ProviderError, normalize_facebook_url, normalize_view_count, stable_reel_id,
 )
 
 ACTOR_ID = "apify~facebook-reels-scraper"
@@ -328,9 +328,12 @@ class ApifyFacebookReelsProvider(ReelsProvider):
                     published = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
                 except ValueError:
                     published = None
-            views = item.get("playCountRounded")
-            if views is None:
-                views = item.get("videoViewCount") or item.get("playCount")
+            views_raw = item.get("playCountRounded")
+            if views_raw is None:
+                views_raw = item.get("videoViewCount")
+            if views_raw is None:
+                views_raw = item.get("playCount")
+            views = normalize_view_count(views_raw)
             results.append(
                 ReelMetadata(
                     reel_id=reel_id,
@@ -339,7 +342,7 @@ class ApifyFacebookReelsProvider(ReelsProvider):
                     page_name=target_page.page_name,
                     page_url=target_page.page_url,
                     caption=str(item.get("text") or ""),
-                    views=int(views) if isinstance(views, (int, float)) else None,
+                    views=views,
                     likes=int(item["likeCount"]) if isinstance(item.get("likeCount"), (int, float)) else None,
                     comments=int(item["commentCount"]) if isinstance(item.get("commentCount"), (int, float)) else None,
                     shares=int(item["shareCount"]) if isinstance(item.get("shareCount"), (int, float)) else None,

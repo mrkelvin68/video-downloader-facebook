@@ -219,10 +219,51 @@ def viral_score(reel: Mapping[str, object], snapshots: Sequence[Mapping[str, obj
     return round(view_component + engagement_component + freshness + growth, 4)
 
 
+def normalize_view_count(val: Any) -> int | None:
+    if val is None or val == "" or isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        if math.isnan(val) or math.isinf(val) or val < 0:
+            return None
+        return int(val)
+    if isinstance(val, str):
+        cleaned = val.strip().replace(",", "")
+        if not cleaned:
+            return None
+        try:
+            float_val = float(cleaned)
+            if math.isnan(float_val) or math.isinf(float_val) or float_val < 0:
+                return None
+            return int(float_val)
+        except ValueError:
+            pass
+        upper = cleaned.upper()
+        if upper.endswith("K"):
+            try:
+                num = float(upper[:-1])
+                return int(num * 1_000) if num >= 0 else None
+            except ValueError:
+                return None
+        if upper.endswith("M"):
+            try:
+                num = float(upper[:-1])
+                return int(num * 1_000_000) if num >= 0 else None
+            except ValueError:
+                return None
+        if upper.endswith("B"):
+            try:
+                num = float(upper[:-1])
+                return int(num * 1_000_000_000) if num >= 0 else None
+            except ValueError:
+                return None
+    return None
+
+
 def reel_matches(reel: Mapping[str, object], filters: ReelFilters) -> bool:
-    views = reel.get("views")
-    if filters.minimum_views is not None and (views is None or int(views) < filters.minimum_views):
-        return False
+    views = normalize_view_count(reel.get("views"))
+    if filters.minimum_views is not None and filters.minimum_views > 0:
+        if views is None or views < filters.minimum_views:
+            return False
     if filters.country != "All" and reel.get("country") != filters.country:
         return False
     if filters.language != "All" and reel.get("language") != filters.language:
@@ -292,18 +333,34 @@ class ReelsCollectionService:
                     reel_url = normalize_facebook_url(raw.reel_url)
                     reel_id = raw.reel_id or stable_reel_id(reel_url)
                     language, confidence = classify_language(raw.caption)
-                    record = {**raw.__dict__, "reel_id": reel_id, "reel_url": reel_url, "published_at": raw.published_at.isoformat() if raw.published_at else None, "country": raw.country or page.country or "Unknown", "language": raw.language or language, "language_confidence": confidence}
+                    norm_views = normalize_view_count(raw.views)
+                    record = {
+                        **raw.__dict__,
+                        "reel_id": reel_id,
+                        "reel_url": reel_url,
+                        "views": norm_views,
+                        "published_at": raw.published_at.isoformat() if raw.published_at else None,
+                        "country": raw.country or page.country or "Unknown",
+                        "language": raw.language or language,
+                        "language_confidence": confidence,
+                    }
+                    is_match = reel_matches(record, filters)
+                    record["status"] = "qualified" if is_match else "unqualified"
                     inserted = self.store.upsert_reel(record)
-                    self.store.record_metrics_snapshot(reel_id, raw.views, raw.likes, raw.comments, raw.shares)
+                    self.store.record_metrics_snapshot(reel_id, norm_views, raw.likes, raw.comments, raw.shares)
                     if inserted:
                         state.reels_collected += 1
                     else:
                         state.duplicates_skipped += 1
                     record["viral_score"] = viral_score(record, self.store.metrics_history(reel_id))
                     self.store.update_viral_score(reel_id, float(record["viral_score"]))
-                    if reel_matches(record, filters):
+                    if is_match:
                         results.append(record)
                         state.qualified_reels += 1
+                        if len(results) >= filters.maximum_results:
+                            break
+                if len(results) >= filters.maximum_results:
+                    break
             except ProviderRateLimitError as exc:
                 state.errors += 1
                 state.messages.append(str(exc))
