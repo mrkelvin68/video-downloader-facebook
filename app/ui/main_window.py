@@ -7,7 +7,8 @@ from dataclasses import asdict
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QTimer, Qt
+from PySide6.QtCore import QSettings, QTimer, Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtGui import QImageReader, QStandardItem
 from PySide6.QtWidgets import (
     QApplication,
@@ -224,6 +225,11 @@ class MainWindow(QMainWindow):
         self.detail_page.facebookSaveDraftRequested.connect(self._save_facebook_draft)
         self.detail_page.facebookPrepareRequested.connect(self._prepare_facebook_video)
         self.detail_page.facebookPublishNowRequested.connect(self._publish_facebook_now)
+        self.detail_page.facebookJobReconcileRequested.connect(self._reconcile_facebook_job)
+        self.detail_page.facebookJobRetryRequested.connect(self._retry_facebook_job)
+        self.detail_page.facebookJobErrorRequested.connect(self._show_facebook_job_error)
+        self.detail_page.facebookJobCancelRequested.connect(self._cancel_facebook_job)
+        self.detail_page.facebookJobOpenRequested.connect(lambda url: QDesktopServices.openUrl(QUrl(url)))
         self.sidebar.projectsRequested.connect(self.show_projects)
         self.sidebar.queueRequested.connect(self.show_queue)
         self.sidebar.viralReelsRequested.connect(self.show_viral_reels)
@@ -455,6 +461,9 @@ class MainWindow(QMainWindow):
         pages = self.facebook_publishing.list_pages(project_id)
         default_page = next((page for page in pages if page.get("is_default")), None)
         drafts = {row["video_id"]: row for row in self.facebook_publishing.list_drafts(project_id)}
+        jobs_by_video: dict[str, list[dict]] = {}
+        for job in self.facebook_publishing.list_jobs(project_id):
+            jobs_by_video.setdefault(str(job["video_id"]), []).insert(0, job)
         rows = []
         for video in self.videos.list_videos(project_id):
             row = asdict(video)
@@ -465,7 +474,7 @@ class MainWindow(QMainWindow):
             row.setdefault("video_id", video.id)
             row.setdefault("video_title", video.title)
             rows.append(row)
-        self.detail_page.set_facebook_data(pages, rows)
+        self.detail_page.set_facebook_data(pages, rows, jobs_by_video)
 
     def _connect_facebook(self, token: str) -> None:
         if self.current_project is None:
@@ -640,6 +649,9 @@ class MainWindow(QMainWindow):
         except (FacebookPublishingError, ValueError) as exc:
             QMessageBox.warning(self, "Đăng Facebook", str(exc))
             return
+        self._start_facebook_job(job_id, token, project_id)
+
+    def _start_facebook_job(self, job_id: str, token: str, project_id: str) -> None:
         database_path = self.database.path
         self.detail_page.facebook_publish_button.set_loading(True)
         self.detail_page.facebook_status.setText("Đang chuẩn bị đăng video…")
@@ -660,6 +672,84 @@ class MainWindow(QMainWindow):
         worker.failed.connect(lambda message: self._facebook_publish_failed(message, project_id, job_id))
         worker.finished.connect(self._facebook_publish_finished)
         worker.start()
+
+    def _reconcile_facebook_job(self, job_id: str) -> None:
+        if self.current_project is None:
+            return
+        project_id = self.current_project.uuid
+        database_path = self.database.path
+
+        def reconcile():
+            worker_database = Database(database_path)
+            try:
+                job = FacebookPublishingService(worker_database).get_job(job_id)
+                if job is None or job["project_id"] != project_id:
+                    raise FacebookPublishingError("Không tìm thấy job Facebook trong dự án hiện tại.")
+                token = get_page_token(project_id, job["page_id"])
+                if not token:
+                    raise FacebookPublishingError("Chưa có Page Access Token cho Fanpage này.")
+                return FacebookPublishingService(worker_database, MetaGraphPublishingClient(token)).reconcile_job(job_id)
+            finally:
+                worker_database.close()
+
+        self._run_facebook_request(
+            "reconcile-" + job_id, self.detail_page.facebook_reconcile_button, reconcile,
+            lambda _job: self._refresh_facebook(),
+        )
+
+    def _show_facebook_job_error(self, job_id: str) -> None:
+        job = self.facebook_publishing.get_job(job_id)
+        if job is not None:
+            QMessageBox.information(self, "Lỗi publishing job", str(job.get("last_error") or "Job chưa có lỗi được lưu."))
+
+    def _cancel_facebook_job(self, job_id: str) -> None:
+        try:
+            self.facebook_publishing.cancel(job_id)
+            self._refresh_facebook()
+        except FacebookPublishingError as exc:
+            QMessageBox.warning(self, "Hủy publishing job", str(exc))
+
+    def _retry_facebook_job(self, job_id: str) -> None:
+        if self.current_project is None or self._facebook_publish_worker is not None:
+            return
+        job = self.facebook_publishing.get_job(job_id)
+        if job is None or job["project_id"] != self.current_project.uuid:
+            return
+        state = str(job.get("display_status") or job.get("status") or "")
+        risk_confirmed = False
+        if state == "UNRESOLVED":
+            confirmation = QMessageBox.question(
+                self, "Xác nhận đăng lại có rủi ro",
+                f"Job cũ: {job_id}\nRemote Video ID: {job.get('remote_video_id') or '-'}\n"
+                f"Fanpage: {job.get('page_id')}\nFile: {job.get('local_file_path')}\n\n"
+                "Trạng thái chưa xác minh. Video có thể đã được đăng nhưng ứng dụng chưa đọc được.\n\n"
+                "Tôi hiểu rằng việc đăng lại có thể tạo bài đăng trùng.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            risk_confirmed = confirmation == QMessageBox.StandardButton.Yes
+            if not risk_confirmed:
+                return
+        elif state == "FAILED":
+            confirmation = QMessageBox.question(
+                self, "Xác nhận đăng lại", f"Đăng lại job FAILED này?\nFile: {job.get('local_file_path')}\nFanpage: {job.get('page_id')}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if confirmation != QMessageBox.StandardButton.Yes:
+                return
+        else:
+            return
+        try:
+            new_job_id = self.facebook_publishing.retry_job(job_id, risk_confirmed=risk_confirmed)
+            token = get_page_token(self.current_project.uuid, job["page_id"])
+            if not token:
+                raise FacebookPublishingError("Chưa có Page Access Token cho Fanpage này.")
+        except FacebookPublishingError as exc:
+            QMessageBox.warning(self, "Đăng lại Facebook", str(exc))
+            return
+        self._refresh_facebook()
+        self._start_facebook_job(new_job_id, token, self.current_project.uuid)
 
     def _facebook_publish_succeeded(self, result: dict, project_id: str) -> None:
         if self.current_project is None or self.current_project.uuid != project_id:

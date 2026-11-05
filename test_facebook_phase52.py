@@ -28,6 +28,19 @@ class _PublishingClient:
         return self.result
 
 
+class _StatusClient:
+    def __init__(self, result=None, error=None):
+        self.result = result
+        self.error = error
+        self.diagnostics = [{"method": "GET", "endpoint": "/v26.0/video", "http_status": 200, "result": "PASS"}]
+
+    def get_video_status(self, video_id):
+        if self.error:
+            self.diagnostics = [{"method": "GET", "endpoint": f"/v26.0/{video_id}", "http_status": 400, "meta_code": "100", "meta_subcode": "33", "result": "FAILED"}]
+            raise self.error
+        return self.result
+
+
 class FacebookPhase52Tests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -166,6 +179,69 @@ class FacebookPhase52Tests(unittest.TestCase):
         self.assertEqual(result["remote_video_id"], "remote-av1")
         self.assertEqual(result["upload_session_id"], "session-av1")
         self.assertIn("META_PROCESSING_FAILED", result["last_error"])
+
+    def test_reconcile_processing_keeps_job_processing(self):
+        job_id = self.service.enqueue_from_draft(self.project_id, self.video_id, "page-1")
+        with self.database.connection:
+            self.database.connection.execute(
+                "UPDATE facebook_publishing_jobs SET status='PUBLISHING', remote_video_id=? WHERE id=?",
+                ("remote-processing", job_id),
+            )
+        self.service.client = _StatusClient({"id": "remote-processing", "status": {"video_status": "processing", "processing_phase": {"status": "in_progress"}}})
+        result = self.service.reconcile_job(job_id)
+        self.assertEqual(result["status"], "PROCESSING")
+        self.assertEqual(result["display_status"], "PROCESSING")
+        self.assertIn("video_status", result["last_status_check"])
+
+    def test_reconcile_published_normalizes_permalink_and_persists_url(self):
+        job_id = self.service.enqueue_from_draft(self.project_id, self.video_id, "page-1")
+        with self.database.connection:
+            self.database.connection.execute(
+                "UPDATE facebook_publishing_jobs SET status='PUBLISHING', remote_video_id=? WHERE id=?",
+                ("remote-published", job_id),
+            )
+        self.service.client = _StatusClient({"id": "remote-published", "status": {"video_status": "ready", "publishing_phase": {"status": "published"}}, "permalink_url": "/reel/remote-published/"})
+        result = self.service.reconcile_job(job_id)
+        self.assertEqual(result["status"], "PUBLISHED")
+        self.assertEqual(result["published_url"], "https://www.facebook.com/reel/remote-published/")
+
+    def test_meta_100_33_is_unresolved_and_not_failed(self):
+        job_id = self.service.enqueue_from_draft(self.project_id, self.video_id, "page-1")
+        with self.database.connection:
+            self.database.connection.execute(
+                "UPDATE facebook_publishing_jobs SET status='PROCESSING', remote_video_id=? WHERE id=?",
+                ("remote-unresolved", job_id),
+            )
+        self.service.client = _StatusClient(error=Exception("Meta API error code 100/33"))
+        result = self.service.reconcile_job(job_id)
+        self.assertEqual(result["status"], "PROCESSING")
+        self.assertEqual(result["display_status"], "UNRESOLVED")
+        self.assertIn("META_STATUS_UNRESOLVED", result["last_error"])
+
+    def test_failed_retry_creates_new_job_and_preserves_old_audit_record(self):
+        old_id = self.service.enqueue_from_draft(self.project_id, self.video_id, "page-1")
+        with self.database.connection:
+            self.database.connection.execute("UPDATE facebook_publishing_jobs SET status='FAILED' WHERE id=?", (old_id,))
+        new_id = self.service.retry_job(old_id)
+        old = self.service.get_job(old_id)
+        new = self.service.get_job(new_id)
+        self.assertEqual(old["status"], "FAILED")
+        self.assertEqual(new["status"], "PENDING")
+        self.assertEqual(new["retry_of_job_id"], old_id)
+        self.assertEqual(len(self.service.list_video_jobs(self.project_id, self.video_id)), 2)
+
+    def test_unresolved_retry_requires_explicit_risk_confirmation(self):
+        old_id = self.service.enqueue_from_draft(self.project_id, self.video_id, "page-1")
+        with self.database.connection:
+            self.database.connection.execute(
+                "UPDATE facebook_publishing_jobs SET status='PROCESSING', reconciliation_state='UNRESOLVED' WHERE id=?",
+                (old_id,),
+            )
+        with self.assertRaisesRegex(Exception, "xác nhận"):
+            self.service.retry_job(old_id)
+        new_id = self.service.retry_job(old_id, risk_confirmed=True)
+        self.assertEqual(self.service.get_job(old_id)["display_status"], "UNRESOLVED")
+        self.assertEqual(self.service.get_job(new_id)["retry_of_job_id"], old_id)
 
 
 if __name__ == "__main__":

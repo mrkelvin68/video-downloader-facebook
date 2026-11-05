@@ -394,9 +394,20 @@ def _create_facebook_publishing_tables(connection: sqlite3.Connection) -> None:
         ("upload_end_offset", "INTEGER"),
         ("upload_phase", "TEXT"),
         ("local_file_identity", "TEXT"),
+        ("last_status_check", "TEXT"),
+        ("last_status_check_at", "TEXT"),
+        ("reconciliation_state", "TEXT"),
+        ("retry_of_job_id", "TEXT"),
     ):
         if name not in job_columns:
             connection.execute(f"ALTER TABLE facebook_publishing_jobs ADD COLUMN {name} {definition}")
+    connection.execute("DROP INDEX IF EXISTS uq_facebook_active_video_page")
+    connection.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_facebook_active_video_page
+           ON facebook_publishing_jobs(project_id, video_id, page_id)
+           WHERE status NOT IN ('FAILED','CANCELLED')
+             AND COALESCE(reconciliation_state, '') <> 'UNRESOLVED'"""
+    )
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS facebook_drafts (

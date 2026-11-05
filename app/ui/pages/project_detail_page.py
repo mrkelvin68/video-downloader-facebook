@@ -47,6 +47,11 @@ class ProjectDetailPage(QWidget):
     facebookSaveDraftRequested = Signal(object)
     facebookPrepareRequested = Signal(object)
     facebookPublishNowRequested = Signal(object)
+    facebookJobReconcileRequested = Signal(str)
+    facebookJobRetryRequested = Signal(str)
+    facebookJobErrorRequested = Signal(str)
+    facebookJobCancelRequested = Signal(str)
+    facebookJobOpenRequested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -189,6 +194,7 @@ class ProjectDetailPage(QWidget):
         self.facebook_table = QTableWidget(0, 9)
         self._facebook_selected_video_id: str | None = None
         self.facebook_file_paths: dict[str, str] = {}
+        self.facebook_jobs_by_video: dict[str, list[dict]] = {}
         self.facebook_table.setHorizontalHeaderLabels(("", "STT", "Mã video", "Tên video", "File local", "Fanpage", "Chuẩn bị", "Đăng", "Link Facebook"))
         self.facebook_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.facebook_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -224,6 +230,27 @@ class ProjectDetailPage(QWidget):
         self.facebook_publish_button.clicked.connect(self._publish_selected_video)
         for button in (save, restore, self.facebook_select_file_button, self.facebook_prepare_button, self.facebook_publish_button): editor_actions.addWidget(button)
         editor_actions.addStretch(); editor_layout.addLayout(editor_actions); layout.addWidget(editor)
+        history = QFrame(); history.setObjectName("detailNotice"); history_layout = QVBoxLayout(history)
+        history_layout.addWidget(QLabel("LỊCH SỬ ĐĂNG FACEBOOK"))
+        self.facebook_job_table = QTableWidget(0, 10)
+        self.facebook_job_table.setHorizontalHeaderLabels(("Job ID", "Video ID", "File", "Fanpage", "Trạng thái", "Upload phase", "Remote Video ID", "Tạo lúc", "Lỗi gần nhất", "URL"))
+        self.facebook_job_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.facebook_job_table.itemSelectionChanged.connect(self._update_job_actions)
+        history_layout.addWidget(self.facebook_job_table)
+        job_actions = QHBoxLayout()
+        self.facebook_reconcile_button = QPushButton("Kiểm tra trạng thái Meta")
+        self.facebook_reconcile_button.clicked.connect(self._reconcile_selected_job)
+        self.facebook_error_button = QPushButton("Xem lỗi")
+        self.facebook_error_button.clicked.connect(self._show_selected_job_error)
+        self.facebook_retry_button = QPushButton("Đăng lại")
+        self.facebook_retry_button.clicked.connect(self._retry_selected_job)
+        self.facebook_cancel_job_button = QPushButton("Hủy job")
+        self.facebook_cancel_job_button.clicked.connect(self._cancel_selected_job)
+        self.facebook_open_job_button = QPushButton("Mở bài đăng")
+        self.facebook_open_job_button.clicked.connect(self._open_selected_job)
+        for button in (self.facebook_reconcile_button, self.facebook_error_button, self.facebook_retry_button, self.facebook_cancel_job_button, self.facebook_open_job_button): job_actions.addWidget(button)
+        job_actions.addStretch(); history_layout.addLayout(job_actions); layout.addWidget(history)
+        self._update_job_actions()
 
     def _default_page_changed(self, index: int) -> None:
         self._update_publish_button()
@@ -292,9 +319,70 @@ class ProjectDetailPage(QWidget):
         self.facebook_title.setText(title_item.data(Qt.ItemDataRole.UserRole) or title_item.text())
         self.facebook_description.setPlainText(title_item.data(Qt.ItemDataRole.UserRole + 1) or "")
         self.facebook_hashtags.setText(title_item.data(Qt.ItemDataRole.UserRole + 2) or "")
+        self._render_facebook_jobs(self.facebook_jobs_by_video.get(str(video_id), []))
         self._update_publish_button()
 
-    def set_facebook_data(self, pages: list[dict], drafts: list[dict]) -> None:
+    def _selected_job_id(self) -> str | None:
+        rows = self.facebook_job_table.selectionModel().selectedRows()
+        if not rows:
+            return None
+        item = self.facebook_job_table.item(rows[0].row(), 0)
+        return str(item.data(Qt.ItemDataRole.UserRole)) if item else None
+
+    def _selected_job(self) -> dict | None:
+        job_id = self._selected_job_id()
+        if not job_id:
+            return None
+        return next((job for job in self.facebook_jobs_by_video.get(self._facebook_selected_video_id or "", []) if str(job.get("id")) == job_id), None)
+
+    def _update_job_actions(self) -> None:
+        job = self._selected_job()
+        state = str((job or {}).get("display_status") or (job or {}).get("status") or "")
+        self.facebook_reconcile_button.setEnabled(state in {"PROCESSING", "PUBLISHING", "UNRESOLVED"})
+        self.facebook_error_button.setEnabled(bool(job and job.get("last_error")))
+        self.facebook_retry_button.setEnabled(state in {"FAILED", "UNRESOLVED"})
+        self.facebook_cancel_job_button.setEnabled(state == "PENDING")
+        self.facebook_open_job_button.setEnabled(bool(job and job.get("published_url")))
+
+    def _reconcile_selected_job(self) -> None:
+        job_id = self._selected_job_id()
+        if job_id:
+            self.facebookJobReconcileRequested.emit(job_id)
+
+    def _show_selected_job_error(self) -> None:
+        job_id = self._selected_job_id()
+        if job_id:
+            self.facebookJobErrorRequested.emit(job_id)
+
+    def _retry_selected_job(self) -> None:
+        job_id = self._selected_job_id()
+        if job_id:
+            self.facebookJobRetryRequested.emit(job_id)
+
+    def _cancel_selected_job(self) -> None:
+        job_id = self._selected_job_id()
+        if job_id:
+            self.facebookJobCancelRequested.emit(job_id)
+
+    def _open_selected_job(self) -> None:
+        job = self._selected_job()
+        if job and job.get("published_url"):
+            self.facebookJobOpenRequested.emit(str(job["published_url"]))
+
+    def _render_facebook_jobs(self, jobs: list[dict]) -> None:
+        self.facebook_job_table.setRowCount(0)
+        for job in jobs:
+            row = self.facebook_job_table.rowCount(); self.facebook_job_table.insertRow(row)
+            error = str(job.get("last_error") or "")
+            values = (str(job.get("id", "")), str(job.get("video_id", "")), str(job.get("local_file_path", "")), str(job.get("page_id", "")), str(job.get("display_status") or job.get("status", "")), str(job.get("upload_phase") or ""), str(job.get("remote_video_id") or ""), str(job.get("created_at") or ""), error[:160], str(job.get("published_url") or ""))
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if col == 0: item.setData(Qt.ItemDataRole.UserRole, job.get("id"))
+                self.facebook_job_table.setItem(row, col, item)
+        self._update_job_actions()
+
+    def set_facebook_data(self, pages: list[dict], drafts: list[dict], jobs_by_video: dict[str, list[dict]] | None = None) -> None:
+        self.facebook_jobs_by_video = jobs_by_video or {}
         self.facebook_page_combo.blockSignals(True); self.facebook_page_combo.clear()
         for page in pages: self.facebook_page_combo.addItem(str(page.get("page_name", page.get("name", ""))), str(page.get("page_id", page.get("id", ""))))
         self.facebook_page_combo.blockSignals(False); self.facebook_status.setText("Đã kết nối Facebook" if pages else "Chưa kết nối Facebook")
@@ -307,7 +395,9 @@ class ProjectDetailPage(QWidget):
             page_label = draft.get("page_name") or draft.get("page_id") or "-"
             video_id = str(draft.get("video_id") or "")
             local_path = self.facebook_file_paths.get(video_id) or str(draft.get("local_video_path") or "Không tìm thấy file video")
-            values = ("", str(draft.get("sequence_number", row + 1)), str(draft.get("video_code", "")), source_title, local_path, str(page_label), str(draft.get("preparation_status", "NOT_PREPARED")), "Chưa đăng", "")
+            jobs = self.facebook_jobs_by_video.get(video_id, [])
+            latest = jobs[0] if jobs else {}
+            values = ("", str(draft.get("sequence_number", row + 1)), str(draft.get("video_code", "")), source_title, local_path, str(page_label), str(draft.get("preparation_status", "NOT_PREPARED")), str(latest.get("display_status") or latest.get("status") or "Chưa đăng"), str(latest.get("published_url") or ""))
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if col == 2: item.setData(Qt.ItemDataRole.UserRole, draft.get("video_id"))
@@ -326,6 +416,8 @@ class ProjectDetailPage(QWidget):
                     break
         elif self.facebook_table.rowCount():
             self.facebook_table.clearSelection()
+        if selected_id:
+            self._render_facebook_jobs(self.facebook_jobs_by_video.get(selected_id, []))
         self._update_publish_button()
 
     def _update_publish_button(self) -> None:
@@ -334,6 +426,10 @@ class ProjectDetailPage(QWidget):
         if ready:
             ready = self.facebook_table.item(row, 6).text() == "READY"
             ready = ready and self.facebook_table.item(row, 4).text() != "Không tìm thấy file video"
+            video_item = self.facebook_table.item(row, 2)
+            video_id = str(video_item.data(Qt.ItemDataRole.UserRole)) if video_item else ""
+            if self.facebook_jobs_by_video.get(video_id):
+                ready = False
         self.facebook_publish_button.setEnabled(ready and not self.facebook_publish_button.is_loading)
 
     def set_project(self, project: Project) -> None:

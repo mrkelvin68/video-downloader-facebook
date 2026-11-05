@@ -22,6 +22,7 @@ PUBLISH_STATUSES = (
     "PENDING", "SCHEDULED", "PREPARING", "UPLOADING", "PROCESSING",
     "PUBLISHING", "PUBLISHED", "FAILED", "PAUSED", "CANCELLED",
 )
+JOB_DISPLAY_STATUSES = PUBLISH_STATUSES + ("UNRESOLVED",)
 TRANSIENT_ERRORS = (TimeoutError, ConnectionError)
 
 
@@ -161,6 +162,13 @@ class MetaGraphPublishingClient:
                 payload = dict(payload)
                 payload["permalink_url"] = permalink
         return payload
+
+    def get_video_status(self, video_id: str) -> dict[str, Any]:
+        request = Request(
+            f"{self.base_url}/{video_id}?" + urlencode({"fields": "id,status,permalink_url", "access_token": self.token}),
+            headers={"Accept": "application/json"},
+        )
+        return self._request(request)
 
     def _request(self, request: Request) -> dict[str, Any]:
         endpoint = urlsplit(request.full_url).path
@@ -350,9 +358,31 @@ class FacebookPublishingService:
         )
 
     def list_jobs(self, project_id: str) -> list[dict[str, Any]]:
-        return [dict(row) for row in self.database.connection.execute(
+        jobs = [dict(row) for row in self.database.connection.execute(
             "SELECT * FROM facebook_publishing_jobs WHERE project_id=? ORDER BY created_at", (project_id,)
         )]
+        for job in jobs:
+            job["display_status"] = job.get("reconciliation_state") or job.get("status")
+        return jobs
+
+    def list_video_jobs(self, project_id: str, video_id: str) -> list[dict[str, Any]]:
+        jobs = [dict(row) for row in self.database.connection.execute(
+            "SELECT * FROM facebook_publishing_jobs WHERE project_id=? AND video_id=? ORDER BY created_at DESC",
+            (project_id, video_id),
+        )]
+        for job in jobs:
+            job["display_status"] = job.get("reconciliation_state") or job.get("status")
+        return jobs
+
+    def get_job(self, job_id: str) -> dict[str, Any] | None:
+        row = self.database.connection.execute(
+            "SELECT * FROM facebook_publishing_jobs WHERE id=?", (job_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        job = dict(row)
+        job["display_status"] = job.get("reconciliation_state") or job.get("status")
+        return job
 
     def pause(self, job_id: str) -> None:
         self._set_status(job_id, "PAUSED")
@@ -369,6 +399,112 @@ class FacebookPublishingService:
                    last_error=NULL,retry_count=retry_count+1,updated_at=?
                    WHERE id=? AND status='FAILED'""", (_now(), job_id)
             )
+
+    def cancel(self, job_id: str) -> None:
+        job = self.get_job(job_id)
+        if job is None:
+            raise FacebookPublishingError("Không tìm thấy job xuất bản.")
+        if job["status"] != "PENDING":
+            raise FacebookPublishingError("Chỉ có thể hủy job đang chờ đăng.")
+        self._set_status(job_id, "CANCELLED")
+
+    def retry_job(self, job_id: str, *, risk_confirmed: bool = False) -> str:
+        old = self.get_job(job_id)
+        if old is None:
+            raise FacebookPublishingError("Không tìm thấy job xuất bản.")
+        display_status = old.get("display_status")
+        if display_status not in {"FAILED", "UNRESOLVED"}:
+            raise FacebookPublishingError("Job chưa ở trạng thái được phép đăng lại.")
+        if display_status == "UNRESOLVED" and not risk_confirmed:
+            raise FacebookPublishingError("Cần xác nhận rủi ro trước khi đăng lại job chưa xác minh.")
+        active = self.database.connection.execute(
+            """SELECT id FROM facebook_publishing_jobs
+               WHERE project_id=? AND video_id=? AND page_id=? AND id<>?
+                 AND status NOT IN ('FAILED','CANCELLED')""",
+            (old["project_id"], old["video_id"], old["page_id"], job_id),
+        ).fetchone()
+        if active is not None:
+            raise FacebookPublishingError("Video còn job đang hoạt động; không thể đăng lại.")
+        path = Path(old["local_file_path"])
+        if not path.is_file():
+            raise FacebookPublishingError("Tệp video cục bộ không tồn tại.")
+        self._inspect_video(path)
+        identity = self.file_identity(path)
+        stored = json.loads(old.get("local_file_identity") or "{}")
+        if stored and identity != stored:
+            raise FacebookPublishingError("File video đã thay đổi; cần xác nhận lại trước khi đăng lại.")
+        if self.database.connection.execute(
+            "SELECT 1 FROM facebook_pages WHERE project_id=? AND page_id=?",
+            (old["project_id"], old["page_id"]),
+        ).fetchone() is None:
+            raise FacebookPublishingError("Fanpage chưa được kết nối với dự án.")
+        new_id = str(uuid.uuid4())
+        now = _now()
+        with self.database.connection:
+            self.database.connection.execute(
+                """INSERT INTO facebook_publishing_jobs
+                   (id,project_id,video_id,page_id,local_file_path,title,description,scheduled_at,timezone,status,created_at,updated_at,local_file_identity,retry_of_job_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (new_id, old["project_id"], old["video_id"], old["page_id"], old["local_file_path"],
+                 old["title"], old["description"], None, old["timezone"], "PENDING", now, now,
+                 json.dumps(identity, ensure_ascii=False, sort_keys=True), job_id),
+            )
+        return new_id
+
+    def reconcile_job(self, job_id: str) -> dict[str, Any]:
+        if self.client is None or not hasattr(self.client, "get_video_status"):
+            raise FacebookPublishingError("Chưa cấu hình Meta Graph API client.")
+        job = self.get_job(job_id)
+        if job is None:
+            raise FacebookPublishingError("Không tìm thấy job xuất bản.")
+        remote_id = str(job.get("remote_video_id") or job.get("remote_upload_id") or "")
+        if not remote_id:
+            raise FacebookPublishingError("Job chưa có Remote Video ID để kiểm tra.")
+        try:
+            payload = self.client.get_video_status(remote_id)
+        except Exception as exc:
+            diagnostics = self.client.diagnostics[-1] if getattr(self.client, "diagnostics", None) else {"error_type": type(exc).__name__}
+            diagnostics = {**diagnostics, "message": str(exc)}
+            return self._save_reconciliation(job_id, "UNRESOLVED", None, diagnostics, "META_STATUS_UNRESOLVED")
+        status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
+        processing = status.get("processing_phase") if isinstance(status.get("processing_phase"), dict) else {}
+        publishing = status.get("publishing_phase") if isinstance(status.get("publishing_phase"), dict) else {}
+        video_state = str(status.get("video_status") or processing.get("status") or "").casefold()
+        publish_state = str(publishing.get("status") or publishing.get("publish_status") or "").casefold()
+        diagnostics = self.client.diagnostics[-1] if getattr(self.client, "diagnostics", None) else {}
+        if video_state in {"error", "failed"} or publish_state in {"error", "failed"}:
+            return self._save_reconciliation(job_id, "FAILED", payload, diagnostics, "META_PROCESSING_FAILED")
+        permalink = str(payload.get("permalink_url") or "").strip()
+        if permalink and not permalink.startswith(("http://", "https://")):
+            permalink = "https://www.facebook.com" + (permalink if permalink.startswith("/") else "/" + permalink)
+        if video_state in {"processing", "uploading", "transcoding", "pending", "in_progress"}:
+            return self._save_reconciliation(job_id, "PROCESSING", payload, diagnostics, None)
+        if video_state in {"ready", "complete", "completed"} and publish_state in {"complete", "completed", "published"} and permalink:
+            return self._save_reconciliation(job_id, "PUBLISHED", payload, diagnostics, None, permalink=permalink)
+        if video_state in {"ready", "complete", "completed"}:
+            return self._save_reconciliation(job_id, "PUBLISHING", payload, diagnostics, None)
+        return self._save_reconciliation(job_id, "UNRESOLVED", payload, diagnostics, "META_STATUS_UNRESOLVED")
+
+    def _save_reconciliation(self, job_id: str, state: str, payload: dict[str, Any] | None,
+                             diagnostics: dict[str, Any], reason: str | None,
+                             *, permalink: str | None = None) -> dict[str, Any]:
+        now = _now()
+        error = None
+        if reason:
+            error = json.dumps({"reason": reason, "remote_status": payload or {}, "diagnostics": diagnostics, "occurred_at": now}, ensure_ascii=False, sort_keys=True)
+        post_id = None
+        if state == "PUBLISHED" and payload:
+            post_id = str(payload.get("post_id") or payload.get("id") or "")
+        with self.database.connection:
+            self.database.connection.execute(
+                """UPDATE facebook_publishing_jobs SET status=?, reconciliation_state=?,
+                   last_status_check=?, last_status_check_at=?, last_error=?,
+                   published_post_id=COALESCE(?,published_post_id), published_url=COALESCE(?,published_url), updated_at=?
+                   WHERE id=?""",
+                (state if state != "UNRESOLVED" else "PROCESSING", state if state == "UNRESOLVED" else None,
+                 json.dumps(payload or {}, ensure_ascii=False, sort_keys=True), now, error, post_id, permalink, now, job_id),
+            )
+        return self.get_job(job_id) or {}
 
     def reconcile_meta_failure(self, job_id: str, remote_status: dict[str, Any],
                                diagnostics: dict[str, Any] | None = None) -> dict[str, Any]:
