@@ -18,3 +18,20 @@ class FacebookRequestWorker(QThread):
             self.succeeded.emit(self._operation())
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+class FacebookPublishWorker(QThread):
+    progressChanged = Signal(float)
+    stageChanged = Signal(str)
+    succeeded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, operation: Callable[[Callable[[float], None]], Any], parent=None) -> None:
+        super().__init__(parent)
+        self._operation = operation
+
+    def run(self) -> None:
+        try:
+            self.succeeded.emit(self._operation(self.progressChanged.emit))
+        except Exception as exc:
+            self.failed.emit(str(exc))

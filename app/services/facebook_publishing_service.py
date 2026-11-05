@@ -32,6 +32,10 @@ class FacebookPublishingError(RuntimeError):
     pass
 
 
+class FacebookPublishingPending(FacebookPublishingError):
+    """Meta accepted the upload but has not confirmed publication yet."""
+
+
 class MetaGraphPublishingClient:
     """Small official Graph API client for Page video publishing."""
 
@@ -217,6 +221,24 @@ class FacebookPublishingService:
             raise FacebookPublishingError("Video đã có job xuất bản đang hoạt động trên Fanpage này.") from exc
         return job_id
 
+    def enqueue_from_draft(self, project_id: str, video_id: str, page_id: str) -> str:
+        draft = self.database.connection.execute(
+            "SELECT * FROM facebook_drafts WHERE project_id=? AND video_id=?",
+            (project_id, video_id),
+        ).fetchone()
+        if draft is None:
+            raise FacebookPublishingError("Hãy lưu nội dung đăng trước khi xuất bản.")
+        if str(draft["preparation_status"] or "") != "READY":
+            raise FacebookPublishingError("Video chưa vượt qua bước kiểm tra media.")
+        description = str(draft["description"] or "")
+        hashtags = str(draft["hashtags"] or "").strip()
+        if hashtags:
+            description = f"{description}\n\n{hashtags}" if description else hashtags
+        return self.enqueue(
+            project_id, video_id, page_id, title=draft["facebook_title"],
+            description=description,
+        )
+
     def list_jobs(self, project_id: str) -> list[dict[str, Any]]:
         return [dict(row) for row in self.database.connection.execute(
             "SELECT * FROM facebook_publishing_jobs WHERE project_id=? ORDER BY created_at", (project_id,)
@@ -297,13 +319,25 @@ class FacebookPublishingService:
                 "UPDATE facebook_publishing_jobs SET remote_upload_id=?, status='PROCESSING', updated_at=? WHERE id=?",
                 (upload_id, _now(), job_id),
             )
+        self.update_progress(job_id, 100, "PUBLISHING")
         try:
             remote = self.client.wait_for_processing(job["page_id"], upload_id)
+        except FacebookPublishingPending:
+            raise
         except Exception as exc:
             self._fail(job_id, str(exc))
             raise FacebookPublishingError(str(exc)) from exc
+        remote_status = remote.get("status")
+        if isinstance(remote_status, dict):
+            state = str(remote_status.get("video_status") or remote_status.get("status") or "").lower()
+            if state in {"processing", "uploading", "transcoding", "pending"}:
+                raise FacebookPublishingPending("Meta đang xử lý video; chưa thể xác nhận đã đăng.")
+            if state in {"error", "failed"}:
+                raise FacebookPublishingError("Meta báo xử lý video thất bại.")
         post_id = str(remote.get("post_id") or remote.get("id") or upload_id)
         url = remote.get("url") or remote.get("permalink_url")
+        if not post_id or not url:
+            raise FacebookPublishingPending("Đã nhận video từ Meta nhưng chưa có permalink xác nhận.")
         with self.database.connection:
             self.database.connection.execute(
                 """UPDATE facebook_publishing_jobs SET status='PUBLISHED',progress=100,

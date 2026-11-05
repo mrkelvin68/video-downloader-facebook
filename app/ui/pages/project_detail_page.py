@@ -45,6 +45,7 @@ class ProjectDetailPage(QWidget):
     facebookDefaultPageRequested = Signal(str)
     facebookSaveDraftRequested = Signal(object)
     facebookPrepareRequested = Signal(object)
+    facebookPublishNowRequested = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -213,10 +214,15 @@ class ProjectDetailPage(QWidget):
         save = QPushButton("Lưu nội dung"); save.clicked.connect(self._save_facebook_draft)
         restore = QPushButton("Khôi phục nội dung đã lưu"); restore.clicked.connect(self._load_selected_facebook_draft)
         self.facebook_prepare_button = LoadingButton("Kiểm tra video"); self.facebook_prepare_button.clicked.connect(self._prepare_selected_video)
-        for button in (save, restore, self.facebook_prepare_button): editor_actions.addWidget(button)
+        self.facebook_publish_button = LoadingButton("Đăng ngay")
+        self.facebook_publish_button.setObjectName("primary")
+        self.facebook_publish_button.setEnabled(False)
+        self.facebook_publish_button.clicked.connect(self._publish_selected_video)
+        for button in (save, restore, self.facebook_prepare_button, self.facebook_publish_button): editor_actions.addWidget(button)
         editor_actions.addStretch(); editor_layout.addLayout(editor_actions); layout.addWidget(editor)
 
     def _default_page_changed(self, index: int) -> None:
+        self._update_publish_button()
         if index >= 0:
             self.facebookDefaultPageRequested.emit(str(self.facebook_page_combo.itemData(index) or ""))
 
@@ -238,6 +244,15 @@ class ProjectDetailPage(QWidget):
             item = self.facebook_table.item(row, 2)
             self.facebookPrepareRequested.emit({"row": row, "video_id": item.data(Qt.ItemDataRole.UserRole)})
 
+    def _publish_selected_video(self) -> None:
+        row = self._selected_facebook_row()
+        if row < 0:
+            return
+        item = self.facebook_table.item(row, 2)
+        video_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if video_id:
+            self.facebookPublishNowRequested.emit({"video_id": str(video_id), "page_id": self.facebook_page_combo.currentData()})
+
     def _load_selected_facebook_draft(self) -> None:
         row = self._selected_facebook_row()
         if row < 0: return
@@ -252,6 +267,7 @@ class ProjectDetailPage(QWidget):
         self.facebook_title.setText(title_item.data(Qt.ItemDataRole.UserRole) or title_item.text())
         self.facebook_description.setPlainText(title_item.data(Qt.ItemDataRole.UserRole + 1) or "")
         self.facebook_hashtags.setText(title_item.data(Qt.ItemDataRole.UserRole + 2) or "")
+        self._update_publish_button()
 
     def set_facebook_data(self, pages: list[dict], drafts: list[dict]) -> None:
         self.facebook_page_combo.blockSignals(True); self.facebook_page_combo.clear()
@@ -282,6 +298,15 @@ class ProjectDetailPage(QWidget):
                     break
         elif self.facebook_table.rowCount():
             self.facebook_table.clearSelection()
+        self._update_publish_button()
+
+    def _update_publish_button(self) -> None:
+        row = self._selected_facebook_row()
+        ready = row >= 0 and bool(self.facebook_page_combo.currentData())
+        if ready:
+            ready = self.facebook_table.item(row, 6).text() == "READY"
+            ready = ready and self.facebook_table.item(row, 4).text() != "Không tìm thấy file video"
+        self.facebook_publish_button.setEnabled(ready and not self.facebook_publish_button.is_loading)
 
     def set_project(self, project: Project) -> None:
         self.detail_title.setText(project.name)
