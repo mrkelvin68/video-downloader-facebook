@@ -467,9 +467,10 @@ class MainWindow(QMainWindow):
         if self.current_project is None:
             return
         project_id = self.current_project.uuid
+        database_path = self.database.path
         self._run_facebook_request(
             "connect", self.detail_page.facebook_connect_button,
-            lambda: self.facebook_connection.connect(project_id, token),
+            lambda: self._facebook_connection_in_worker(database_path, project_id, token, "connect"),
             lambda _pages: self._refresh_facebook(),
         )
 
@@ -477,9 +478,10 @@ class MainWindow(QMainWindow):
         if self.current_project is None:
             return
         project_id = self.current_project.uuid
+        database_path = self.database.path
         self._run_facebook_request(
             "test", self.detail_page.facebook_test_button,
-            lambda: self.facebook_connection.test_connection(project_id),
+            lambda: self._facebook_connection_in_worker(database_path, project_id, None, "test"),
             lambda _pages: self.detail_page.facebook_status.setText("Đã kết nối Facebook"),
         )
 
@@ -487,11 +489,23 @@ class MainWindow(QMainWindow):
         if self.current_project is None:
             return
         project_id = self.current_project.uuid
+        database_path = self.database.path
         self._run_facebook_request(
             "refresh", self.detail_page.facebook_refresh_button,
-            lambda: self.facebook_connection.test_connection(project_id),
+            lambda: self._facebook_connection_in_worker(database_path, project_id, None, "test"),
             lambda _pages: self._refresh_facebook(),
         )
+
+    @staticmethod
+    def _facebook_connection_in_worker(database_path: str, project_id: str, token: str | None, action: str):
+        worker_database = Database(database_path)
+        try:
+            service = FacebookConnectionService(worker_database)
+            if action == "connect":
+                return service.connect(project_id, token or "")
+            return service.test_connection(project_id)
+        finally:
+            worker_database.close()
 
     def _run_facebook_request(self, kind: str, button, operation, on_success) -> None:
         if kind in self._facebook_workers or self.current_project is None:
