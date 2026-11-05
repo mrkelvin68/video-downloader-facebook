@@ -69,6 +69,7 @@ from app.ui.pages.matrix_page import MatrixPage
 from app.ui.pages.viral_reels_page import ViralReelsPage
 from app.ui.widgets.sidebar import Sidebar
 from app.ui.download_worker import DownloadWorker
+from app.ui.facebook_worker import FacebookRequestWorker
 
 APP_DIR = Path.home() / ".video-downloader-facebook"
 DB_PATH = APP_DIR / "projects.sqlite3"
@@ -148,6 +149,7 @@ class MainWindow(QMainWindow):
         self.download_queue = DownloadQueueService(database)
         self.facebook_connection = FacebookConnectionService(database)
         self.facebook_publishing = FacebookPublishingService(database)
+        self._facebook_workers: dict[str, FacebookRequestWorker] = {}
         self.matrices = MatrixService(database)
         self.viral_reels = ViralReelsStore(database)
         self.viral_reels_scheduler = ViralReelsScheduler(self._run_scheduled_viral_scan)
@@ -210,7 +212,7 @@ class MainWindow(QMainWindow):
         )
         self.detail_page.facebookConnectRequested.connect(self._connect_facebook)
         self.detail_page.facebookTestRequested.connect(self._test_facebook)
-        self.detail_page.facebookRefreshRequested.connect(self._refresh_facebook)
+        self.detail_page.facebookRefreshRequested.connect(self._refresh_facebook_async)
         self.detail_page.facebookDisconnectRequested.connect(self._disconnect_facebook)
         self.detail_page.facebookDefaultPageRequested.connect(self._set_facebook_default)
         self.detail_page.facebookSaveDraftRequested.connect(self._save_facebook_draft)
@@ -457,26 +459,58 @@ class MainWindow(QMainWindow):
     def _connect_facebook(self, token: str) -> None:
         if self.current_project is None:
             return
-        try:
-            self.detail_page.facebook_connect_button.set_loading(True)
-            self.facebook_connection.connect(self.current_project.uuid, token)
-            self._refresh_facebook()
-        except (FacebookConnectionError, ValueError) as exc:
-            QMessageBox.warning(self, "Kết nối Facebook", str(exc))
-        finally:
-            self.detail_page.facebook_connect_button.set_loading(False)
+        project_id = self.current_project.uuid
+        self._run_facebook_request(
+            "connect", self.detail_page.facebook_connect_button,
+            lambda: self.facebook_connection.connect(project_id, token),
+            lambda _pages: self._refresh_facebook(),
+        )
 
     def _test_facebook(self) -> None:
         if self.current_project is None:
             return
-        try:
-            self.detail_page.facebook_test_button.set_loading(True)
-            self.facebook_connection.test_connection(self.current_project.uuid)
-            self.detail_page.facebook_status.setText("Đã kết nối Facebook")
-        except FacebookConnectionError as exc:
-            QMessageBox.warning(self, "Kiểm tra kết nối", str(exc))
-        finally:
-            self.detail_page.facebook_test_button.set_loading(False)
+        project_id = self.current_project.uuid
+        self._run_facebook_request(
+            "test", self.detail_page.facebook_test_button,
+            lambda: self.facebook_connection.test_connection(project_id),
+            lambda _pages: self.detail_page.facebook_status.setText("Đã kết nối Facebook"),
+        )
+
+    def _refresh_facebook_async(self) -> None:
+        if self.current_project is None:
+            return
+        project_id = self.current_project.uuid
+        self._run_facebook_request(
+            "refresh", self.detail_page.facebook_refresh_button,
+            lambda: self.facebook_connection.test_connection(project_id),
+            lambda _pages: self._refresh_facebook(),
+        )
+
+    def _run_facebook_request(self, kind: str, button, operation, on_success) -> None:
+        if kind in self._facebook_workers or self.current_project is None:
+            return
+        project_id = self.current_project.uuid
+        worker = FacebookRequestWorker(operation, self)
+        self._facebook_workers[kind] = worker
+        button.set_loading(True)
+
+        def succeeded(value) -> None:
+            if self.current_project is not None and self.current_project.uuid == project_id:
+                on_success(value)
+
+        def failed(message: str) -> None:
+            if self.current_project is not None and self.current_project.uuid == project_id:
+                QMessageBox.warning(self, "Facebook", message)
+
+        def finished() -> None:
+            self._facebook_workers.pop(kind, None)
+            button.set_loading(False)
+            worker.deleteLater()
+
+        worker.succeeded.connect(succeeded)
+        worker.failed.connect(failed)
+        worker.finished.connect(finished)
+        worker.start()
 
     def _disconnect_facebook(self) -> None:
         if self.current_project is None:
@@ -495,11 +529,11 @@ class MainWindow(QMainWindow):
     def _save_facebook_draft(self, values: dict) -> None:
         if self.current_project is None:
             return
-        row = self.detail_page.facebook_table.item(int(values["row"]), 2)
-        if row is None:
+        video_id = values.get("video_id")
+        if not video_id:
             return
         self.facebook_publishing.save_draft(
-            self.current_project.uuid, str(row.data(Qt.ItemDataRole.UserRole)),
+            self.current_project.uuid, str(video_id),
             page_id=values.get("page_id"), facebook_title=values["title"],
             description=values["description"], hashtags=values["hashtags"],
         )

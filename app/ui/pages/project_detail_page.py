@@ -160,18 +160,11 @@ class ProjectDetailPage(QWidget):
         publish_tab = QWidget()
         publish_layout = QVBoxLayout(publish_tab)
         self._build_facebook_editor(publish_layout)
-        publish_layout.addWidget(QLabel("Đăng Facebook"), alignment=Qt.AlignmentFlag.AlignLeft)
-        self.facebook_status = QLabel("Chưa kết nối Facebook. Kết nối Meta Graph API để quản lý Fanpage và xuất bản video.")
-        self.facebook_status.setObjectName("detailMeta")
-        self.facebook_status.setWordWrap(True)
-        publish_layout.addWidget(self.facebook_status)
-        publish_layout.addWidget(QLabel("Video đã tải sẽ xuất hiện tại đây để chọn Fanpage, chỉnh nội dung và lên lịch."))
-        publish_layout.addStretch()
         tabs.addTab(project_tab, "Thông tin dự án")
         tabs.addTab(import_box, "Quản lý video")
         tabs.addTab(publish_tab, "Đăng Facebook")
+        import_layout.addLayout(download_actions)
         layout.addWidget(tabs, 1)
-        layout.addLayout(download_actions)
 
     def _build_facebook_editor(self, layout: QVBoxLayout) -> None:
         connection = QFrame(); connection.setObjectName("detailNotice")
@@ -192,8 +185,22 @@ class ProjectDetailPage(QWidget):
         for button in (self.facebook_connect_button, self.facebook_test_button, self.facebook_refresh_button, disconnect): actions.addWidget(button)
         actions.addStretch(); connection_layout.addLayout(actions); layout.addWidget(connection)
         self.facebook_table = QTableWidget(0, 9)
+        self._facebook_selected_video_id: str | None = None
         self.facebook_table.setHorizontalHeaderLabels(("", "STT", "Mã video", "Tên video", "File local", "Fanpage", "Chuẩn bị", "Đăng", "Link Facebook"))
         self.facebook_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.facebook_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.facebook_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        header = self.facebook_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, header.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, header.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, header.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, header.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, header.ResizeMode.Stretch)
+        header.setSectionResizeMode(5, header.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(6, header.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(7, header.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(8, header.ResizeMode.Stretch)
         self.facebook_table.itemSelectionChanged.connect(self._load_selected_facebook_draft); layout.addWidget(self.facebook_table, 1)
         editor = QFrame(); editor.setObjectName("detailNotice"); editor_layout = QVBoxLayout(editor)
         editor_layout.addWidget(QLabel("NỘI DUNG ĐĂNG")); editor_form = QFormLayout()
@@ -220,7 +227,10 @@ class ProjectDetailPage(QWidget):
     def _save_facebook_draft(self) -> None:
         row = self._selected_facebook_row()
         if row >= 0:
-            self.facebookSaveDraftRequested.emit({"row": row, "title": self.facebook_title.text(), "description": self.facebook_description.toPlainText(), "hashtags": self.facebook_hashtags.text(), "page_id": self.facebook_page_combo.currentData()})
+            item = self.facebook_table.item(row, 2)
+            video_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+            if video_id:
+                self.facebookSaveDraftRequested.emit({"video_id": str(video_id), "title": self.facebook_title.text(), "description": self.facebook_description.toPlainText(), "hashtags": self.facebook_hashtags.text(), "page_id": self.facebook_page_combo.currentData()})
 
     def _prepare_selected_video(self) -> None:
         row = self._selected_facebook_row()
@@ -231,6 +241,11 @@ class ProjectDetailPage(QWidget):
     def _load_selected_facebook_draft(self) -> None:
         row = self._selected_facebook_row()
         if row < 0: return
+        video_item = self.facebook_table.item(row, 2)
+        video_id = video_item.data(Qt.ItemDataRole.UserRole) if video_item else None
+        if not video_id:
+            return
+        self._facebook_selected_video_id = str(video_id)
         self.facebook_video_title.setText(self.facebook_table.item(row, 3).text())
         self.facebook_local_path.setText(self.facebook_table.item(row, 4).text())
         title_item = self.facebook_table.item(row, 3)
@@ -242,6 +257,8 @@ class ProjectDetailPage(QWidget):
         self.facebook_page_combo.blockSignals(True); self.facebook_page_combo.clear()
         for page in pages: self.facebook_page_combo.addItem(str(page.get("page_name", page.get("name", ""))), str(page.get("page_id", page.get("id", ""))))
         self.facebook_page_combo.blockSignals(False); self.facebook_status.setText("Đã kết nối Facebook" if pages else "Chưa kết nối Facebook")
+        selected_id = self._facebook_selected_video_id
+        self.facebook_table.blockSignals(True)
         self.facebook_table.setRowCount(0)
         for draft in drafts:
             row = self.facebook_table.rowCount(); self.facebook_table.insertRow(row)
@@ -255,6 +272,16 @@ class ProjectDetailPage(QWidget):
                     item.setData(Qt.ItemDataRole.UserRole + 1, draft.get("description") or "")
                     item.setData(Qt.ItemDataRole.UserRole + 2, draft.get("hashtags") or "")
                 self.facebook_table.setItem(row, col, item)
+        self.facebook_table.blockSignals(False)
+        if selected_id:
+            for row in range(self.facebook_table.rowCount()):
+                item = self.facebook_table.item(row, 2)
+                if item and str(item.data(Qt.ItemDataRole.UserRole)) == selected_id:
+                    self.facebook_table.selectRow(row)
+                    self._load_selected_facebook_draft()
+                    break
+        elif self.facebook_table.rowCount():
+            self.facebook_table.clearSelection()
 
     def set_project(self, project: Project) -> None:
         self.detail_title.setText(project.name)
