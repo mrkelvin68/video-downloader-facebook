@@ -203,10 +203,16 @@ def _create_discovered_pages_table(connection: sqlite3.Connection) -> None:
         topic TEXT NOT NULL DEFAULT '',
         source TEXT NOT NULL,
         discovered_at TEXT NOT NULL,
+        is_saved INTEGER NOT NULL DEFAULT 1,
         UNIQUE(page_url)
     )
     """
     )
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(discovered_pages)")}
+    if "is_saved" not in columns:
+        connection.execute(
+            "ALTER TABLE discovered_pages ADD COLUMN is_saved INTEGER NOT NULL DEFAULT 1"
+        )
 
 
 def _create_reels_table(connection: sqlite3.Connection) -> None:

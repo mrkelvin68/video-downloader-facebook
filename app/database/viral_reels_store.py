@@ -91,7 +91,7 @@ class ViralReelsStore:
                 self.connection.execute(
                     """UPDATE discovered_pages SET
                          page_id=?, page_name=?, page_url=?, country=?,
-                         language=?, topic=?, source=?
+                         language=?, topic=?, source=?, is_saved=1
                        WHERE page_id=?""",
                     (page.page_id or existing["page_id"], page.page_name, page.page_url, page.country,
                      page.language, page.topic, page.source,
@@ -100,8 +100,8 @@ class ViralReelsStore:
                 return True
             cursor = self.connection.execute(
                 """INSERT INTO discovered_pages
-                   (page_id, page_name, page_url, country, language, topic, source, discovered_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (page_id, page_name, page_url, country, language, topic, source, discovered_at, is_saved)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)""",
                 (page.page_id, page.page_name, page.page_url, page.country, page.language,
                  page.topic, page.source, _now()),
             )
@@ -111,7 +111,10 @@ class ViralReelsStore:
         if not page_urls:
             return 0
         with self.connection:
-            cursor = self.connection.executemany("DELETE FROM discovered_pages WHERE page_url=?", ((url,) for url in page_urls))
+            cursor = self.connection.executemany(
+                "UPDATE discovered_pages SET is_saved=0 WHERE page_url=? AND is_saved=1",
+                ((url,) for url in page_urls),
+            )
         return cursor.rowcount
 
     def list_pages(self, country: str = "All", language: str = "All", topic: str = "", limit: int = 50) -> list[sqlite3.Row]:
@@ -120,7 +123,8 @@ class ViralReelsStore:
             if value != ignored:
                 clauses.append(f"{column}=?")
                 params.append(value)
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        clauses.insert(0, "is_saved=1")
+        where = f" WHERE {' AND '.join(clauses)}"
         return list(self.connection.execute(f"SELECT * FROM discovered_pages{where} ORDER BY discovered_at DESC LIMIT ?", (*params, limit)))
 
     def upsert_reel(self, reel: Mapping[str, object]) -> bool:
