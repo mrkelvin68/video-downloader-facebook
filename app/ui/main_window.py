@@ -1,11 +1,14 @@
+import csv
+from urllib.parse import unquote, urlsplit
 import sqlite3
+import time
 import sys
 from dataclasses import asdict
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import QTimer
-from PySide6.QtGui import QImageReader
+from PySide6.QtCore import QSettings, QTimer, Qt
+from PySide6.QtGui import QImageReader, QStandardItem
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -23,12 +26,31 @@ from PySide6.QtWidgets import (
 from app.core.exceptions import ImportBlockedError, ImportConfirmationRequired
 from app.core.single_instance import acquire_single_instance
 from app.database.connection import Database
+from app.database.viral_reels_store import ViralReelsStore
 from app.models.project import Project
 from app.services.csv_service import parse_video_csv, sample_video_csv
 from app.services.project_service import ProjectService
 from app.services.video_service import VideoService
 from app.services.download_queue_service import DownloadQueueService
 from app.services.matrix_service import MatrixService
+from app.services.page_export_service import export_pages_csv
+from app.services.viral_reels_export_service import export_csv as export_reels_csv, export_xlsx as export_reels_xlsx
+from app.services.viral_reels_scheduler import ViralReelsScheduler
+from app.services.viral_reels_service import (
+    DiscoveryRequest,
+    PageCandidate,
+    PageDiscoveryProvider,
+    PageDiscoveryService,
+    extract_page_identity,
+    normalize_facebook_url,
+    ReelFilters,
+    ReelsCollectionService,
+    reel_matches,
+)
+from app.services.apify_facebook_provider import ApifyFacebookPageSearchProvider, ApifyFacebookReelsProvider
+from app.services.meta_graph_provider import MetaGraphReelsProvider
+from app.services.credential_service import get_apify_token, get_meta_token
+from app.ui.dialogs.viral_provider_dialog import ViralProviderDialog, viral_settings
 from app.ui.dialogs.csv_preview_dialog import CsvPreviewDialog
 from app.ui.dialogs.matrix_configuration_dialog import (
     MatrixConfigurationDialog,
@@ -40,14 +62,80 @@ from app.ui.pages.project_detail_page import ProjectDetailPage
 from app.ui.pages.project_page import ProjectPage
 from app.ui.pages.download_queue_page import DownloadQueuePage
 from app.ui.pages.matrix_page import MatrixPage
+from app.ui.pages.viral_reels_page import ViralReelsPage
 from app.ui.widgets.sidebar import Sidebar
 from app.ui.download_worker import DownloadWorker
 
 APP_DIR = Path.home() / ".video-downloader-facebook"
 DB_PATH = APP_DIR / "projects.sqlite3"
+APIFY_PROVIDER_NAME = "Apify Facebook Reels Scraper"
+
+
+def active_viral_provider_name() -> str:
+    settings = viral_settings()
+    if settings.value("viral_reels/provider", APIFY_PROVIDER_NAME, type=str) == "Meta Graph API":
+        if hasattr(settings, "setValue"):
+            settings.setValue("viral_reels/provider", APIFY_PROVIDER_NAME)
+            settings.sync()
+    return APIFY_PROVIDER_NAME
 
 
 class MainWindow(QMainWindow):
+    DEFAULT_QUEUE_CONCURRENCY = 2
+    QUEUE_PROGRESS_UI_INTERVAL = 0.2
+
+    @property
+    def queue_worker(self) -> DownloadWorker | None:
+        """Compatibility view: first active worker (or None)."""
+        return next(iter(self.queue_workers.values()), None)
+
+    @queue_worker.setter
+    def queue_worker(self, worker: DownloadWorker | None) -> None:
+        if worker is None:
+            self.queue_workers.clear()
+        else:
+            self.queue_workers[getattr(worker, "job_id", "")] = worker
+
+    @property
+    def queue_job_id(self) -> str | None:
+        return next(iter(self.queue_workers), None)
+
+    @queue_job_id.setter
+    def queue_job_id(self, value: str | None) -> None:
+        if value is None:
+            self.queue_workers.clear()
+        elif "" in self.queue_workers:
+            self.queue_workers[value] = self.queue_workers.pop("")
+
+    @staticmethod
+    def _load_queue_concurrency() -> int:
+        value = QSettings("VideoDownloader", "VideoDownloaderFacebook").value(
+            "downloads/concurrency", MainWindow.DEFAULT_QUEUE_CONCURRENCY
+        )
+        try:
+            return max(1, min(5, int(value)))
+        except (TypeError, ValueError):
+            return MainWindow.DEFAULT_QUEUE_CONCURRENCY
+
+    def set_queue_concurrency(self, value: int) -> None:
+        self.queue_concurrency = max(1, min(5, int(value)))
+        QSettings("VideoDownloader", "VideoDownloaderFacebook").setValue(
+            "downloads/concurrency", self.queue_concurrency
+        )
+        if self.queue_page.concurrency_combo.currentData() != self.queue_concurrency:
+            self.queue_page.set_concurrency(self.queue_concurrency)
+        if self.queue_running and not self.pause_after_current:
+            self._start_next_queue_job()
+        self._update_queue_stats()
+
+    def _update_queue_stats(self) -> None:
+        try:
+            pending = self.download_queue.count_jobs(("queued",))
+        except sqlite3.Error:
+            pending = 0
+        speed = sum(self._queue_speeds.get(job_id, 0.0) for job_id in self.queue_workers)
+        self.queue_page.set_stats(len(self.queue_workers), pending, speed)
+
     def __init__(self, database: Database) -> None:
         super().__init__()
         self.database = database
@@ -55,15 +143,22 @@ class MainWindow(QMainWindow):
         self.videos = VideoService(database)
         self.download_queue = DownloadQueueService(database)
         self.matrices = MatrixService(database)
+        self.viral_reels = ViralReelsStore(database)
+        self.viral_reels_scheduler = ViralReelsScheduler(self._run_scheduled_viral_scan)
         self.current_project: Project | None = None
         self.current_matrix_id: str | None = None
         self.pending_csv_text: str | None = None
         self.pending_csv_rows: list[dict] = []
         self.pending_csv_errors: list[str] = []
-        self.queue_worker: DownloadWorker | None = None
+        self.queue_workers: dict[str, DownloadWorker] = {}
+        self._queue_video_ids: dict[str, str] = {}
+        self._queue_speeds: dict[str, float] = {}
+        self._queue_ui_stamp: dict[str, float] = {}
+        self._queue_codes: dict[str, str] = {}
+        self._pending_wait_ids: set[str] = set()
+        self.queue_concurrency = self._load_queue_concurrency()
         self.queue_running = False
         self.pause_after_current = False
-        self.queue_job_id: str | None = None
         self.queue_error: str | None = None
         self.pending_project_delete: tuple[str, bool] | None = None
         self.pending_queue_delete: tuple[list[str], str] | None = None
@@ -88,10 +183,12 @@ class MainWindow(QMainWindow):
         self.detail_page = ProjectDetailPage()
         self.queue_page = DownloadQueuePage()
         self.matrix_page = MatrixPage()
+        self.viral_reels_page = ViralReelsPage()
         self.pages.addWidget(self.project_page)
         self.pages.addWidget(self.detail_page)
         self.pages.addWidget(self.queue_page)
         self.pages.addWidget(self.matrix_page)
+        self.pages.addWidget(self.viral_reels_page)
         workspace_layout.addWidget(self.pages, 1)
         root_layout.addWidget(workspace, 1)
         self.setCentralWidget(root)
@@ -103,6 +200,23 @@ class MainWindow(QMainWindow):
         self.detail_page.backRequested.connect(self.show_projects)
         self.sidebar.projectsRequested.connect(self.show_projects)
         self.sidebar.queueRequested.connect(self.show_queue)
+        self.sidebar.viralReelsRequested.connect(self.show_viral_reels)
+        self.viral_reels_page.findPagesRequested.connect(self.find_viral_pages)
+        self.viral_reels_page.providerRequested.connect(self.configure_viral_provider)
+        self.viral_reels_page.scanReelsRequested.connect(self.scan_viral_reels)
+        self.viral_reels_page.recoverRunRequested.connect(self.recover_apify_reels_run)
+        self.viral_reels_page.stopRequested.connect(self.stop_viral_operation)
+        self.viral_reels_page.pageAddRequested.connect(self.add_viral_page)
+        self.viral_reels_page.pagesImportRequested.connect(self.import_viral_pages)
+        self.viral_reels_page.pagesDeleteRequested.connect(self.delete_viral_pages)
+        self.viral_reels_page.foundPagesDeleteRequested.connect(self.delete_found_viral_pages)
+        self.viral_reels_page.filtersChanged.connect(self.apply_stored_viral_reels_filters)
+        self.load_viral_pages()
+        self.apply_stored_viral_reels_filters()
+        self._refresh_viral_provider_status()
+        self.viral_reels_page.exportCsvRequested.connect(self.export_viral_reels_csv)
+        self.viral_reels_page.exportPagesCsvRequested.connect(self.export_viral_pages_csv)
+        self.viral_reels_page.exportExcelRequested.connect(self.export_viral_reels_xlsx)
         self.detail_page.csvChosen.connect(self.choose_csv)
         self.detail_page.csvDropped.connect(self.load_csv)
         self.detail_page.sampleRequested.connect(self.save_sample_csv)
@@ -118,6 +232,8 @@ class MainWindow(QMainWindow):
         )
         self.queue_page.backRequested.connect(self.show_projects)
         self.queue_page.startRequested.connect(self.start_queue)
+        self.queue_page.set_concurrency(self.queue_concurrency)
+        self.queue_page.concurrencyChanged.connect(self.set_queue_concurrency)
         self.queue_page.pauseRequested.connect(self.pause_queue)
         self.queue_page.resumeRequested.connect(self.start_queue)
         self.queue_page.retryRequested.connect(self.retry_queue_jobs)
@@ -208,17 +324,19 @@ class MainWindow(QMainWindow):
                 return
 
         try:
-            downloading = self.database.connection.execute(
-                """SELECT job_id FROM download_jobs
-                   WHERE project_id=? AND status='downloading' LIMIT 1""",
-                (project.uuid,),
-            ).fetchone()
+            downloading_ids = [
+                row["job_id"]
+                for row in self.database.connection.execute(
+                    """SELECT job_id FROM download_jobs
+                       WHERE project_id=? AND status='downloading'""",
+                    (project.uuid,),
+                ).fetchall()
+            ]
         except sqlite3.Error as exc:
             QMessageBox.critical(self, "Lỗi hàng đợi", str(exc))
             return
-        if downloading is not None:
-            worker = self.queue_worker
-            if worker is None or worker.job_id != downloading["job_id"]:
+        if downloading_ids:
+            if any(job_id not in self.queue_workers for job_id in downloading_ids):
                 QMessageBox.warning(
                     self,
                     "Không thể dừng tải",
@@ -237,13 +355,15 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
             self.pending_project_delete = (project.uuid, delete_files)
+            self._pending_wait_ids = set(downloading_ids)
             self.queue_running = False
             self.pause_after_current = False
             self.setEnabled(False)
             self.queue_page.queue_status.setText(
                 "Đang dừng worker trước khi xóa dự án…"
             )
-            worker.request_cancel()
+            for job_id in downloading_ids:
+                self.queue_workers[job_id].request_cancel()
             return
         self._perform_project_deletion(project.uuid, delete_files)
 
@@ -303,6 +423,506 @@ class MainWindow(QMainWindow):
         self.refresh_queue()
         self.pages.setCurrentIndex(2)
         self.sidebar.set_active("queue")
+
+    def show_viral_reels(self) -> None:
+        self.pages.setCurrentWidget(self.viral_reels_page)
+        self.sidebar.set_active("viral-reels")
+
+    @staticmethod
+    def _viral_schedule(value: str) -> str:
+        return {
+            "Manual": "manual", "Every 6 hours": "6h",
+            "Every 12 hours": "12h", "Daily": "daily",
+        }.get(value, "manual")
+
+    @staticmethod
+    def _viral_filters(values: dict) -> ReelFilters:
+        def boundary(value: str, end: bool = False) -> datetime | None:
+            if not value:
+                return None
+            parsed = datetime.fromisoformat(value).replace(tzinfo=UTC)
+            return parsed + timedelta(days=1) - timedelta(microseconds=1) if end else parsed
+
+        adv = bool(values.get("advanced_enabled", True))
+        return ReelFilters(
+            minimum_views=(values["min_views"] or None) if adv else None,
+            country=values["country"] if adv else "All",
+            language=values["language"] if adv else "All",
+            topic=values["topic"] if adv else "",
+            published_from=boundary(values["date_from"]) if adv else None,
+            published_to=boundary(values["date_to"], True) if adv else None,
+            maximum_results=values["max_results"],
+        )
+
+    @staticmethod
+    def _filter_rejection_reason(filters: ReelFilters) -> str:
+        parts: list[str] = []
+        if filters.minimum_views is not None:
+            parts.append(f"Minimum views >= {filters.minimum_views:,}")
+        if filters.country != "All":
+            parts.append(f"Country = {filters.country}")
+        if filters.language != "All":
+            parts.append(f"Language = {filters.language}")
+        if filters.topic:
+            parts.append(f"Topic = {filters.topic}")
+        if filters.published_from or filters.published_to:
+            parts.append("Date range")
+        return "0 Reels khớp bộ lọc: " + ", ".join(parts) if parts else ""
+
+    def apply_stored_viral_reels_filters(self, values: dict | None = None, collected_override: int | None = None) -> list[dict]:
+        page = self.viral_reels_page
+        vals = values if isinstance(values, dict) else page.filters()
+        filters = self._viral_filters(vals)
+        rows = ViralReelsStore(self.database).list_reels(limit=100000)
+        selected_urls = set(page.checked_page_urls())
+        page_rows = [dict(r) for r in rows if (not selected_urls or str(r["page_url"]) in selected_urls)]
+        deduped_valid = list({str(r.get("reel_id") or r.get("reel_url")): r for r in page_rows if r.get("reel_url")}.values())
+        valid_count = len(deduped_valid)
+        collected_count = collected_override if collected_override is not None else len(page_rows)
+        matched = [r for r in deduped_valid if reel_matches(r, filters)]
+        filtered_count = valid_count - len(matched)
+        displayed = matched[: filters.maximum_results]
+        reason = self._filter_rejection_reason(filters) if (valid_count > 0 and not displayed) else ""
+        page.set_results(displayed)
+        page.set_scan_stats(collected_count, valid_count, filtered_count, len(displayed), reason)
+        return displayed
+
+    def _configure_viral_schedule(self, value: str) -> None:
+        schedule = self._viral_schedule(value)
+        self.viral_reels.set_schedule(schedule)
+        self.viral_reels_scheduler.start(schedule)
+
+    def _run_scheduled_viral_scan(self) -> None:
+        # No authorized provider is configured; never substitute mock data.
+        QTimer.singleShot(0, lambda: QMessageBox.information(
+            self, "Authorized provider required",
+            "Scheduled Viral Reels scan blocked: configure an authorized Facebook API or licensed provider.",
+        ))
+
+    def load_viral_pages(self, select: tuple[str, ...] = ()) -> None:
+        rows = ViralReelsStore(self.database).list_pages(limit=100000)
+        self.viral_reels_page.set_found_pages([{"page_name": r["page_name"], "page_url": r["page_url"], "page_id": r["page_id"], "data_source": r["source"]} for r in rows])
+        self.viral_reels_page.set_scan_pages([{"page_name": r["page_name"], "page_url": r["page_url"]} for r in rows], select)
+
+    def add_viral_page(self, url: str) -> None:
+        try:
+            page_id, name, normalized = extract_page_identity(url)
+            store = ViralReelsStore(self.database)
+            pages = store.list_pages(limit=100000)
+            if not any(str(row["page_url"]) == normalized or (page_id and str(row["page_id"]) == page_id) for row in pages):
+                store.upsert_page(PageCandidate(page_id, name, normalized, "Unknown", "Unknown", ""))
+            self.load_viral_pages((normalized,))
+        except Exception as error:
+            QMessageBox.warning(self, "Invalid Page", str(error))
+    def import_viral_pages(self, path: str) -> None:
+        with open(path, newline="", encoding="utf-8-sig") as handle:
+            for row in csv.reader(handle):
+                if row and row[0].strip():
+                    self.add_viral_page(row[0].strip())
+
+    def delete_viral_pages(self, urls: list) -> None:
+        store = ViralReelsStore(self.database)
+        store.delete_pages(urls)
+        self.load_viral_pages()
+
+    def delete_found_viral_pages(self, rows: list) -> None:
+        # Find Pages results are a view-level list; do not delete saved Pages.
+        self.viral_reels_page.remove_found_pages(rows)
+
+    def configure_viral_provider(self) -> None:
+        if ViralProviderDialog(self).exec() == ViralProviderDialog.DialogCode.Accepted:
+            self._refresh_viral_provider_status()
+
+    def _refresh_viral_provider_status(self) -> None:
+        provider_name = active_viral_provider_name()
+        provider = self._viral_provider()
+        if provider is None:
+            self.viral_reels_page.set_provider_status(provider_name, "Not configured", "Unavailable")
+            return
+        capabilities = "Find Pages + Scan Page Reels"
+        self.viral_reels_page.set_provider_status(provider.name, "Configured; connection unverified", capabilities)
+
+    def _viral_provider(self):
+        token = get_apify_token()
+        if not token:
+            return None
+        return ApifyFacebookReelsProvider(token)
+
+    def find_viral_pages(self, values: dict) -> None:
+        token = get_apify_token()
+        keywords = tuple(item.strip() for item in values.get("keywords", "").split(",") if item.strip())
+        maximum = max(1, min(int(values.get("max_results", 50)), 100))
+        if not token:
+            self.viral_reels_page.set_busy(False)
+            QMessageBox.information(self, "Find Pages", "Configure Apify token first.")
+            return
+        if not keywords:
+            self.viral_reels_page.set_busy(False)
+            QMessageBox.information(self, "Find Pages", "Enter at least one keyword.")
+            return
+        if QMessageBox.question(self, "Charge approval", "Facebook Page Search may incur Apify charges. Continue?") != QMessageBox.StandardButton.Yes:
+            self.viral_reels_page.set_busy(False)
+            return
+
+        def discover(cancel, progress):
+            if cancel.is_set():
+                return []
+            provider = ApifyFacebookPageSearchProvider(token)
+            provider.test_connection()
+            progress(0, 1, "Searching Facebook Pages")
+            request = DiscoveryRequest(country=values.get("country", "All"), keywords=keywords, maximum_pages=maximum)
+            store = ViralReelsStore.for_thread(self.database.path)
+            try:
+                return PageDiscoveryService(store, [provider]).discover(request)
+            finally:
+                store.close()
+
+        def show_pages(pages):
+            self.viral_reels_page.set_found_pages([
+                {"page_name": page.page_name, "page_url": page.page_url,
+                 "page_id": page.page_id, "data_source": page.source}
+                for page in pages
+            ])
+            self.viral_reels_page.set_progress(0, 0, 0, 0)
+            if not pages:
+                QMessageBox.information(self, "Find Pages", "No Facebook Pages found.")
+
+        self.viral_reels_page.run_operation(discover, show_pages)
+
+    def scan_viral_reels(self, values: dict) -> None:
+        self._configure_viral_schedule(values["schedule"])
+        if values.get("mode") == "discover_trending":
+            self._discover_cached_reels(values)
+            return
+        if values.get("data_source") != "Database":
+            self._scan_selected_pages(values)
+            return
+        filters = self._viral_filters(values)
+
+        def load(cancel, progress):
+            worker_store = ViralReelsStore.for_thread(self.database.path)
+            try:
+                rows = worker_store.list_reels(values["max_results"] * 10)
+                results = []
+                for index, row in enumerate(rows, 1):
+                    if cancel.is_set():
+                        break
+                    record = dict(row)
+                    if reel_matches(record, filters):
+                        results.append(record)
+                    progress(index, len(rows), "Filtering stored Reels")
+                return results[: filters.maximum_results]
+            finally:
+                worker_store.close()
+
+        self.viral_reels_page.run_operation(load, self.viral_reels_page.set_results)
+
+    def _discover_cached_reels(self, values: dict) -> None:
+        """Discover from saved-page SQLite cache; the configured Actor has no keyword search."""
+        filters = self._viral_filters(values)
+        page = self.viral_reels_page
+
+        def load(cancel, progress):
+            store = ViralReelsStore.for_thread(self.database.path)
+            try:
+                saved_urls = {str(row["page_url"]) for row in store.list_pages(limit=100000)}
+                progress(0, 1, "Loading cached Reels")
+                if not saved_urls:
+                    return [], 0, 0
+                rows = store.list_reels(limit=100000)
+                matched = []
+                candidates = 0
+                for index, row in enumerate(rows, 1):
+                    if cancel.is_set():
+                        break
+                    record = dict(row)
+                    if str(record.get("page_url") or "") not in saved_urls:
+                        progress(index, len(rows), "Ranking cached Reels")
+                        continue
+                    candidates += 1
+                    if reel_matches(record, filters):
+                        matched.append(record)
+                    progress(index, len(rows), "Ranking cached Reels")
+                matched.sort(key=lambda item: float(item.get("viral_score") or 0), reverse=True)
+                return matched[: filters.maximum_results], candidates, len(matched)
+            finally:
+                store.close()
+
+        def show(payload):
+            results, candidates, matched = payload
+            page.set_results(results)
+            page.set_scan_stats(candidates, matched, max(0, candidates - matched), len(results), "Saved Pages cache")
+            if not results:
+                QMessageBox.information(
+                    self,
+                    "Discover Trending Reels",
+                    "No cached Reels found for Saved Pages. Use Scan by Page first.",
+                )
+
+        page.run_operation(load, show)
+
+    MAX_SCAN_PAGES_PER_RUN = 10
+
+    def _build_apify_reels_provider(self, token: str, **kwargs):
+        try:
+            return ApifyFacebookReelsProvider(token, **kwargs)
+        except TypeError:
+            return ApifyFacebookReelsProvider(token)
+
+    def _scan_selected_pages(self, values: dict) -> None:
+        """Scan the checked Pages with the ACTIVE provider (never depends on hidden data_source)."""
+        page = self.viral_reels_page
+        provider_name = active_viral_provider_name()
+        token = get_apify_token()
+        if not token:
+            page.set_busy(False)
+            QMessageBox.information(self, "Provider required", f"Configure the {provider_name} token first (Configure provider).")
+            return
+        selected = list(dict.fromkeys(values.get("selected_page_urls", [])))
+        if len(selected) > self.MAX_SCAN_PAGES_PER_RUN:
+            page.set_busy(False)
+            QMessageBox.warning(
+                self,
+                "Scan Reels",
+                f"To protect against excessive Apify costs, select at most {self.MAX_SCAN_PAGES_PER_RUN} Pages per scan (selected: {len(selected)}).",
+            )
+            return
+        rows = {str(row["page_url"]): row for row in ViralReelsStore(self.database).list_pages(limit=100000)}
+        pages = [PageCandidate(str(rows[u]["page_id"]), str(rows[u]["page_name"]), u, str(rows[u]["country"] or "Unknown"), str(rows[u]["language"] or "Unknown"), str(rows[u]["topic"] or "")) for u in selected if u in rows]
+        if not pages:
+            page.set_busy(False)
+            QMessageBox.information(self, "Scan Reels", "Selected Pages were not found in the saved list.")
+            return
+        max_res = max(1, min(int(values.get("max_results", 30)), 100))
+        actor_limit = int(getattr(ApifyFacebookReelsProvider, "MAX_RESULTS_LIMIT", 100))
+        results_limit = min(max_res, actor_limit)
+        filters = self._viral_filters(values)
+        active_filters = ["Advanced ON" if values.get("advanced_enabled", True) else "Advanced OFF"]
+        if filters.minimum_views is not None:
+            active_filters.append(f"minimum views >= {filters.minimum_views:,}")
+        if filters.country != "All":
+            active_filters.append(f"country={filters.country}")
+        if filters.language != "All":
+            active_filters.append(f"language={filters.language}")
+        if filters.topic:
+            active_filters.append(f"topic={filters.topic}")
+        if filters.published_from or filters.published_to:
+            active_filters.append("date range")
+        if provider_name == APIFY_PROVIDER_NAME:
+            names = "\n".join(f"• {p.page_name}" for p in pages[:10]) + (f"\n… +{len(pages) - 10} more" if len(pages) > 10 else "")
+            answer = QMessageBox.question(
+                self,
+                "Charge approval",
+                f"This live Apify scan may incur charges.\n"
+                f"Selected Pages: {len(pages)}\n"
+                f"Collection limit: {results_limit} Reels/Page\n"
+                f"Maximum collection: {results_limit * len(pages)} Reels\n"
+                f"Display limit: {values.get('max_results', 30)}\n"
+                f"Active filters: {', '.join(active_filters)}\n"
+                f"Estimated cost: unavailable\n\n{names}\n\n"
+                f"Actor resultsLimit: {results_limit} Reels per Page (max 100).\nContinue?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                page.set_busy(False)
+                return
+        def collect(cancel, progress):
+            store = ViralReelsStore.for_thread(self.database.path)
+            try:
+                provider = self._build_apify_reels_provider(
+                    token,
+                    results_limit=results_limit,
+                    store=store,
+                    cancel_event=cancel,
+                    progress_callback=progress,
+                )
+                results, state = ReelsCollectionService(store, provider).collect(pages, filters, cancel)
+                total_collected = state.reels_collected + state.duplicates_skipped
+                return results, list(state.messages), state.errors, total_collected
+            finally:
+                store.close()
+
+        def show(payload):
+            results, messages, errors, total_collected = payload
+            deduped = list({str(r.get('reel_id') or r.get('reel_url')): r for r in results if reel_matches(r, filters)}.values())
+            displayed = deduped[: filters.maximum_results]
+            valid_count = total_collected or len(results)
+            filtered_count = max(0, valid_count - len(displayed))
+            reason = self._filter_rejection_reason(filters) if (valid_count > 0 and not displayed) else ""
+            page.set_results(displayed)
+            page.set_scan_stats(valid_count, valid_count, filtered_count, len(displayed), reason)
+            if errors:
+                QMessageBox.warning(self, "Scan Reels", f"{errors} error(s):\n" + "\n".join(messages[:5]))
+            elif not displayed:
+                reason = self._filter_rejection_reason(filters)
+                msg = f"The provider returned no Reels matching the filters ({reason})." if reason else "The provider returned no Reels matching the filters."
+                QMessageBox.information(self, "Scan Reels", msg)
+
+        def on_cancelled():
+            rows = ViralReelsStore(self.database).list_reels(filters.maximum_results * 10)
+            matched = [dict(r) for r in rows if str(r["page_url"]) in selected and reel_matches(dict(r), filters)]
+            if matched:
+                page.set_results(list({str(r.get("reel_id") or r.get("reel_url")): r for r in matched[: filters.maximum_results]}.values()))
+
+        if page.run_operation(collect, show) and page._worker is not None:
+            page._worker.signals.cancelled.connect(on_cancelled)
+
+    def stop_viral_operation(self) -> None:
+        """Stop local worker tracking; only abort remote Apify Actor if user explicitly confirms."""
+        self.viral_reels_page.cancel_operation()
+        cfg = ViralReelsStore(self.database).provider_configuration("apify_reels_last_run")
+        run_id = str(cfg.get("run_id") or "")
+        status = str(cfg.get("status") or "")
+        if run_id and status in {"READY", "RUNNING"}:
+            answer = QMessageBox.question(
+                self,
+                "Stop Apify Run",
+                f"Đã dừng theo dõi trên ứng dụng.\n\n"
+                f"Apify Run {run_id} có thể vẫn đang chạy trên Apify Cloud.\n"
+                f"Bạn có muốn gửi lệnh HỦY (Abort) Actor thật trên Apify luôn không?\n"
+                f"(Chọn No để giữ Actor chạy tiếp trên Apify và khôi phục kết quả sau)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                token = get_apify_token()
+                if token:
+                    try:
+                        self._build_apify_reels_provider(token, store=ViralReelsStore(self.database)).abort_run(run_id)
+                    except Exception:
+                        pass
+
+    def recover_apify_reels_run(self, run_id_override: str | None = None) -> None:
+        """Recover Reels from an existing Apify Run ID or Dataset without starting a new Actor run."""
+        page = self.viral_reels_page
+        token = get_apify_token()
+        if not token:
+            QMessageBox.information(self, "Provider required", "Configure the Apify token first (Configure provider).")
+            return
+        store_main = ViralReelsStore(self.database)
+        saved_cfg = store_main.provider_configuration("apify_reels_last_run")
+        default_run = str(saved_cfg.get("run_id") or "")
+        if not isinstance(run_id_override, str):
+            text, ok = QInputDialog.getText(
+                self,
+                "Khôi phục Apify Run",
+                "Nhập Apify Run ID (hoặc để trống để lấy Run gần nhất từ Apify):",
+                text=default_run,
+            )
+            if not ok:
+                return
+            target_run_id = text.strip()
+        else:
+            target_run_id = run_id_override.strip()
+
+        values = page.filters()
+        filters = self._viral_filters(values)
+
+        def recover(cancel, progress):
+            store = ViralReelsStore.for_thread(self.database.path)
+            try:
+                provider = self._build_apify_reels_provider(
+                    token,
+                    store=store,
+                    cancel_event=cancel,
+                    progress_callback=progress,
+                )
+                run_id = target_run_id
+                if not run_id:
+                    recent = provider.list_recent_runs(limit=1)
+                    if not recent:
+                        raise RuntimeError("Không tìm thấy Apify Run nào trước đó.")
+                    run_id = str(recent[0].get("id") or "")
+                progress(0, 1, f"Đang kiểm tra Apify Run {run_id}...")
+                run_data = provider.poll_run_until_done(run_id)
+                dataset_id = str(run_data.get("defaultDatasetId") or "")
+                progress(0, 1, f"Đang tải Dataset {dataset_id} của Run {run_id}...")
+                items = provider.fetch_dataset_items(dataset_id)
+                pages_by_url = {
+                    str(r["page_url"]): PageCandidate(
+                        str(r["page_id"]),
+                        str(r["page_name"]),
+                        str(r["page_url"]),
+                        str(r["country"] or "Unknown"),
+                        str(r["language"] or "Unknown"),
+                        str(r["topic"] or ""),
+                    )
+                    for r in store.list_pages(limit=100000)
+                }
+                fallback_page = next(iter(pages_by_url.values()), PageCandidate("recovered", "Recovered Page", "https://www.facebook.com/facebook", "Unknown", "Unknown", ""))
+                raw_reels = provider.parse_reel_items(items, fallback_page, pages_by_url)
+                results: list[dict[str, object]] = []
+                from app.services.viral_reels_service import classify_language, viral_score
+                for idx, raw in enumerate(raw_reels, 1):
+                    if cancel.is_set():
+                        break
+                    if raw.page_url not in pages_by_url:
+                        store.upsert_page(PageCandidate(raw.page_id, raw.page_name, raw.page_url, raw.country, raw.language, raw.topic))
+                        pages_by_url[raw.page_url] = PageCandidate(raw.page_id, raw.page_name, raw.page_url, raw.country, raw.language, raw.topic)
+                    language, confidence = classify_language(raw.caption)
+                    record = {
+                        **raw.__dict__,
+                        "published_at": raw.published_at.isoformat() if raw.published_at else None,
+                        "country": raw.country or "Unknown",
+                        "language": raw.language or language,
+                        "language_confidence": confidence,
+                    }
+                    store.upsert_reel(record)
+                    store.record_metrics_snapshot(raw.reel_id, raw.views, raw.likes, raw.comments, raw.shares)
+                    record["viral_score"] = viral_score(record, store.metrics_history(raw.reel_id))
+                    store.update_viral_score(raw.reel_id, float(record["viral_score"]))
+                    if reel_matches(record, filters):
+                        results.append(record)
+                    if idx % 25 == 0 or idx == len(raw_reels):
+                        progress(idx, len(raw_reels), f"Đã lưu {idx}/{len(raw_reels)} Reels từ Run {run_id}")
+                results.sort(key=lambda item: float(item["viral_score"]), reverse=True)
+                return run_id, dataset_id, len(items), len(raw_reels), results[: filters.maximum_results]
+            finally:
+                store.close()
+
+        def show_recovered(payload):
+            run_id, dataset_id, raw_count, valid_count, results = payload
+            self.load_viral_pages()
+            deduped = list({str(r.get("reel_id") or r.get("reel_url")): r for r in results}.values())
+            filtered_out = max(0, valid_count - len(deduped))
+            reason = self._filter_rejection_reason(filters) if (valid_count > 0 and not deduped) else ""
+            page.set_results(deduped)
+            page.set_scan_stats(raw_count, valid_count, filtered_out, len(deduped), reason)
+            QMessageBox.information(
+                self,
+                "Khôi phục Run thành công",
+                f"Run ID: {run_id}\nDataset ID: {dataset_id}\nTổng item: {raw_count} · Reels hợp lệ (không trùng): {valid_count}\nHiển thị theo bộ lọc: {len(deduped)}",
+            )
+
+        page.run_operation(recover, show_recovered)
+
+    def export_viral_reels_csv(self, records: list[dict]) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Export Viral Reels", "viral-reels.csv", "CSV (*.csv)")
+        if not path:
+            return
+        try:
+            count = export_reels_csv(path, records)
+        except OSError as error:
+            QMessageBox.warning(self, "Export failed", f"Cannot write {path}: {error}")
+            return
+        QMessageBox.information(self, "Export CSV", f"Exported {count} Reels to {Path(path).name}")
+    def export_viral_pages_csv(self, pages: list[dict]) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Export Facebook Pages", "facebook-pages.csv", "CSV (*.csv)")
+        if not path:
+            return
+        try:
+            count = export_pages_csv(path, pages)
+        except OSError as error:
+            QMessageBox.warning(self, "Export failed", f"Cannot write {path}: {error}")
+            return
+        QMessageBox.information(self, "Export CSV", f"Exported {count} Pages to {Path(path).name}")
+    def export_viral_reels_xlsx(self, records: list[dict]) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Export Viral Reels", "viral-reels.xlsx", "Excel (*.xlsx)")
+        if not path:
+            return
+        try:
+            export_reels_xlsx(path, records)
+        except RuntimeError as error:
+            QMessageBox.warning(self, "Excel export unavailable", str(error))
 
     def show_matrices(self, project: Project) -> None:
         self.current_project = project
@@ -826,61 +1446,95 @@ class MainWindow(QMainWindow):
 
     def start_queue(self) -> None:
         self.queue_running = True
+        self._set_queue_loading(True)
         self.pause_after_current = False
-        self.queue_page.queue_status.setText("Đang chạy hàng đợi tuần tự.")
+        self.queue_page.queue_status.setText(
+            f"Đang chạy hàng đợi ({self.queue_concurrency} luồng song song)."
+        )
         self.detail_page.queue_status.setText("Đang chạy hàng đợi.")
         self._start_next_queue_job()
 
     def pause_queue(self) -> None:
-        if self.queue_worker is None:
+        if not self.queue_workers:
             self.queue_running = False
+            self._set_queue_loading(False)
             self.queue_page.queue_status.setText("Hàng đợi đang tạm dừng.")
             self.detail_page.queue_status.setText("Hàng đợi đang tạm dừng.")
             return
         self.pause_after_current = True
         self.queue_page.queue_status.setText(
-            "Sẽ tạm dừng sau khi video hiện tại hoàn tất."
+            "Sẽ tạm dừng sau khi các video đang tải hoàn tất."
         )
         self.detail_page.queue_status.setText("Tạm dừng sau video hiện tại.")
 
     def _start_next_queue_job(self) -> None:
-        if self.queue_worker is not None or not self.queue_running:
+        """Fill every free download slot with the highest-priority queued job."""
+        if not self.queue_running:
             return
         if self.pause_after_current:
-            self.queue_running = False
+            if not self.queue_workers:
+                self.queue_running = False
+                self._set_queue_loading(False)
             return
+        while len(self.queue_workers) < self.queue_concurrency:
+            try:
+                job = self.download_queue.next_queued_job(
+                    exclude_job_ids=tuple(self.queue_workers),
+                    exclude_video_ids=tuple(self._queue_video_ids.values()),
+                )
+            except sqlite3.Error as exc:
+                self.queue_running = False
+                self._set_queue_loading(False)
+                QMessageBox.critical(self, "Lỗi hàng đợi", str(exc))
+                return
+            if job is None:
+                if not self.queue_workers:
+                    self.queue_running = False
+                    self._set_queue_loading(False)
+                    self.queue_page.queue_status.setText("Không còn job đang chờ.")
+                    self.detail_page.queue_status.setText("Hàng đợi đã hoàn tất.")
+                    self.refresh_queue()
+                break
+            self._launch_queue_worker(job)
+        self._update_queue_stats()
+
+    def _launch_queue_worker(self, job) -> None:
+        job_id = job["job_id"]
+        worker = DownloadWorker(self.database.path, job_id, self)
+        self.queue_workers[job_id] = worker
         try:
-            job = self.download_queue.next_queued_job()
-        except sqlite3.Error as exc:
-            self.queue_running = False
-            QMessageBox.critical(self, "Lỗi hàng đợi", str(exc))
-            return
-        if job is None:
-            self.queue_running = False
-            self.queue_page.queue_status.setText("Không còn job đang chờ.")
-            self.detail_page.queue_status.setText("Hàng đợi đã hoàn tất.")
-            self.refresh_queue()
-            return
-        worker = DownloadWorker(self.database.path, job["job_id"], self)
-        self.queue_worker = worker
-        self.queue_job_id = job["job_id"]
+            self._queue_video_ids[job_id] = job["video_id"]
+        except (IndexError, KeyError):
+            pass
         self.queue_error = None
         worker.progress.connect(self._queue_progress)
         worker.jobFinished.connect(self._queue_job_finished)
         worker.finished.connect(
             lambda active_worker=worker: self._queue_thread_finished(active_worker)
         )
-        job_info = self.download_queue.get_job(job["job_id"])
-        code = job["job_id"]
+        code = job_id
+        job_info = self.download_queue.get_job(job_id)
         if job_info is not None:
             video = self.database.connection.execute(
                 "SELECT video_code FROM videos WHERE id=?", (job_info["video_id"],)
             ).fetchone()
             if video is not None:
                 code = video["video_code"]
+        self._queue_codes[job_id] = code
         self.queue_page.queue_status.setText(f"Đang tải {code}…")
         self.detail_page.queue_status.setText(f"Đang tải {code}…")
         worker.start()
+
+    def _release_queue_job(self, job_id: str) -> None:
+        self.queue_workers.pop(job_id, None)
+        self._queue_video_ids.pop(job_id, None)
+        self._queue_speeds.pop(job_id, None)
+        self._queue_ui_stamp.pop(job_id, None)
+        self._queue_codes.pop(job_id, None)
+
+    def _set_queue_loading(self, loading: bool) -> None:
+        self.queue_page.set_queue_loading(loading)
+        self.detail_page.run_now_button.set_loading(loading)
 
     def _queue_progress(
         self,
@@ -891,30 +1545,55 @@ class MainWindow(QMainWindow):
         speed: float | None,
         eta: int | None,
     ) -> None:
+        if job_id not in self.queue_workers:
+            return
+        self._queue_speeds[job_id] = float(speed or 0.0)
+        now = time.monotonic()
+        last = self._queue_ui_stamp.get(job_id, 0.0)
+        if percent < 100 and now - last < self.QUEUE_PROGRESS_UI_INTERVAL:
+            return
+        self._queue_ui_stamp[job_id] = now
         self.queue_page.table.queue_model.update_progress(
             job_id, percent, downloaded, total, speed, eta
         )
-        job = self.download_queue.get_job(job_id)
-        code = job_id
-        if job is not None:
-            video = self.database.connection.execute(
-                "SELECT video_code FROM videos WHERE id=?", (job["video_id"],)
-            ).fetchone()
-            if video is not None:
-                code = video["video_code"]
+        code = self._queue_codes.get(job_id, job_id)
         rate = f"{speed / 1024 / 1024:.1f} MB/s" if speed else "—"
         remaining = f" · còn {eta}s" if eta is not None else ""
         status = f"Đang tải {code}: {percent:.1f}% · {rate}{remaining}"
         self.queue_page.queue_status.setText(status)
         self.detail_page.queue_status.setText(status)
+        self._update_queue_stats()
+
+    def _run_pending_deletions(self) -> bool:
+        """Run deferred deletions once the cancelled workers have fully stopped."""
+        if self._pending_wait_ids & set(self.queue_workers):
+            return False
+        if self.pending_project_delete is not None:
+            project_id, delete_files = self.pending_project_delete
+            self.pending_project_delete = None
+            self._pending_wait_ids.clear()
+            self.queue_running = False
+            self._set_queue_loading(False)
+            self.setEnabled(True)
+            self._perform_project_deletion(project_id, delete_files)
+            return True
+        if self.pending_queue_delete is not None:
+            job_ids, description = self.pending_queue_delete
+            self.pending_queue_delete = None
+            self._pending_wait_ids.clear()
+            self.queue_running = False
+            self._set_queue_loading(False)
+            self.setEnabled(True)
+            self._perform_queue_job_deletion(job_ids, description)
+            return True
+        return False
 
     def _queue_job_finished(self, job_id: str, succeeded: bool, message: str) -> None:
-        worker = self.queue_worker
-        if worker is None or self.queue_job_id != job_id:
+        worker = self.queue_workers.get(job_id)
+        if worker is None:
             return
         worker.wait()
-        self.queue_worker = None
-        self.queue_job_id = None
+        self._release_queue_job(job_id)
         self.queue_error = message if not succeeded else None
         can_continue = True
         if not succeeded:
@@ -931,45 +1610,35 @@ class MainWindow(QMainWindow):
         self.refresh_queue()
         if self.current_project is not None:
             self._refresh_project_videos()
-        if self.pending_project_delete is not None:
-            project_id, delete_files = self.pending_project_delete
-            self.pending_project_delete = None
-            self.queue_running = False
-            self.setEnabled(True)
-            self._perform_project_deletion(project_id, delete_files)
+        self._update_queue_stats()
+        if self._run_pending_deletions():
             return
-        if self.pending_queue_delete is not None:
-            job_ids, description = self.pending_queue_delete
-            self.pending_queue_delete = None
-            self.queue_running = False
-            self.setEnabled(True)
-            self._perform_queue_job_deletion(job_ids, description)
+        if self.pending_project_delete is not None or self.pending_queue_delete is not None:
             return
         if not succeeded:
             status = f"Job lỗi: {message}"
-            self.queue_page.queue_status.setText(status)
-            self.detail_page.queue_status.setText(status)
         else:
-            self.queue_page.queue_status.setText("Video tải thành công.")
-            self.detail_page.queue_status.setText("Video tải thành công.")
+            status = "Video tải thành công."
+        self.queue_page.queue_status.setText(status)
+        self.detail_page.queue_status.setText(status)
         if self.pause_after_current:
-            self.pause_after_current = False
-            self.queue_running = False
-            self.queue_page.queue_status.setText(
-                "Đã tạm dừng sau video hiện tại."
-            )
+            if not self.queue_workers:
+                self.pause_after_current = False
+                self.queue_running = False
+                self._set_queue_loading(False)
+                self.queue_page.queue_status.setText(
+                    "Đã tạm dừng sau video hiện tại."
+                )
             return
         if can_continue:
             QTimer.singleShot(0, self._start_next_queue_job)
-        else:
+        elif not self.queue_workers:
             self.queue_running = False
+            self._set_queue_loading(False)
 
     def _queue_thread_finished(self, worker: DownloadWorker) -> None:
-        if self.queue_worker is not worker:
-            return
-        job_id = self.queue_job_id
-        if job_id is None:
-            self.queue_worker = None
+        job_id = worker.job_id
+        if self.queue_workers.get(job_id) is not worker:
             return
         try:
             if not self.download_queue.interrupt_job(
@@ -980,23 +1649,13 @@ class MainWindow(QMainWindow):
                 )
         except sqlite3.Error as exc:
             QMessageBox.critical(self, "Lỗi hàng đợi", str(exc))
-        self.queue_worker = None
-        self.queue_job_id = None
+        self._release_queue_job(job_id)
         self.refresh_queue()
         self._refresh_project_videos()
-        if self.pending_project_delete is not None:
-            project_id, delete_files = self.pending_project_delete
-            self.pending_project_delete = None
-            self.queue_running = False
-            self.setEnabled(True)
-            self._perform_project_deletion(project_id, delete_files)
+        self._update_queue_stats()
+        if self._run_pending_deletions():
             return
-        if self.pending_queue_delete is not None:
-            job_ids, description = self.pending_queue_delete
-            self.pending_queue_delete = None
-            self.queue_running = False
-            self.setEnabled(True)
-            self._perform_queue_job_deletion(job_ids, description)
+        if self.pending_project_delete is not None or self.pending_queue_delete is not None:
             return
         self.queue_page.queue_status.setText(
             "Worker bị gián đoạn; các job còn lại vẫn được giữ."
@@ -1133,12 +1792,7 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
         if active:
-            worker = self.queue_worker
-            if (
-                len(active) != 1
-                or worker is None
-                or worker.job_id != active[0]["job_id"]
-            ):
+            if any(row["job_id"] not in self.queue_workers for row in active):
                 QMessageBox.warning(
                     self,
                     "Không thể dừng tải",
@@ -1146,13 +1800,15 @@ class MainWindow(QMainWindow):
                 )
                 return
             self.pending_queue_delete = (job_ids, description)
+            self._pending_wait_ids = {row["job_id"] for row in active}
             self.queue_running = False
             self.pause_after_current = False
             self.setEnabled(False)
             self.queue_page.queue_status.setText(
                 "Đang dừng worker trước khi xóa job…"
             )
-            worker.request_cancel()
+            for row in active:
+                self.queue_workers[row["job_id"]].request_cancel()
             return
         self._perform_queue_job_deletion(job_ids, description)
 
@@ -1172,11 +1828,12 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event) -> None:
-        if self.queue_worker is not None:
+        self.viral_reels_scheduler.stop()
+        if self.queue_workers:
             QMessageBox.information(
                 self,
                 "Đang tải",
-                "Đợi video hiện tại hoàn tất trước khi đóng ứng dụng.",
+                "Đợi các video hiện tại hoàn tất trước khi đóng ứng dụng.",
             )
             event.ignore()
             return
@@ -1195,6 +1852,8 @@ def main() -> int:
         )
         return 0
     application = QApplication(sys.argv)
+    application.setOrganizationName("VideoDownloader")
+    application.setApplicationName("VideoDownloaderFacebook")
     style_path = Path(__file__).with_name("styles.qss")
     application.setStyleSheet(style_path.read_text(encoding="utf-8"))
     database = Database(DB_PATH)

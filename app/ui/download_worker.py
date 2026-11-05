@@ -16,7 +16,7 @@ from app.services.download_service import (
 
 
 class DownloadWorker(QThread):
-    progress = Signal(str, float, int, object, object, object)
+    progress = Signal(str, float, object, object, object, object)
     jobFinished = Signal(str, bool, str)
 
     def __init__(self, database_path: str, job_id: str, parent=None) -> None:
@@ -82,7 +82,9 @@ class DownloadWorker(QThread):
                     retry_count = jobs.record_retry(self.job_id, str(exc))
                     if retry_count is None:
                         raise
-                    if self.cancel_event.wait(2 ** (retry_count - 1)):
+                    delay = 2 ** (retry_count - 1)
+                    time.sleep(delay)
+                    if self.cancel_event.is_set():
                         raise DownloadCancelled("Đã hủy tải theo yêu cầu.")
             jobs.finish(self.job_id, status="completed")
             self.jobFinished.emit(self.job_id, True, "")

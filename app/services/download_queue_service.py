@@ -296,12 +296,26 @@ class DownloadQueueService:
             )
         }
 
-    def next_queued_job(self) -> sqlite3.Row | None:
+    def next_queued_job(
+        self,
+        exclude_job_ids: tuple[str, ...] = (),
+        exclude_video_ids: tuple[str, ...] = (),
+    ) -> sqlite3.Row | None:
+        """Highest-priority queued job, skipping jobs/videos already owned by a worker."""
+        clauses = ["status='queued'"]
+        params: list[str] = []
+        if exclude_job_ids:
+            clauses.append(f"job_id NOT IN ({','.join('?' * len(exclude_job_ids))})")
+            params.extend(exclude_job_ids)
+        if exclude_video_ids:
+            clauses.append(f"video_id NOT IN ({','.join('?' * len(exclude_video_ids))})")
+            params.extend(exclude_video_ids)
         return self.database.connection.execute(
-            """SELECT job_id FROM download_jobs
-               WHERE status='queued'
+            f"""SELECT job_id, video_id FROM download_jobs
+               WHERE {' AND '.join(clauses)}
                ORDER BY priority DESC, queue_order, created_at
-               LIMIT 1"""
+               LIMIT 1""",
+            params,
         ).fetchone()
 
     def claim(self, job_id: str) -> sqlite3.Row | None:

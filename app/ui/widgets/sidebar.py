@@ -17,6 +17,7 @@ def button_icon(widget: QWidget, icon: QStyle.StandardPixmap):
 class Sidebar(QFrame):
     projectsRequested = Signal()
     queueRequested = Signal()
+    viralReelsRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -45,6 +46,7 @@ class Sidebar(QFrame):
             ("Dashboard", QStyle.StandardPixmap.SP_ComputerIcon, False, False),
             ("Quản lý dự án", QStyle.StandardPixmap.SP_FileDialogContentsView, True, True),
             ("Hàng đợi tải video", QStyle.StandardPixmap.SP_ArrowDown, False, True),
+            ("🔥 Viral Reels Finder", QStyle.StandardPixmap.SP_DialogYesButton, False, True),
             ("Live Logs", QStyle.StandardPixmap.SP_FileDialogDetailedView, False, False),
             ("Cài đặt", QStyle.StandardPixmap.SP_FileDialogInfoView, False, False),
         ):
@@ -61,6 +63,9 @@ class Sidebar(QFrame):
             elif text == "Hàng đợi tải video":
                 self.queue_button = button
                 button.clicked.connect(self.queueRequested.emit)
+            elif text == "🔥 Viral Reels Finder":
+                self.viral_reels_button = button
+                button.clicked.connect(self.viralReelsRequested.emit)
             layout.addWidget(button)
         layout.addStretch()
         status = QFrame()
@@ -77,6 +82,7 @@ class Sidebar(QFrame):
     def set_active(self, section: str) -> None:
         self.projects_button.setProperty("active", section == "projects")
         self.queue_button.setProperty("active", section == "queue")
-        for button in (self.projects_button, self.queue_button):
+        self.viral_reels_button.setProperty("active", section == "viral-reels")
+        for button in (self.projects_button, self.queue_button, self.viral_reels_button):
             button.style().unpolish(button)
             button.style().polish(button)

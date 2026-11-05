@@ -13,6 +13,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from app.ui.widgets.loading_button import LoadingButton
 
 
 def _format_bytes(value: int | None) -> str:
@@ -247,6 +249,7 @@ class DownloadQueuePage(QWidget):
     deleteFailedRequested = Signal()
     deleteCompletedRequested = Signal()
     deleteInactiveRequested = Signal()
+    concurrencyChanged = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -264,20 +267,20 @@ class DownloadQueuePage(QWidget):
         layout.addWidget(self.summary)
 
         controls = QHBoxLayout()
-        self.start_button = QPushButton("Bắt đầu hàng đợi")
+        self.start_button = LoadingButton("Bắt đầu hàng đợi")
         self.start_button.setObjectName("primary")
         self.start_button.clicked.connect(self.startRequested.emit)
         self.pause_button = QPushButton("Tạm dừng sau video hiện tại")
         self.pause_button.setObjectName("secondary")
         self.pause_button.clicked.connect(self.pauseRequested.emit)
-        self.resume_button = QPushButton("Tiếp tục")
+        self.resume_button = LoadingButton("Tiếp tục")
         self.resume_button.setObjectName("secondary")
         self.resume_button.clicked.connect(self.resumeRequested.emit)
         controls.addWidget(self.start_button)
         controls.addWidget(self.pause_button)
         controls.addWidget(self.resume_button)
         controls.addStretch()
-        self.retry_button = QPushButton("Retry video lỗi")
+        self.retry_button = LoadingButton("Retry video lỗi")
         self.retry_button.setObjectName("secondary")
         self.retry_button.clicked.connect(self.retryRequested.emit)
         self.prioritize_button = QPushButton("Ưu tiên video đã chọn")
@@ -290,6 +293,24 @@ class DownloadQueuePage(QWidget):
         controls.addWidget(self.prioritize_button)
         controls.addWidget(self.cancel_button)
         layout.addLayout(controls)
+
+        concurrency_row = QHBoxLayout()
+        concurrency_row.addWidget(QLabel("Tải đồng thời:"))
+        self.concurrency_combo = QComboBox()
+        for slots in range(1, 6):
+            self.concurrency_combo.addItem(str(slots), slots)
+        self.concurrency_combo.setCurrentIndex(1)
+        self.concurrency_combo.currentIndexChanged.connect(
+            lambda _index: self.concurrencyChanged.emit(
+                int(self.concurrency_combo.currentData())
+            )
+        )
+        concurrency_row.addWidget(self.concurrency_combo)
+        self.stats_label = QLabel("Đang tải: 0 · Đang chờ: 0 · Tốc độ tổng: —")
+        self.stats_label.setObjectName("detailMeta")
+        concurrency_row.addWidget(self.stats_label)
+        concurrency_row.addStretch()
+        layout.addLayout(concurrency_row)
 
         delete_controls = QHBoxLayout()
         self.delete_selected_button = QPushButton("🗑 Xóa job đã chọn")
@@ -329,6 +350,23 @@ class DownloadQueuePage(QWidget):
         )
         self._job_counts = {}
         self._update_delete_buttons()
+
+    def set_queue_loading(self, loading: bool) -> None:
+        self.start_button.set_loading(loading)
+        self.resume_button.set_loading(loading)
+
+    def set_concurrency(self, value: int) -> None:
+        index = self.concurrency_combo.findData(int(value))
+        if index >= 0 and index != self.concurrency_combo.currentIndex():
+            self.concurrency_combo.blockSignals(True)
+            self.concurrency_combo.setCurrentIndex(index)
+            self.concurrency_combo.blockSignals(False)
+
+    def set_stats(self, active: int, pending: int, speed: float) -> None:
+        rate = f"{_format_bytes(int(speed))}/s" if speed else "—"
+        self.stats_label.setText(
+            f"Đang tải: {active} · Đang chờ: {pending} · Tốc độ tổng: {rate}"
+        )
 
     def _show_context_menu(self, position) -> None:
         index = self.table.indexAt(position)

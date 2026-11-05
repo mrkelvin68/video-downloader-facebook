@@ -723,6 +723,60 @@ class DownloadWorkerTests(unittest.TestCase):
         finally:
             temp.cleanup()
 
+    def test_worker_emits_progress_with_large_file_size_exceeding_32bit_int(self):
+        from PySide6.QtWidgets import QApplication
+
+        application = QApplication.instance() or QApplication([])
+        temp = tempfile.TemporaryDirectory()
+        try:
+            root = Path(temp.name)
+            database = Database(root / "worker_large.sqlite3")
+            project_id = ProjectService(database).create(
+                "WorkerLarge", "worker-large", str(root / "worker-large-project")
+            )
+            VideoService(database).import_csv(
+                project_id,
+                "stt,ten_video,url\n1,Video,https://www.facebook.com/reel/1\n",
+            )
+            video = database.list_videos(project_id)[0]
+            queue_service = DownloadQueueService(database)
+            job_id = queue_service.enqueue(project_id, [video["id"]])[0]
+            database.close()
+
+            large_bytes = 5_128_693_462
+
+            class FakeDownloadServiceLarge:
+                def __init__(self, worker_db):
+                    self.database = worker_db
+
+                def download(
+                    self,
+                    worker_project_id,
+                    worker_video_id,
+                    *,
+                    progress_callback,
+                    cancel_event=None,
+                ):
+                    progress_callback(50.0, large_bytes, large_bytes * 2, 1024.0 * 1024.0, 10)
+                    progress_callback(100.0, large_bytes * 2, large_bytes * 2, None, 0)
+                    with self.database.connection:
+                        self.database.connection.execute(
+                            "UPDATE videos SET download_status='completed' WHERE id=? AND project_id=?",
+                            (worker_video_id, worker_project_id),
+                        )
+
+            worker_progress = []
+            worker = DownloadWorker(str(root / "worker_large.sqlite3"), job_id)
+            worker.progress.connect(lambda *args: worker_progress.append(args))
+            with patch("app.ui.download_worker.DownloadService", FakeDownloadServiceLarge):
+                worker.start()
+                self.assertTrue(worker.wait(10000))
+            application.processEvents()
+            self.assertEqual(len(worker_progress), 2)
+            self.assertEqual(worker_progress[0][2], large_bytes)
+        finally:
+            temp.cleanup()
+
     def test_worker_reports_progress_from_real_ytdlp_local_transfer(self):
         from PySide6.QtWidgets import QApplication
 
