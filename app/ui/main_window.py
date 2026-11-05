@@ -200,6 +200,10 @@ class MainWindow(QMainWindow):
         self.project_page.matrixRequested.connect(self.show_matrices)
         self.project_page.deleteRequested.connect(self.delete_project)
         self.detail_page.backRequested.connect(self.show_projects)
+        self.detail_page.projectEditRequested.connect(
+            lambda: self.edit_project(self.current_project)
+            if self.current_project is not None else None
+        )
         self.sidebar.projectsRequested.connect(self.show_projects)
         self.sidebar.queueRequested.connect(self.show_queue)
         self.sidebar.viralReelsRequested.connect(self.show_viral_reels)

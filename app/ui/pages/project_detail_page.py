@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QPushButton,
     QStyle,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -31,6 +32,7 @@ class ProjectDetailPage(QWidget):
     queueRequested = Signal()
     selectAllRequested = Signal()
     clearSelectionRequested = Signal()
+    projectEditRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -49,24 +51,6 @@ class ProjectDetailPage(QWidget):
         layout.addWidget(self.detail_title)
         layout.addWidget(self.detail_meta)
         layout.addSpacing(10)
-        steps = QHBoxLayout()
-        steps.setSpacing(12)
-        for index, label in enumerate(("Tạo dự án", "Import CSV", "Tải video", "Hoàn tất"), 1):
-            step = QFrame()
-            step.setObjectName("stepActive" if index == 2 else "step")
-            step_layout = QVBoxLayout(step)
-            step_layout.setContentsMargins(12, 8, 12, 8)
-            number = QLabel(str(index))
-            number.setObjectName("stepNumberActive" if index == 2 else "stepNumber")
-            number.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            text = QLabel(label)
-            text.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            text.setObjectName("stepText")
-            step_layout.addWidget(number)
-            step_layout.addWidget(text)
-            steps.addWidget(step, 1)
-        layout.addLayout(steps)
-        layout.addSpacing(8)
         import_box = QFrame()
         import_box.setObjectName("detailNotice")
         import_layout = QVBoxLayout(import_box)
@@ -147,7 +131,33 @@ class ProjectDetailPage(QWidget):
         download_actions.addWidget(self.enqueue_button)
         download_actions.addWidget(self.queue_button)
         download_actions.addWidget(self.queue_status, 1)
-        layout.addWidget(import_box, 1)
+        tabs = QTabWidget()
+        tabs.setObjectName("projectTabs")
+        project_tab = QWidget()
+        project_layout = QVBoxLayout(project_tab)
+        project_layout.addWidget(QLabel("Thông tin cấu hình dự án sẽ được giữ nguyên khi quay lại workspace."))
+        self.project_config = QLabel()
+        self.project_config.setObjectName("detailMeta")
+        self.project_config.setWordWrap(True)
+        project_layout.addWidget(self.project_config)
+        edit_project = QPushButton("Chỉnh sửa cấu hình dự án")
+        edit_project.setObjectName("secondary")
+        edit_project.clicked.connect(self.projectEditRequested.emit)
+        project_layout.addWidget(edit_project, alignment=Qt.AlignmentFlag.AlignLeft)
+        project_layout.addStretch()
+        publish_tab = QWidget()
+        publish_layout = QVBoxLayout(publish_tab)
+        publish_layout.addWidget(QLabel("Đăng Facebook"), alignment=Qt.AlignmentFlag.AlignLeft)
+        self.facebook_status = QLabel("Chưa kết nối Facebook. Kết nối Meta Graph API để quản lý Fanpage và xuất bản video.")
+        self.facebook_status.setObjectName("detailMeta")
+        self.facebook_status.setWordWrap(True)
+        publish_layout.addWidget(self.facebook_status)
+        publish_layout.addWidget(QLabel("Video đã tải sẽ xuất hiện tại đây để chọn Fanpage, chỉnh nội dung và lên lịch."))
+        publish_layout.addStretch()
+        tabs.addTab(project_tab, "Tạo dự án")
+        tabs.addTab(import_box, "Quản lý video")
+        tabs.addTab(publish_tab, "Đăng Facebook")
+        layout.addWidget(tabs, 1)
         layout.addLayout(download_actions)
 
 
@@ -155,6 +165,9 @@ class ProjectDetailPage(QWidget):
         self.detail_title.setText(project.name)
         self.detail_meta.setText(
             f"Prefix video: {project.prefix}    |    Thư mục: {project.output_dir}"
+        )
+        self.project_config.setText(
+            f"Tên dự án: {project.name}\nPrefix video: {project.prefix}\nThư mục đầu ra: {project.output_dir}"
         )
 
     def set_saved_videos(self, videos: list[dict]) -> None:

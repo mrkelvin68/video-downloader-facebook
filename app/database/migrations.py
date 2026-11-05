@@ -327,6 +327,65 @@ def _create_provider_configuration_table(connection: sqlite3.Connection) -> None
     )
 
 
+def _create_facebook_publishing_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS facebook_pages (
+            project_id TEXT NOT NULL,
+            page_id TEXT NOT NULL,
+            page_name TEXT NOT NULL,
+            page_url TEXT NOT NULL DEFAULT '',
+            permissions_json TEXT NOT NULL DEFAULT '[]',
+            is_default INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0, 1)),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(project_id, page_id),
+            FOREIGN KEY(project_id) REFERENCES projects(uuid) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_facebook_default_page
+           ON facebook_pages(project_id) WHERE is_default=1"""
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS facebook_publishing_jobs (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            video_id TEXT NOT NULL,
+            page_id TEXT NOT NULL,
+            local_file_path TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            scheduled_at TEXT,
+            timezone TEXT NOT NULL DEFAULT 'UTC',
+            status TEXT NOT NULL CHECK(status IN (
+                'PENDING','SCHEDULED','PREPARING','UPLOADING','PROCESSING',
+                'PUBLISHING','PUBLISHED','FAILED','PAUSED','CANCELLED')),
+            progress REAL NOT NULL DEFAULT 0 CHECK(progress >= 0 AND progress <= 100),
+            retry_count INTEGER NOT NULL DEFAULT 0 CHECK(retry_count >= 0),
+            remote_upload_id TEXT,
+            published_post_id TEXT,
+            published_url TEXT,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(uuid) ON DELETE CASCADE,
+            FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE CASCADE,
+            FOREIGN KEY(project_id, page_id) REFERENCES facebook_pages(project_id, page_id)
+        )
+        """
+    )
+    connection.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_facebook_active_video_page
+           ON facebook_publishing_jobs(project_id, video_id, page_id)
+           WHERE status NOT IN ('FAILED','CANCELLED')"""
+    )
+    connection.execute(
+        """CREATE INDEX IF NOT EXISTS ix_facebook_publish_schedule
+           ON facebook_publishing_jobs(project_id, status, scheduled_at)"""
+    )
 def migrate(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("BEGIN IMMEDIATE")
@@ -399,6 +458,7 @@ def migrate(connection: sqlite3.Connection) -> None:
         _create_collection_jobs_table(connection)
         _create_export_history_table(connection)
         _create_provider_configuration_table(connection)
+        _create_facebook_publishing_tables(connection)
         connection.commit()
     except BaseException:
         connection.rollback()
