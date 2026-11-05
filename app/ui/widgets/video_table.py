@@ -6,12 +6,17 @@ from PySide6.QtWidgets import QHeaderView, QTableView, QWidget
 
 class VideoTableModel(QAbstractTableModel):
     HEADERS = ("", "STT", "Mã video", "Tên video", "URL nguồn", "Trạng thái", "Tiến độ tải")
+    SORTABLE_COLUMNS = {1: "sequence_number", 2: "video_code", 3: "title"}
 
     def __init__(self, videos: list[object] | None = None, parent=None) -> None:
         super().__init__(parent)
         self._all_videos = list(videos or [])
         self._videos = list(self._all_videos)
         self._status_filter = "all"
+        self._text_filter = ""
+        self._text_field = "title"
+        self._sort_field = "sequence_number"
+        self._sort_descending = False
         self._checked: set[str] = set()
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
@@ -22,7 +27,13 @@ class VideoTableModel(QAbstractTableModel):
 
     def headerData(self, section: int, orientation: Qt.Orientation, role=Qt.ItemDataRole.DisplayRole):
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
-            return self.HEADERS[section]
+            label = self.HEADERS[section]
+            field = self.SORTABLE_COLUMNS.get(section)
+            if field is None:
+                return label
+            if field == self._sort_field:
+                return f"{label}  {'▼' if self._sort_descending else '▲'}"
+            return f"{label}  ⇅"
         return None
 
     @staticmethod
@@ -120,23 +131,29 @@ class VideoTableModel(QAbstractTableModel):
         ]
 
     def set_videos(self, videos: list[object]) -> None:
-        selected = self._checked
         self._all_videos = list(videos)
-        self._videos = self._filtered_videos()
-        self.beginResetModel()
-        self._checked = {
-            self._video_key(video, row)
-            for row, video in enumerate(self._videos)
-            if self._video_key(video, row) in selected
-        }
-        self.endResetModel()
+        self._refresh_view()
 
     def set_status_filter(self, value: str) -> None:
         normalized = {"Tất cả": "all", "Đã tải": "downloaded", "Chưa tải": "not_downloaded"}.get(value, value)
         if normalized == self._status_filter:
             return
-        selected = self._checked
         self._status_filter = normalized
+        self._refresh_view()
+
+    def set_text_filter(self, field: str, value: str) -> None:
+        self._text_field = field
+        self._text_filter = value.strip().casefold()
+        self._refresh_view()
+
+    def set_sort(self, field: str, descending: bool) -> None:
+        self._sort_field = field
+        self._sort_descending = descending
+        self._refresh_view()
+        self.headerDataChanged.emit(Qt.Orientation.Horizontal, 1, 3)
+
+    def _refresh_view(self) -> None:
+        selected = self._checked
         self.beginResetModel()
         self._videos = self._filtered_videos()
         self._checked = {
@@ -147,17 +164,29 @@ class VideoTableModel(QAbstractTableModel):
         self.endResetModel()
 
     def _filtered_videos(self) -> list[object]:
-        if self._status_filter == "all":
-            return list(self._all_videos)
         filtered = []
         for video in self._all_videos:
             status = str(self._value(video, "download_status", "pending"))
             completed = status == "completed"
-            if self._status_filter == "downloaded" and completed:
-                filtered.append(video)
-            elif self._status_filter == "not_downloaded" and not completed:
-                filtered.append(video)
-        return filtered
+            if self._status_filter == "downloaded" and not completed:
+                continue
+            if self._status_filter == "not_downloaded" and completed:
+                continue
+            if self._text_filter:
+                field_value = str(self._value(video, self._text_field, "")).casefold()
+                if self._text_filter not in field_value:
+                    continue
+            filtered.append(video)
+        if self._sort_field == "sequence_number":
+            key = lambda video: int(self._value(video, "sequence_number", 0))
+        else:
+            key = lambda video: str(self._value(video, self._sort_field, "")).casefold()
+        return sorted(filtered, key=key, reverse=self._sort_descending)
+
+    def video_id_at(self, row: int) -> str | None:
+        if not 0 <= row < len(self._videos):
+            return None
+        return self._video_key(self._videos[row], row)
 
     def select_all(self) -> None:
         self._checked = {
@@ -198,6 +227,12 @@ class VideoTable(QTableView):
         self.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         self.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        header = self.horizontalHeader()
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(False)
+        header.sectionClicked.connect(self._sort_from_header)
+        self._sort_field = "sequence_number"
+        self._sort_descending = False
         self.setMinimumHeight(190)
 
     def selected_video_ids(self) -> list[str]:
@@ -208,6 +243,20 @@ class VideoTable(QTableView):
 
     def set_status_filter(self, value: str) -> None:
         self.video_model.set_status_filter(value)
+
+    def set_text_filter(self, field: str, value: str) -> None:
+        self.video_model.set_text_filter(field, value)
+
+    def set_sort(self, field: str, descending: bool) -> None:
+        self.video_model.set_sort(field, descending)
+
+    def _sort_from_header(self, section: int) -> None:
+        field = VideoTableModel.SORTABLE_COLUMNS.get(section)
+        if field is None:
+            return
+        self._sort_descending = not self._sort_descending if field == self._sort_field else False
+        self._sort_field = field
+        self.video_model.set_sort(field, self._sort_descending)
 
     def select_all(self) -> None:
         self.video_model.select_all()

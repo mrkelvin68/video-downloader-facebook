@@ -105,7 +105,7 @@ class ProjectCsvUiTests(unittest.TestCase):
         ):
             restarted.export_csv()
         content = export_path.read_text(encoding="utf-8")
-        self.assertTrue(content.startswith("\ufeffstt,title,url"))
+        self.assertTrue(content.startswith("\ufefftitle,url"))
         self.assertLess(content.index("CSV A-1"), content.index("CSV A-3"))
         restarted.close()
 
@@ -144,23 +144,41 @@ class ProjectCsvUiTests(unittest.TestCase):
 
         long_url = "https://www.facebook.com/reel/" + "1" * 100
         rows = [{"stt": 6, "ten_video": "Tập thử", "url": long_url}]
-        model = CsvPreviewModel(rows, "ep1-6")
+        model = CsvPreviewModel(rows, "ep1-6", start_sequence=6)
         self.assertEqual(model.rowCount(), 1)
-        self.assertEqual(model.columnCount(), 4)
+        self.assertEqual(model.columnCount(), 3)
         self.assertEqual(
             [
                 model.headerData(index, Qt.Orientation.Horizontal)
-                for index in range(4)
+                for index in range(3)
             ],
-            ["STT", "Mã video dự kiến", "Tên video", "URL nguồn"],
+            ["Mã video dự kiến", "Tên video", "URL nguồn"],
         )
-        self.assertEqual(model.data(model.index(0, 1)), "ep1-6-6")
+        self.assertEqual(model.data(model.index(0, 0)), "ep1-6-6")
         self.assertEqual(
-            model.data(model.index(0, 3), Qt.ItemDataRole.ToolTipRole), long_url
+            model.data(model.index(0, 2), Qt.ItemDataRole.ToolTipRole), long_url
         )
-        self.assertNotEqual(model.data(model.index(0, 3)), long_url)
+        self.assertNotEqual(model.data(model.index(0, 2)), long_url)
         self.assertFalse(
-            model.flags(model.index(0, 2)) & Qt.ItemFlag.ItemIsEditable
+            model.flags(model.index(0, 1)) & Qt.ItemFlag.ItemIsEditable
+        )
+
+    def test_append_import_uses_the_next_sequence_and_video_code(self):
+        service = VideoService(self.database)
+        service.import_csv(
+            self.project_id,
+            "title,url\nCũ,https://www.facebook.com/reel/1\n",
+        )
+        service.import_csv(
+            self.project_id,
+            "title,url\nMới 1,https://www.facebook.com/reel/2\n"
+            "Mới 2,https://www.facebook.com/reel/3\n",
+            append=True,
+        )
+        videos = self.database.list_videos(self.project_id)
+        self.assertEqual(
+            [(video["sequence_number"], video["video_code"]) for video in videos],
+            [(1, "ui-1"), (2, "ui-2"), (3, "ui-3")],
         )
 
     def test_project_video_status_tooltip_shows_download_error(self):
@@ -483,8 +501,8 @@ class ProjectCsvUiTests(unittest.TestCase):
             ]
             dialog = CsvPreviewDialog("videos.csv", rows, [], "test-prefix")
             self.assertEqual(dialog.model.rowCount(), count)
-            self.assertEqual(dialog.model.columnCount(), 4)
-            self.assertEqual(dialog.model.data(dialog.model.index(count - 1, 1)), f"test-prefix-{count}")
+            self.assertEqual(dialog.model.columnCount(), 3)
+            self.assertEqual(dialog.model.data(dialog.model.index(count - 1, 0)), f"test-prefix-{count}")
             self.assertEqual(
                 dialog.table.editTriggers(),
                 dialog.table.EditTrigger.NoEditTriggers,

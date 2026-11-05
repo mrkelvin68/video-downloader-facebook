@@ -70,25 +70,52 @@ class Database:
         )
 
     def project_videos_can_be_replaced(self, project_id: str) -> bool:
-        return (
+        return not self.project_replacement_blockers(project_id)
+
+    def project_replacement_blockers(self, project_id: str) -> list[sqlite3.Row]:
+        return list(
             self.connection.execute(
-                """SELECT 1 FROM videos
-                   WHERE project_id=?
-                     AND (download_status NOT IN ('pending', 'waiting')
-                          OR local_video_path IS NOT NULL
-                          OR thumbnail_path IS NOT NULL)
-                   LIMIT 1""",
+                """SELECT v.sequence_number, v.video_code, v.title, v.download_status,
+                          v.local_video_path, v.thumbnail_path, j.status AS job_status
+                   FROM videos v
+                   LEFT JOIN download_jobs j
+                     ON j.video_id=v.id AND j.status IN ('queued', 'downloading')
+                   WHERE v.project_id=?
+                     AND (v.download_status NOT IN ('pending', 'waiting')
+                          OR v.local_video_path IS NOT NULL
+                          OR v.thumbnail_path IS NOT NULL
+                          OR j.status IS NOT NULL)
+                   ORDER BY v.sequence_number""",
                 (project_id,),
-            ).fetchone()
-            is None
-            and self.connection.execute(
-                """SELECT 1 FROM download_jobs
-                   WHERE project_id=? AND status IN ('queued', 'downloading')
-                   LIMIT 1""",
-                (project_id,),
-            ).fetchone()
-            is None
+            )
         )
+
+    @staticmethod
+    def replacement_blocker_message(blockers: list[sqlite3.Row]) -> str:
+        status_labels = {
+            "queued": "đang chờ tải",
+            "downloading": "đang tải",
+            "completed": "đã tải",
+            "failed": "đã lỗi tải",
+        }
+        details = []
+        for video in blockers[:5]:
+            reasons = []
+            if video["job_status"]:
+                reasons.append(status_labels.get(video["job_status"], video["job_status"]))
+            elif video["download_status"] not in {"pending", "waiting"}:
+                reasons.append(status_labels.get(video["download_status"], video["download_status"]))
+            if video["local_video_path"]:
+                reasons.append("đã có tệp video")
+            if video["thumbnail_path"]:
+                reasons.append("đã có ảnh bìa")
+            details.append(
+                f"• {video['video_code']}: "
+                f"{video['title']} ({', '.join(reasons)})"
+            )
+        if len(blockers) > len(details):
+            details.append(f"• Và {len(blockers) - len(details)} video khác.")
+        return "Không thể thay thế danh sách vì các video sau đang được bảo vệ:\n\n" + "\n".join(details)
 
     def replace_videos(
         self,
@@ -112,25 +139,9 @@ class Database:
                 raise ImportConfirmationRequired(
                     "Dự án đã có danh sách video; cần xác nhận thay thế."
                 )
-            blocked_video = self.connection.execute(
-                """SELECT 1 FROM videos
-                   WHERE project_id=?
-                     AND (download_status NOT IN ('pending', 'waiting')
-                          OR local_video_path IS NOT NULL
-                          OR thumbnail_path IS NOT NULL)
-                   LIMIT 1""",
-                (project_id,),
-            ).fetchone()
-            active_job = self.connection.execute(
-                """SELECT 1 FROM download_jobs
-                   WHERE project_id=? AND status IN ('queued', 'downloading')
-                   LIMIT 1""",
-                (project_id,),
-            ).fetchone()
-            if blocked_video is not None or active_job is not None:
-                raise ImportBlockedError(
-                    "Không thể thay thế: dự án có video đang tải/đã tải hoặc có tệp liên kết."
-                )
+            blockers = self.project_replacement_blockers(project_id)
+            if blockers:
+                raise ImportBlockedError(self.replacement_blocker_message(blockers))
             self.connection.execute(
                 "DELETE FROM videos WHERE project_id=?", (project_id,)
             )
@@ -164,10 +175,56 @@ class Database:
             raise
         return len(prepared_rows)
 
+    def next_video_sequence(self, project_id: str) -> int:
+        row = self.connection.execute(
+            "SELECT COALESCE(MAX(sequence_number), 0) + 1 AS next_sequence "
+            "FROM videos WHERE project_id=?",
+            (project_id,),
+        ).fetchone()
+        return int(row["next_sequence"])
+
+    def append_videos(self, project_id: str, rows: Iterable[dict]) -> int:
+        prepared_rows = list(rows)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            project = self.connection.execute(
+                "SELECT prefix FROM projects WHERE uuid=?", (project_id,)
+            ).fetchone()
+            if project is None:
+                raise ValueError("Dự án không tồn tại")
+            start_sequence = self.next_video_sequence(project_id)
+            now = datetime.now(UTC).isoformat(timespec="seconds")
+            prepared = [
+                (
+                    str(uuid.uuid4()),
+                    project_id,
+                    sequence,
+                    f"{project['prefix']}-{sequence}",
+                    row["ten_video"],
+                    row["url"],
+                    row["normalized_url"],
+                    now,
+                    now,
+                )
+                for sequence, row in enumerate(prepared_rows, start=start_sequence)
+            ]
+            self.connection.executemany(
+                """INSERT INTO videos
+                    (id, project_id, sequence_number, video_code, title, source_url,
+                     normalized_url, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                prepared,
+            )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        return len(prepared_rows)
+
     def export_video_rows(self, project_id: str) -> list[sqlite3.Row]:
         return list(
             self.connection.execute(
-                """SELECT sequence_number, title, source_url FROM videos
+                """SELECT title, source_url FROM videos
                    WHERE project_id=? ORDER BY sequence_number""",
                 (project_id,),
             )

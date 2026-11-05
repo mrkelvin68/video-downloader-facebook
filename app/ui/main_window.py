@@ -1677,15 +1677,17 @@ class MainWindow(QMainWindow):
         self.pending_csv_text = text
         self.pending_csv_rows = rows
         self.pending_csv_errors = errors
-        self.detail_page.show_preview(path.name, len(rows), errors)
         if self.current_project is None:
             return
+        start_sequence = self.database.next_video_sequence(self.current_project.uuid)
+        self.detail_page.show_preview(path.name, len(rows), errors)
         dialog = CsvPreviewDialog(
             path.name,
             rows,
             errors,
             self.current_project.prefix,
             self,
+            start_sequence=start_sequence,
         )
         if dialog.exec() == CsvPreviewDialog.DialogCode.Accepted:
             self.confirm_import()
@@ -1760,28 +1762,11 @@ class MainWindow(QMainWindow):
         ):
             return
         project_id = self.current_project.uuid
-        replace_confirmed = False
         try:
-            has_videos = self.database.project_has_videos(project_id)
-            if has_videos:
-                if not self.database.project_videos_can_be_replaced(project_id):
-                    raise ImportBlockedError(
-                        "Không thể thay thế: dự án có video đang tải/đã tải hoặc có tệp liên kết."
-                    )
-                answer = QMessageBox.question(
-                    self,
-                    "Xác nhận thay thế danh sách",
-                    "Danh sách video đã lưu sẽ được thay thế. Tiếp tục?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
-                )
-                if answer != QMessageBox.StandardButton.Yes:
-                    return
-                replace_confirmed = True
             imported = self.videos.import_csv(
                 project_id,
                 self.pending_csv_text,
-                replace_confirmed=replace_confirmed,
+                append=True,
             )
         except ImportConfirmationRequired as exc:
             QMessageBox.warning(self, "Cần xác nhận", str(exc))
@@ -1795,7 +1780,7 @@ class MainWindow(QMainWindow):
         if not self._refresh_project_videos():
             return
         QMessageBox.information(
-            self, "Thành công", f"Đã lưu thành công {imported} video vào dự án."
+            self, "Thành công", f"Đã thêm thành công {imported} video vào dự án."
         )
 
     def _selected_project_video_ids(self) -> list[str]:

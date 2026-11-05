@@ -34,18 +34,15 @@ def parse_video_csv(text: str) -> tuple[list[dict[str, object]], list[str]]:
     normalized_headers = [header.strip().lower() for header in headers]
     aliases = {"sequence": "stt", "title": "ten_video"}
     normalized_headers = [aliases.get(header, header) for header in normalized_headers]
-    missing = [
-        column
-        for column in ("stt", "ten_video", "url")
-        if column not in normalized_headers
-    ]
+    missing = [column for column in ("ten_video", "url") if column not in normalized_headers]
     if missing:
         return [], [f"CSV thiếu cột: {', '.join(missing)}"]
     if len(set(normalized_headers)) != len(normalized_headers):
         return [], ["CSV có tên cột trùng"]
-    if len(headers) != 3:
-        return [], ["CSV cần đúng 3 cột: stt,title,url"]
+    if len(headers) not in (2, 3):
+        return [], ["CSV cần đúng 2 cột: title,url"]
     positions = {header: index for index, header in enumerate(normalized_headers)}
+    has_legacy_sequence = "stt" in positions
     rows: list[dict[str, object]] = []
     errors: list[str] = []
     sequences: set[int] = set()
@@ -71,19 +68,19 @@ def parse_video_csv(text: str) -> tuple[list[dict[str, object]], list[str]]:
         if len(row) < len(headers):
             errors.append(f"Dòng {line_number}: thiếu cột")
             continue
-        raw_sequence = row[positions["stt"]].strip()
         title = row[positions["ten_video"]].strip()
         url = row[positions["url"]].strip()
         row_errors: list[str] = []
-        sequence = None
-        if not raw_sequence.isdecimal():
-            row_errors.append("stt phải là số nguyên dương")
-        else:
-            try:
-                sequence = int(raw_sequence)
-            except ValueError:
-                row_errors.append("stt vượt giới hạn số nguyên")
-            if sequence is not None:
+        sequence = len(rows) + 1
+        if has_legacy_sequence:
+            raw_sequence = row[positions["stt"]].strip()
+            if not raw_sequence.isdecimal():
+                row_errors.append("stt phải là số nguyên dương")
+            else:
+                try:
+                    sequence = int(raw_sequence)
+                except ValueError:
+                    row_errors.append("stt vượt giới hạn số nguyên")
                 if sequence < 1:
                     row_errors.append("stt phải là số nguyên dương")
                 elif sequence > 2**63 - 1:
@@ -101,8 +98,8 @@ def parse_video_csv(text: str) -> tuple[list[dict[str, object]], list[str]]:
         if row_errors:
             errors.append(f"Dòng {line_number}: {'; '.join(row_errors)}")
             continue
-        assert sequence is not None
-        sequences.add(sequence)
+        if has_legacy_sequence:
+            sequences.add(sequence)
         urls.add(normalized_url)
         rows.append(
             {
@@ -129,13 +126,13 @@ def export_video_csv(rows: list[object]) -> str:
     output = StringIO(newline="")
     output.write("\ufeff")
     writer = csv.writer(output)
-    writer.writerow(("stt", "title", "url"))
+    writer.writerow(("title", "url"))
     writer.writerows(rows)
     return output.getvalue()
 
 
 def sample_video_csv() -> str:
     return (
-        "stt,title,url\n"
-        "1,Video mẫu,https://www.facebook.com/watch/?v=example\n"
+        "title,url\n"
+        "Video mẫu,https://www.facebook.com/watch/?v=example\n"
     )
