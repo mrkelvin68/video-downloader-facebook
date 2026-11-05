@@ -279,7 +279,8 @@ class ProjectDetailPage(QWidget):
         for draft in drafts:
             row = self.facebook_table.rowCount(); self.facebook_table.insertRow(row)
             source_title = str(draft.get("video_title") or draft.get("title") or "")
-            values = ("", str(draft.get("sequence_number", row + 1)), str(draft.get("video_code", "")), source_title, str(draft.get("local_video_path") or "Không tìm thấy file video"), str(draft.get("page_id") or "-"), str(draft.get("preparation_status", "NOT_PREPARED")), "Chưa đăng", "")
+            page_label = draft.get("page_name") or draft.get("page_id") or "-"
+            values = ("", str(draft.get("sequence_number", row + 1)), str(draft.get("video_code", "")), source_title, str(draft.get("local_video_path") or "Không tìm thấy file video"), str(page_label), str(draft.get("preparation_status", "NOT_PREPARED")), "Chưa đăng", "")
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if col == 2: item.setData(Qt.ItemDataRole.UserRole, draft.get("video_id"))

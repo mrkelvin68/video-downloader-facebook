@@ -453,11 +453,15 @@ class MainWindow(QMainWindow):
             return
         project_id = self.current_project.uuid
         pages = self.facebook_publishing.list_pages(project_id)
+        default_page = next((page for page in pages if page.get("is_default")), None)
         drafts = {row["video_id"]: row for row in self.facebook_publishing.list_drafts(project_id)}
         rows = []
         for video in self.videos.list_videos(project_id):
             row = asdict(video)
             row.update(drafts.get(video.id, {}))
+            if not row.get("page_id") and default_page is not None:
+                row["page_id"] = default_page["page_id"]
+                row["page_name"] = default_page["page_name"]
             row.setdefault("video_id", video.id)
             row.setdefault("video_title", video.title)
             rows.append(row)
@@ -611,7 +615,8 @@ class MainWindow(QMainWindow):
         confirmation = QMessageBox.question(
             self, "Xác nhận đăng video",
             f"Video: {video['title']}\nFile: {video['local_video_path']}\nFanpage: {page['page_name']}\n"
-            f"Tiêu đề: {draft['facebook_title']}\nCaption: {description}\nLoại: Page video thường\n\nĐăng ngay?",
+            f"Page ID: {page_id}\nTiêu đề: {draft['facebook_title']}\nCaption: {description}\n"
+            f"Loại: Page video thường\n\nĐăng ngay?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
