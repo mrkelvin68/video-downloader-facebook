@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QFormLayout,
 
 from app.services.apify_facebook_provider import ApifyFacebookReelsProvider
 from app.services.credential_service import delete_apify_token, get_apify_token, set_apify_token
+from app.ui.widgets.loading_button import LoadingButton
 
 SETTINGS_ORGANIZATION = "VideoDownloader"
 SETTINGS_APPLICATION = "VideoDownloaderFacebook"
@@ -36,9 +37,10 @@ class ViralProviderDialog(QDialog):
         layout.addLayout(form)
         self.status = QLabel()
         layout.addWidget(self.status)
-        test = QPushButton("Test Connection")
-        test.clicked.connect(self.test_connection)
-        layout.addWidget(test)
+        self.test_button = LoadingButton("Test Connection")
+        self.test_button.clicked.connect(self.test_connection)
+        layout.addWidget(self.test_button)
+        self._test_worker = None
         delete = QPushButton("Delete saved token")
         delete.clicked.connect(self.delete_token)
         layout.addWidget(delete)
@@ -55,6 +57,8 @@ class ViralProviderDialog(QDialog):
         return ApifyFacebookReelsProvider(token)
 
     def test_connection(self):
+        if self._test_worker is not None:
+            return
         token = self.token.text().strip()
         provider_name = self.provider.currentText()
         if not token:
@@ -62,9 +66,16 @@ class ViralProviderDialog(QDialog):
             return
         self.status.setText(f"Testing {provider_name}…")
         worker = CancellableWorker(lambda _cancel, _progress: self._provider(token).test_connection())
+        self._test_worker = worker
+        self.test_button.set_loading(True)
         worker.signals.result.connect(lambda _result: self.status.setText("Connection successful."))
         worker.signals.error.connect(self.status.setText)
+        worker.signals.finished.connect(self._test_finished)
         QThreadPool.globalInstance().start(worker)
+
+    def _test_finished(self):
+        self._test_worker = None
+        self.test_button.set_loading(False)
 
     def delete_token(self):
         try:

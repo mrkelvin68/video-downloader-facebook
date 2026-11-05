@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 from app.models.project import Project
 from app.ui.widgets.video_table import VideoTable
 from app.ui.widgets.sidebar import button_icon
+from app.ui.widgets.loading_button import LoadingButton
 
 
 class ProjectDetailPage(QWidget):
@@ -114,7 +115,7 @@ class ProjectDetailPage(QWidget):
         self.video_table = VideoTable(self)
         import_layout.addWidget(self.video_table, 1)
         download_actions = QHBoxLayout()
-        self.run_now_button = QPushButton("▶ Chạy ngay")
+        self.run_now_button = LoadingButton("▶ Chạy ngay")
         self.run_now_button.setObjectName("primary")
         self.run_now_button.clicked.connect(self.runNowRequested.emit)
         self.enqueue_button = QPushButton("＋ Thêm vào hàng đợi")

@@ -1446,6 +1446,7 @@ class MainWindow(QMainWindow):
 
     def start_queue(self) -> None:
         self.queue_running = True
+        self._set_queue_loading(True)
         self.pause_after_current = False
         self.queue_page.queue_status.setText(
             f"Đang chạy hàng đợi ({self.queue_concurrency} luồng song song)."
@@ -1456,6 +1457,7 @@ class MainWindow(QMainWindow):
     def pause_queue(self) -> None:
         if not self.queue_workers:
             self.queue_running = False
+            self._set_queue_loading(False)
             self.queue_page.queue_status.setText("Hàng đợi đang tạm dừng.")
             self.detail_page.queue_status.setText("Hàng đợi đang tạm dừng.")
             return
@@ -1472,6 +1474,7 @@ class MainWindow(QMainWindow):
         if self.pause_after_current:
             if not self.queue_workers:
                 self.queue_running = False
+                self._set_queue_loading(False)
             return
         while len(self.queue_workers) < self.queue_concurrency:
             try:
@@ -1481,11 +1484,13 @@ class MainWindow(QMainWindow):
                 )
             except sqlite3.Error as exc:
                 self.queue_running = False
+                self._set_queue_loading(False)
                 QMessageBox.critical(self, "Lỗi hàng đợi", str(exc))
                 return
             if job is None:
                 if not self.queue_workers:
                     self.queue_running = False
+                    self._set_queue_loading(False)
                     self.queue_page.queue_status.setText("Không còn job đang chờ.")
                     self.detail_page.queue_status.setText("Hàng đợi đã hoàn tất.")
                     self.refresh_queue()
@@ -1527,6 +1532,10 @@ class MainWindow(QMainWindow):
         self._queue_ui_stamp.pop(job_id, None)
         self._queue_codes.pop(job_id, None)
 
+    def _set_queue_loading(self, loading: bool) -> None:
+        self.queue_page.set_queue_loading(loading)
+        self.detail_page.run_now_button.set_loading(loading)
+
     def _queue_progress(
         self,
         job_id: str,
@@ -1564,6 +1573,7 @@ class MainWindow(QMainWindow):
             self.pending_project_delete = None
             self._pending_wait_ids.clear()
             self.queue_running = False
+            self._set_queue_loading(False)
             self.setEnabled(True)
             self._perform_project_deletion(project_id, delete_files)
             return True
@@ -1572,6 +1582,7 @@ class MainWindow(QMainWindow):
             self.pending_queue_delete = None
             self._pending_wait_ids.clear()
             self.queue_running = False
+            self._set_queue_loading(False)
             self.setEnabled(True)
             self._perform_queue_job_deletion(job_ids, description)
             return True
@@ -1614,6 +1625,7 @@ class MainWindow(QMainWindow):
             if not self.queue_workers:
                 self.pause_after_current = False
                 self.queue_running = False
+                self._set_queue_loading(False)
                 self.queue_page.queue_status.setText(
                     "Đã tạm dừng sau video hiện tại."
                 )
@@ -1622,6 +1634,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._start_next_queue_job)
         elif not self.queue_workers:
             self.queue_running = False
+            self._set_queue_loading(False)
 
     def _queue_thread_finished(self, worker: DownloadWorker) -> None:
         job_id = worker.job_id

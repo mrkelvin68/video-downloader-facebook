@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QButtonGroup,
 )
+from app.ui.widgets.loading_button import LoadingButton
 
 
 class _DropdownDelegate(QStyledItemDelegate):
@@ -550,7 +551,7 @@ class ViralReelsPage(QWidget):
         return edit
 
     def _button(self, text: str, name: str, callback: Callable) -> QPushButton:
-        button = QPushButton(text)
+        button = LoadingButton(text)
         button.setObjectName(name)
         button.clicked.connect(callback)
         return button
@@ -751,10 +752,8 @@ class ViralReelsPage(QWidget):
         self.set_busy(False)
 
     def set_busy(self, busy: bool) -> None:
-        self.find_pages_button.setEnabled(not busy)
-        self.find_pages_button2.setEnabled(not busy)
-        self.scan_reels_button.setEnabled(not busy)
-        self.recover_run_button.setEnabled(not busy)
+        for button in (self.find_pages_button, self.find_pages_button2, self.scan_reels_button, self.recover_run_button):
+            button.set_loading(busy)
         self.stop_button.setEnabled(busy)
         if busy:
             self.delete_pages_button.setEnabled(False)
