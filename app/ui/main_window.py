@@ -592,13 +592,7 @@ class MainWindow(QMainWindow):
     def scan_viral_reels(self, values: dict) -> None:
         self._configure_viral_schedule(values["schedule"])
         if values.get("mode") == "discover_trending":
-            self.viral_reels_page.set_busy(False)
-            provider = self._viral_provider()
-            if provider is None:
-                self.viral_reels_page.set_provider_status("Not configured", "Unsupported", "Discover Trending unavailable")
-            else:
-                self.viral_reels_page.set_provider_status(provider.name, "Unsupported", "Page scanning only")
-                QMessageBox.information(self, "Discover Trending Reels", f"{provider.name} does not support Discover Trending. Select Scan by Page.")
+            self._discover_cached_reels(values)
             return
         if values.get("data_source") != "Database":
             self._scan_selected_pages(values)
@@ -622,6 +616,50 @@ class MainWindow(QMainWindow):
                 worker_store.close()
 
         self.viral_reels_page.run_operation(load, self.viral_reels_page.set_results)
+
+    def _discover_cached_reels(self, values: dict) -> None:
+        """Discover from saved-page SQLite cache; the configured Actor has no keyword search."""
+        filters = self._viral_filters(values)
+        page = self.viral_reels_page
+
+        def load(cancel, progress):
+            store = ViralReelsStore.for_thread(self.database.path)
+            try:
+                saved_urls = {str(row["page_url"]) for row in store.list_pages(limit=100000)}
+                progress(0, 1, "Loading cached Reels")
+                if not saved_urls:
+                    return [], 0, 0
+                rows = store.list_reels(limit=100000)
+                matched = []
+                candidates = 0
+                for index, row in enumerate(rows, 1):
+                    if cancel.is_set():
+                        break
+                    record = dict(row)
+                    if str(record.get("page_url") or "") not in saved_urls:
+                        progress(index, len(rows), "Ranking cached Reels")
+                        continue
+                    candidates += 1
+                    if reel_matches(record, filters):
+                        matched.append(record)
+                    progress(index, len(rows), "Ranking cached Reels")
+                matched.sort(key=lambda item: float(item.get("viral_score") or 0), reverse=True)
+                return matched[: filters.maximum_results], candidates, len(matched)
+            finally:
+                store.close()
+
+        def show(payload):
+            results, candidates, matched = payload
+            page.set_results(results)
+            page.set_scan_stats(candidates, matched, max(0, candidates - matched), len(results), "Saved Pages cache")
+            if not results:
+                QMessageBox.information(
+                    self,
+                    "Discover Trending Reels",
+                    "No cached Reels found for Saved Pages. Use Scan by Page first.",
+                )
+
+        page.run_operation(load, show)
 
     MAX_SCAN_PAGES_PER_RUN = 10
 

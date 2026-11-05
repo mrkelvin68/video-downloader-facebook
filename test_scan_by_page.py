@@ -175,6 +175,22 @@ class ScanByPageTests(unittest.TestCase):
         self.assertTrue(any(k == "q" and "Apify" in text for k, text in self.msgs))
         self.assertEqual(len(self.page._records), 1)
 
+    def test_discover_trending_uses_saved_page_cache_without_provider_run(self):
+        self.add(PAGE)
+        store = ViralReelsStore(self.db)
+        store.upsert_reel({
+            "reel_id": "cached-1", "reel_url": "https://facebook.com/reel/cached-1",
+            "page_id": "manual:" + PAGE, "page_name": "PhimHay", "page_url": PAGE,
+            "caption": "Cached Reel", "views": 5000, "likes": 20, "comments": 3,
+            "shares": 2, "published_at": datetime(2026, 1, 1, tzinfo=UTC).isoformat(),
+            "viral_score": 88.0, "data_source": "Recorded",
+        })
+        self.page.mode_discover.setChecked(True)
+        self.page.scan_reels_button.click()
+        self.wait()
+        self.assertEqual(RecordedProvider.calls, [])
+        self.assertEqual([row["reel_id"] for row in self.page._records], ["cached-1"])
+
     def test_advanced_filters_do_not_hide_selected_page(self):
         self.add(PAGE)
         self.page.advanced_group.setChecked(False)
