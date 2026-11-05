@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QComboBox,
     QPushButton,
     QStyle,
     QVBoxLayout,
@@ -113,6 +114,10 @@ class ProjectDetailPage(QWidget):
         self.csv_errors.hide()
         import_layout.addWidget(self.csv_errors)
         video_actions = QHBoxLayout()
+        video_actions.addWidget(QLabel("Lọc trạng thái:"))
+        self.status_filter = QComboBox()
+        self.status_filter.addItems(("Tất cả", "Đã tải", "Chưa tải"))
+        video_actions.addWidget(self.status_filter)
         select_all = QPushButton("Chọn tất cả")
         select_all.setObjectName("secondary")
         select_all.clicked.connect(self.selectAllRequested.emit)
@@ -124,6 +129,7 @@ class ProjectDetailPage(QWidget):
         video_actions.addStretch()
         import_layout.addLayout(video_actions)
         self.video_table = VideoTable(self)
+        self.status_filter.currentTextChanged.connect(self.video_table.set_status_filter)
         import_layout.addWidget(self.video_table, 1)
         download_actions = QHBoxLayout()
         self.run_now_button = LoadingButton("▶ Chạy ngay")

@@ -1473,6 +1473,7 @@ class MainWindow(QMainWindow):
             return
         self.refresh_queue()
         self._refresh_project_videos()
+        self.detail_page.run_now_button.set_loading(True)
         self.start_queue()
 
     def start_queue(self) -> None:
@@ -1565,7 +1566,8 @@ class MainWindow(QMainWindow):
 
     def _set_queue_loading(self, loading: bool) -> None:
         self.queue_page.set_queue_loading(loading)
-        self.detail_page.run_now_button.set_loading(loading)
+        if not loading:
+            self.detail_page.run_now_button.set_loading(False)
 
     def _queue_progress(
         self,
