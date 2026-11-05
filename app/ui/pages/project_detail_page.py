@@ -21,6 +21,7 @@ class ProjectDetailPage(QWidget):
     backRequested = Signal()
     csvChosen = Signal()
     csvDropped = Signal(object)
+    googleSheetsRequested = Signal()
     sampleRequested = Signal()
     exportRequested = Signal()
     runNowRequested = Signal()
@@ -77,11 +78,15 @@ class ProjectDetailPage(QWidget):
         self.drop_zone.setObjectName("dropZone")
         self.drop_zone.setMinimumHeight(58)
         self.drop_zone.fileDropped.connect(self.csvDropped)
+        self.drop_zone.clicked.connect(self.csvChosen)
         import_layout.addWidget(self.drop_zone)
         actions = QHBoxLayout()
         choose = QPushButton("Chọn CSV")
         choose.setObjectName("primary")
         choose.clicked.connect(self.csvChosen.emit)
+        sheets = QPushButton("Nhập Google Sheets")
+        sheets.setObjectName("secondary")
+        sheets.clicked.connect(self.googleSheetsRequested.emit)
         sample = QPushButton("Tải CSV mẫu")
         sample.setObjectName("secondary")
         sample.clicked.connect(self.sampleRequested.emit)
@@ -89,6 +94,7 @@ class ProjectDetailPage(QWidget):
         export.setObjectName("secondary")
         export.clicked.connect(self.exportRequested.emit)
         actions.addWidget(choose)
+        actions.addWidget(sheets)
         actions.addWidget(sample)
         actions.addWidget(export)
         actions.addStretch()
@@ -177,6 +183,14 @@ class _DropZone(QLabel):
         super().__init__("Kéo thả CSV vào đây hoặc chọn tệp", parent)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setAcceptDrops(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    clicked = Signal()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
     def dragEnterEvent(self, event) -> None:
         if event.mimeData().hasUrls():
