@@ -129,6 +129,64 @@ class FacebookPublishingService:
             "SELECT * FROM facebook_pages WHERE project_id=? ORDER BY page_name COLLATE NOCASE", (project_id,)
         )]
 
+    def list_drafts(self, project_id: str) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.database.connection.execute(
+            """SELECT d.*, v.sequence_number, v.video_code, v.title AS video_title,
+                      v.local_video_path FROM facebook_drafts d
+               JOIN videos v ON v.id=d.video_id WHERE d.project_id=?
+               ORDER BY v.sequence_number""", (project_id,)
+        )]
+
+    def save_draft(self, project_id: str, video_id: str, *, page_id: str | None,
+                   facebook_title: str, description: str, hashtags: str) -> None:
+        video = self.database.connection.execute(
+            "SELECT id FROM videos WHERE id=? AND project_id=?", (video_id, project_id)
+        ).fetchone()
+        if video is None:
+            raise FacebookPublishingError("Video không thuộc dự án hiện tại.")
+        if page_id and self.database.connection.execute(
+            "SELECT 1 FROM facebook_pages WHERE project_id=? AND page_id=?", (project_id, page_id)
+        ).fetchone() is None:
+            raise FacebookPublishingError("Fanpage không thuộc dự án hiện tại.")
+        with self.database.connection:
+            self.database.connection.execute(
+                """INSERT INTO facebook_drafts
+                   (project_id,video_id,page_id,facebook_title,description,hashtags,updated_at)
+                   VALUES (?,?,?,?,?,?,?) ON CONFLICT(project_id,video_id) DO UPDATE SET
+                   page_id=excluded.page_id,facebook_title=excluded.facebook_title,
+                   description=excluded.description,hashtags=excluded.hashtags,updated_at=excluded.updated_at""",
+                (project_id, video_id, page_id, facebook_title, description, hashtags, _now()),
+            )
+
+    def prepare_video(self, project_id: str, video_id: str) -> dict[str, Any]:
+        row = self.database.connection.execute(
+            "SELECT local_video_path FROM videos WHERE id=? AND project_id=?", (video_id, project_id)
+        ).fetchone()
+        if row is None:
+            raise FacebookPublishingError("Video không thuộc dự án hiện tại.")
+        path = Path(row["local_video_path"] or "")
+        status, payload, error = "READY", {}, None
+        if not path.is_file():
+            status, error = "MISSING_FILE", "Không tìm thấy file video"
+        else:
+            try:
+                payload = self._inspect_video(path)
+                stream = next((item for item in payload.get("streams", []) if item.get("codec_type") == "video"), {})
+                payload = {"duration": payload.get("format", {}).get("duration"), "width": stream.get("width"), "height": stream.get("height"), "codec": stream.get("codec_name")}
+                if not payload["width"] or not payload["height"]:
+                    status, error = "UNSUPPORTED", "Chưa xác minh tương thích"
+            except FacebookPublishingError as exc:
+                status, error = "CHECK_ERROR", str(exc)
+        with self.database.connection:
+            self.database.connection.execute(
+                """INSERT INTO facebook_drafts(project_id,video_id,facebook_title,preparation_status,preparation_json,last_error,updated_at)
+                   SELECT ?,?,title,?,?,?,? FROM videos WHERE id=?
+                   ON CONFLICT(project_id,video_id) DO UPDATE SET preparation_status=excluded.preparation_status,
+                   preparation_json=excluded.preparation_json,last_error=excluded.last_error,updated_at=excluded.updated_at""",
+                (project_id, video_id, status, json.dumps(payload, ensure_ascii=False), error, _now(), video_id),
+            )
+        return {"status": status, "metadata": payload, "error": error}
+
     def enqueue(self, project_id: str, video_id: str, page_id: str, *, title: str | None = None,
                 description: str = "", scheduled_at: str | None = None, timezone: str = "UTC") -> str:
         video = self.database.connection.execute(

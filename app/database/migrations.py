@@ -386,6 +386,30 @@ def _create_facebook_publishing_tables(connection: sqlite3.Connection) -> None:
         """CREATE INDEX IF NOT EXISTS ix_facebook_publish_schedule
            ON facebook_publishing_jobs(project_id, status, scheduled_at)"""
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS facebook_drafts (
+            project_id TEXT NOT NULL,
+            video_id TEXT NOT NULL,
+            page_id TEXT,
+            facebook_title TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            hashtags TEXT NOT NULL DEFAULT '',
+            preparation_status TEXT NOT NULL DEFAULT 'NOT_PREPARED',
+            preparation_json TEXT NOT NULL DEFAULT '{}',
+            last_error TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(project_id, video_id),
+            FOREIGN KEY(project_id) REFERENCES projects(uuid) ON DELETE CASCADE,
+            FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE CASCADE,
+            FOREIGN KEY(project_id, page_id) REFERENCES facebook_pages(project_id, page_id)
+        )
+        """
+    )
+    connection.execute(
+        """CREATE INDEX IF NOT EXISTS ix_facebook_drafts_project
+           ON facebook_drafts(project_id, updated_at DESC)"""
+    )
 def migrate(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("BEGIN IMMEDIATE")

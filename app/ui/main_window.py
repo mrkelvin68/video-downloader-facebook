@@ -50,6 +50,8 @@ from app.services.viral_reels_service import (
 from app.services.apify_facebook_provider import ApifyFacebookPageSearchProvider, ApifyFacebookReelsProvider
 from app.services.meta_graph_provider import MetaGraphReelsProvider
 from app.services.credential_service import get_apify_token, get_meta_token
+from app.services.facebook_connection_service import FacebookConnectionService, FacebookConnectionError
+from app.services.facebook_publishing_service import FacebookPublishingService
 from app.ui.dialogs.viral_provider_dialog import ViralProviderDialog, viral_settings
 from app.ui.dialogs.csv_preview_dialog import CsvPreviewDialog
 from app.ui.dialogs.google_sheets_import_dialog import GoogleSheetsImportDialog
@@ -144,6 +146,8 @@ class MainWindow(QMainWindow):
         self.projects = ProjectService(database)
         self.videos = VideoService(database)
         self.download_queue = DownloadQueueService(database)
+        self.facebook_connection = FacebookConnectionService(database)
+        self.facebook_publishing = FacebookPublishingService(database)
         self.matrices = MatrixService(database)
         self.viral_reels = ViralReelsStore(database)
         self.viral_reels_scheduler = ViralReelsScheduler(self._run_scheduled_viral_scan)
@@ -204,6 +208,13 @@ class MainWindow(QMainWindow):
             lambda: self.edit_project(self.current_project)
             if self.current_project is not None else None
         )
+        self.detail_page.facebookConnectRequested.connect(self._connect_facebook)
+        self.detail_page.facebookTestRequested.connect(self._test_facebook)
+        self.detail_page.facebookRefreshRequested.connect(self._refresh_facebook)
+        self.detail_page.facebookDisconnectRequested.connect(self._disconnect_facebook)
+        self.detail_page.facebookDefaultPageRequested.connect(self._set_facebook_default)
+        self.detail_page.facebookSaveDraftRequested.connect(self._save_facebook_draft)
+        self.detail_page.facebookPrepareRequested.connect(self._prepare_facebook_video)
         self.sidebar.projectsRequested.connect(self.show_projects)
         self.sidebar.queueRequested.connect(self.show_queue)
         self.sidebar.viralReelsRequested.connect(self.show_viral_reels)
@@ -424,8 +435,84 @@ class MainWindow(QMainWindow):
         self.current_project = project
         self.detail_page.set_project(project)
         self._refresh_project_videos()
+        self._refresh_facebook()
         self.pages.setCurrentIndex(1)
         self.sidebar.set_active("projects")
+
+    def _refresh_facebook(self) -> None:
+        if self.current_project is None:
+            return
+        project_id = self.current_project.uuid
+        pages = self.facebook_publishing.list_pages(project_id)
+        drafts = {row["video_id"]: row for row in self.facebook_publishing.list_drafts(project_id)}
+        rows = []
+        for video in self.videos.list_videos(project_id):
+            row = asdict(video)
+            row.update(drafts.get(video.id, {}))
+            row.setdefault("video_id", video.id)
+            row.setdefault("video_title", video.title)
+            rows.append(row)
+        self.detail_page.set_facebook_data(pages, rows)
+
+    def _connect_facebook(self, token: str) -> None:
+        if self.current_project is None:
+            return
+        try:
+            self.detail_page.facebook_connect_button.set_loading(True)
+            self.facebook_connection.connect(self.current_project.uuid, token)
+            self._refresh_facebook()
+        except (FacebookConnectionError, ValueError) as exc:
+            QMessageBox.warning(self, "Kết nối Facebook", str(exc))
+        finally:
+            self.detail_page.facebook_connect_button.set_loading(False)
+
+    def _test_facebook(self) -> None:
+        if self.current_project is None:
+            return
+        try:
+            self.detail_page.facebook_test_button.set_loading(True)
+            self.facebook_connection.test_connection(self.current_project.uuid)
+            self.detail_page.facebook_status.setText("Đã kết nối Facebook")
+        except FacebookConnectionError as exc:
+            QMessageBox.warning(self, "Kiểm tra kết nối", str(exc))
+        finally:
+            self.detail_page.facebook_test_button.set_loading(False)
+
+    def _disconnect_facebook(self) -> None:
+        if self.current_project is None:
+            return
+        self.facebook_connection.disconnect(self.current_project.uuid)
+        self._refresh_facebook()
+
+    def _set_facebook_default(self, page_id: str) -> None:
+        if self.current_project is None or not page_id:
+            return
+        try:
+            self.facebook_connection.set_default_page(self.current_project.uuid, page_id)
+        except FacebookConnectionError as exc:
+            QMessageBox.warning(self, "Fanpage mặc định", str(exc))
+
+    def _save_facebook_draft(self, values: dict) -> None:
+        if self.current_project is None:
+            return
+        row = self.detail_page.facebook_table.item(int(values["row"]), 2)
+        if row is None:
+            return
+        self.facebook_publishing.save_draft(
+            self.current_project.uuid, str(row.data(Qt.ItemDataRole.UserRole)),
+            page_id=values.get("page_id"), facebook_title=values["title"],
+            description=values["description"], hashtags=values["hashtags"],
+        )
+        self._refresh_facebook()
+
+    def _prepare_facebook_video(self, values: dict) -> None:
+        if self.current_project is None:
+            return
+        try:
+            self.facebook_publishing.prepare_video(self.current_project.uuid, values["video_id"])
+            self._refresh_facebook()
+        except Exception as exc:
+            QMessageBox.warning(self, "Kiểm tra video", str(exc))
 
     def show_queue(self) -> None:
         self.refresh_queue()

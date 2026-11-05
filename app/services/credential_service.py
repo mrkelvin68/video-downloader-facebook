@@ -7,6 +7,10 @@ TOKEN_KEY = "apify_token"
 META_TOKEN_KEY = "meta_graph_token"
 
 
+def _page_token_key(project_id: str, page_id: str) -> str:
+    return f"meta_page_token:{project_id}:{page_id}"
+
+
 def get_apify_token() -> str:
     return keyring.get_password(SERVICE_NAME, TOKEN_KEY) or ""
 
@@ -25,6 +29,24 @@ def set_meta_token(token: str) -> None:
 def delete_meta_token() -> None:
     try:
         keyring.delete_password(SERVICE_NAME, META_TOKEN_KEY)
+    except keyring.errors.PasswordDeleteError:
+        pass
+
+
+def get_page_token(project_id: str, page_id: str) -> str:
+    return keyring.get_password(SERVICE_NAME, _page_token_key(project_id, page_id)) or ""
+
+
+def set_page_token(project_id: str, page_id: str, token: str) -> None:
+    value = token.strip()
+    if not value:
+        raise ValueError("Page Access Token là bắt buộc")
+    keyring.set_password(SERVICE_NAME, _page_token_key(project_id, page_id), value)
+
+
+def delete_page_token(project_id: str, page_id: str) -> None:
+    try:
+        keyring.delete_password(SERVICE_NAME, _page_token_key(project_id, page_id))
     except keyring.errors.PasswordDeleteError:
         pass
 
