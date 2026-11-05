@@ -9,7 +9,9 @@ class VideoTableModel(QAbstractTableModel):
 
     def __init__(self, videos: list[object] | None = None, parent=None) -> None:
         super().__init__(parent)
-        self._videos = videos or []
+        self._all_videos = list(videos or [])
+        self._videos = list(self._all_videos)
+        self._status_filter = "all"
         self._checked: set[str] = set()
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
@@ -119,14 +121,43 @@ class VideoTableModel(QAbstractTableModel):
 
     def set_videos(self, videos: list[object]) -> None:
         selected = self._checked
+        self._all_videos = list(videos)
+        self._videos = self._filtered_videos()
         self.beginResetModel()
-        self._videos = list(videos)
         self._checked = {
             self._video_key(video, row)
             for row, video in enumerate(self._videos)
             if self._video_key(video, row) in selected
         }
         self.endResetModel()
+
+    def set_status_filter(self, value: str) -> None:
+        normalized = {"Tất cả": "all", "Đã tải": "downloaded", "Chưa tải": "not_downloaded"}.get(value, value)
+        if normalized == self._status_filter:
+            return
+        selected = self._checked
+        self._status_filter = normalized
+        self.beginResetModel()
+        self._videos = self._filtered_videos()
+        self._checked = {
+            self._video_key(video, row)
+            for row, video in enumerate(self._videos)
+            if self._video_key(video, row) in selected
+        }
+        self.endResetModel()
+
+    def _filtered_videos(self) -> list[object]:
+        if self._status_filter == "all":
+            return list(self._all_videos)
+        filtered = []
+        for video in self._all_videos:
+            status = str(self._value(video, "download_status", "pending"))
+            completed = status == "completed"
+            if self._status_filter == "downloaded" and completed:
+                filtered.append(video)
+            elif self._status_filter == "not_downloaded" and not completed:
+                filtered.append(video)
+        return filtered
 
     def select_all(self) -> None:
         self._checked = {
@@ -174,6 +205,9 @@ class VideoTable(QTableView):
 
     def set_videos(self, videos: list[object]) -> None:
         self.video_model.set_videos(videos)
+
+    def set_status_filter(self, value: str) -> None:
+        self.video_model.set_status_filter(value)
 
     def select_all(self) -> None:
         self.video_model.select_all()

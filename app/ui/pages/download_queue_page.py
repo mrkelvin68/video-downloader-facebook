@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from app.ui.widgets.loading_button import LoadingButton
+from app.ui.widgets.action_status import ActionStatusBar
 
 
 def _format_bytes(value: int | None) -> str:
@@ -294,6 +295,10 @@ class DownloadQueuePage(QWidget):
         controls.addWidget(self.cancel_button)
         layout.addLayout(controls)
 
+        self.action_status = ActionStatusBar(self)
+        self.action_status.set_status("Đang xử lý jobs…", "")
+        layout.addWidget(self.action_status)
+
         concurrency_row = QHBoxLayout()
         concurrency_row.addWidget(QLabel("Tải đồng thời:"))
         self.concurrency_combo = QComboBox()
@@ -354,6 +359,9 @@ class DownloadQueuePage(QWidget):
     def set_queue_loading(self, loading: bool) -> None:
         self.start_button.set_loading(loading)
         self.resume_button.set_loading(loading)
+        self.action_status.set_loading(loading)
+        if loading:
+            self.action_status.set_status("Đang xử lý jobs…", self.stats_label.text())
 
     def set_concurrency(self, value: int) -> None:
         index = self.concurrency_combo.findData(int(value))
@@ -367,6 +375,8 @@ class DownloadQueuePage(QWidget):
         self.stats_label.setText(
             f"Đang tải: {active} · Đang chờ: {pending} · Tốc độ tổng: {rate}"
         )
+        if self.action_status.isVisible():
+            self.action_status.set_status("Đang xử lý jobs…", self.stats_label.text())
 
     def _show_context_menu(self, position) -> None:
         index = self.table.indexAt(position)

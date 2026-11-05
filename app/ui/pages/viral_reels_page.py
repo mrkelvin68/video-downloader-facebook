@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
 )
 from app.ui.widgets.loading_button import LoadingButton
+from app.ui.widgets.action_status import ActionStatusBar
 
 
 class _DropdownDelegate(QStyledItemDelegate):
@@ -311,6 +312,9 @@ class ViralReelsPage(QWidget):
 
         self.progress_label = QLabel("Pages 0/0 · Reels 0/0 · Results 0")
         self.progress_label.setObjectName("detailMeta")
+        self.action_status = ActionStatusBar(self)
+        self.action_status.set_status("Đang xử lý…", self.progress_label.text())
+        root.addWidget(self.action_status)
 
         self.table = QTableView()
         self.table.setMinimumHeight(130)
@@ -720,7 +724,7 @@ class ViralReelsPage(QWidget):
         worker = CancellableWorker(operation)
         self._worker = worker
         worker.signals.progress.connect(
-            lambda done, total, message: self.progress_label.setText(f"{message}: {done}/{total}")
+            self._operation_progress
         )
         worker.signals.result.connect(result_handler)
         worker.signals.cancelled.connect(lambda: self.progress_label.setText("Operation cancelled."))
@@ -751,9 +755,17 @@ class ViralReelsPage(QWidget):
         self._worker = None
         self.set_busy(False)
 
+    def _operation_progress(self, done: int, total: int, message: str) -> None:
+        text = f"{message}: {done}/{total}"
+        self.progress_label.setText(text)
+        self.action_status.set_status("Đang xử lý…", text)
+
     def set_busy(self, busy: bool) -> None:
         for button in (self.find_pages_button, self.find_pages_button2, self.scan_reels_button, self.recover_run_button):
             button.set_loading(busy)
+        self.action_status.set_loading(busy)
+        if busy:
+            self.action_status.set_status("Đang xử lý…", self.progress_label.text())
         self.stop_button.setEnabled(busy)
         if busy:
             self.delete_pages_button.setEnabled(False)
@@ -764,12 +776,14 @@ class ViralReelsPage(QWidget):
         self.progress_label.setText(
             f"Pages {pages_done}/{pages_total} · Reels {reels_done}/{reels_total} · Results {len(self._records)}"
         )
+        self.action_status.set_status("Đang xử lý…", self.progress_label.text())
 
     def set_scan_stats(self, collected: int, valid: int, filtered: int, displayed: int, reason: str = "") -> None:
         suffix = f" ({reason})" if reason else ""
         self.progress_label.setText(
             f"Reels collected: {collected} · Reels valid: {valid} · Reels filtered: {filtered} · Reels displayed: {displayed}{suffix}"
         )
+        self.action_status.set_status("Đang xử lý…", self.progress_label.text())
 
     def set_results(self, records: Sequence[Mapping[str, Any]]) -> None:
         self._records = [dict(record) for record in records]

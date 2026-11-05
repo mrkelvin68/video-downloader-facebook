@@ -5,15 +5,16 @@ from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionButton, QPushButton, QWidget
 
 
-class _Spinner(QWidget):
+class LoadingSpinner(QWidget):
     _timer: QTimer | None = None
     _app: QApplication | None = None
-    _instances: set["_Spinner"] = set()
+    _instances: set["LoadingSpinner"] = set()
     _angle = 0
 
-    def __init__(self, parent: QWidget) -> None:
+    def __init__(self, size: int = 16, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedSize(16, 16)
+        self._size = int(size)
+        self.setFixedSize(self._size, self._size)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.hide()
 
@@ -67,12 +68,15 @@ class _Spinner(QWidget):
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.translate(8, 8)
+        center = self._size / 2
+        painter.translate(center, center)
         painter.rotate(self._angle)
-        color = self.parentWidget().palette().color(self.parentWidget().foregroundRole())
+        parent = self.parentWidget()
+        color = parent.palette().color(parent.foregroundRole()) if parent else QColor("white")
         pen = QPen(QColor(color), 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
         painter.setPen(pen)
-        painter.drawArc(-6, -6, 12, 12, 35 * 16, 285 * 16)
+        radius = max(4.0, center - 4.0)
+        painter.drawArc(int(-radius), int(-radius), int(radius * 2), int(radius * 2), 35 * 16, 285 * 16)
         painter.end()
 
 
@@ -83,7 +87,7 @@ class LoadingButton(QPushButton):
         super().__init__(*args, **kwargs)
         self._loading = False
         self._enabled_before_loading = True
-        self._spinner = _Spinner(self)
+        self._spinner = LoadingSpinner(16, self)
 
     @property
     def is_loading(self) -> bool:

@@ -52,6 +52,8 @@ from app.services.meta_graph_provider import MetaGraphReelsProvider
 from app.services.credential_service import get_apify_token, get_meta_token
 from app.ui.dialogs.viral_provider_dialog import ViralProviderDialog, viral_settings
 from app.ui.dialogs.csv_preview_dialog import CsvPreviewDialog
+from app.ui.dialogs.google_sheets_import_dialog import GoogleSheetsImportDialog
+from app.ui.dialogs.manual_video_import_dialog import ManualVideoImportDialog
 from app.ui.dialogs.matrix_configuration_dialog import (
     MatrixConfigurationDialog,
     MatrixEntryDialog,
@@ -219,6 +221,8 @@ class MainWindow(QMainWindow):
         self.viral_reels_page.exportExcelRequested.connect(self.export_viral_reels_xlsx)
         self.detail_page.csvChosen.connect(self.choose_csv)
         self.detail_page.csvDropped.connect(self.load_csv)
+        self.detail_page.googleSheetsRequested.connect(self.import_google_sheets)
+        self.detail_page.manualImportRequested.connect(self.import_manual_videos)
         self.detail_page.sampleRequested.connect(self.save_sample_csv)
         self.detail_page.exportRequested.connect(self.export_csv)
         self.detail_page.runNowRequested.connect(self.run_now)
@@ -1321,6 +1325,33 @@ class MainWindow(QMainWindow):
             self.pending_csv_errors = []
             self.detail_page.discard_preview()
 
+    def import_google_sheets(self) -> None:
+        if self.current_project is None:
+            return
+        dialog = GoogleSheetsImportDialog(self)
+        if dialog.exec() != GoogleSheetsImportDialog.DialogCode.Accepted:
+            return
+        self.pending_csv_text = dialog.csv_text
+        self.pending_csv_rows = list(dialog.rows)
+        self.pending_csv_errors = []
+        self.confirm_import()
+
+    def import_manual_videos(self) -> None:
+        if self.current_project is None:
+            return
+        previous_rows: list[dict[str, object]] | None = None
+        while True:
+            dialog = ManualVideoImportDialog(self, rows=previous_rows)
+            if dialog.exec() != ManualVideoImportDialog.DialogCode.Accepted:
+                return
+            self.pending_csv_text = dialog.csv_text
+            self.pending_csv_rows = list(dialog.rows)
+            self.pending_csv_errors = []
+            self.confirm_import()
+            if self.pending_csv_text is None:
+                return
+            previous_rows = list(dialog.rows)
+
     def save_sample_csv(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
             self, "Lưu CSV mẫu", "videos.csv", "CSV (*.csv)"
@@ -1442,6 +1473,7 @@ class MainWindow(QMainWindow):
             return
         self.refresh_queue()
         self._refresh_project_videos()
+        self.detail_page.run_now_button.set_loading(True)
         self.start_queue()
 
     def start_queue(self) -> None:
@@ -1534,7 +1566,8 @@ class MainWindow(QMainWindow):
 
     def _set_queue_loading(self, loading: bool) -> None:
         self.queue_page.set_queue_loading(loading)
-        self.detail_page.run_now_button.set_loading(loading)
+        if not loading:
+            self.detail_page.run_now_button.set_loading(False)
 
     def _queue_progress(
         self,
