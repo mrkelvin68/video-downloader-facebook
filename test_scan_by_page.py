@@ -116,7 +116,7 @@ class ScanByPageTests(unittest.TestCase):
         self.page.scan_reels_button.click()
         self.wait()
         self.assertEqual(RecordedProvider.calls, [PAGE])  # only the selected Page
-        self.assertTrue(any(kind == "q" and "Pages to scan: 1" in text for kind, text in self.msgs))
+        self.assertTrue(any(kind == "q" and "Selected Pages: 1" in text for kind, text in self.msgs))
         self.assertEqual(len(self.page._records), 2)
         path = Path(self.tmp.name) / "reels.csv"
         with patch.object(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(path), ""))):
@@ -190,6 +190,25 @@ class ScanByPageTests(unittest.TestCase):
         self.wait()
         self.assertEqual(RecordedProvider.calls, [])
         self.assertEqual([row["reel_id"] for row in self.page._records], ["cached-1"])
+
+    def test_scan_collection_limit_matches_max_results_with_minimum_views(self):
+        self.add(PAGE)
+        captured = {}
+
+        class CaptureProvider(RecordedProvider):
+            def __init__(self, token, **kwargs):
+                captured.update(kwargs)
+                super().__init__(token)
+
+        with patch.object(mw, "ApifyFacebookReelsProvider", CaptureProvider):
+            self.page.advanced_group.setChecked(True)
+            self.page.min_views.setValue(10000)
+            self.page.max_results.setValue(5)
+            self.page.scan_reels_button.click()
+            self.wait()
+
+        self.assertEqual(captured.get("results_limit"), 5)
+        self.assertTrue(any("Maximum collection: 5 Reels" in text for kind, text in self.msgs if kind == "q"))
 
     def test_advanced_filters_do_not_hide_selected_page(self):
         self.add(PAGE)

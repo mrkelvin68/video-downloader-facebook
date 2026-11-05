@@ -694,24 +694,37 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Scan Reels", "Selected Pages were not found in the saved list.")
             return
         max_res = max(1, min(int(values.get("max_results", 30)), 100))
-        min_v = values.get("min_views")
-        if min_v and int(min_v) > 0:
-            results_limit = min(max(max_res * 4, 30), ApifyFacebookReelsProvider.MAX_RESULTS_LIMIT)
-        else:
-            results_limit = max_res
+        actor_limit = int(getattr(ApifyFacebookReelsProvider, "MAX_RESULTS_LIMIT", 100))
+        results_limit = min(max_res, actor_limit)
+        filters = self._viral_filters(values)
+        active_filters = ["Advanced ON" if values.get("advanced_enabled", True) else "Advanced OFF"]
+        if filters.minimum_views is not None:
+            active_filters.append(f"minimum views >= {filters.minimum_views:,}")
+        if filters.country != "All":
+            active_filters.append(f"country={filters.country}")
+        if filters.language != "All":
+            active_filters.append(f"language={filters.language}")
+        if filters.topic:
+            active_filters.append(f"topic={filters.topic}")
+        if filters.published_from or filters.published_to:
+            active_filters.append("date range")
         if provider_name == APIFY_PROVIDER_NAME:
             names = "\n".join(f"• {p.page_name}" for p in pages[:10]) + (f"\n… +{len(pages) - 10} more" if len(pages) > 10 else "")
             answer = QMessageBox.question(
                 self,
                 "Charge approval",
-                f"This live Apify scan may incur charges.\nPages to scan: {len(pages)}\n{names}\n\n"
+                f"This live Apify scan may incur charges.\n"
+                f"Selected Pages: {len(pages)}\n"
+                f"Collection limit: {results_limit} Reels/Page\n"
+                f"Maximum collection: {results_limit * len(pages)} Reels\n"
+                f"Display limit: {values.get('max_results', 30)}\n"
+                f"Active filters: {', '.join(active_filters)}\n"
+                f"Estimated cost: unavailable\n\n{names}\n\n"
                 f"Actor resultsLimit: {results_limit} Reels per Page (max 100).\nContinue?",
             )
             if answer != QMessageBox.StandardButton.Yes:
                 page.set_busy(False)
                 return
-        filters = self._viral_filters(values)
-
         def collect(cancel, progress):
             store = ViralReelsStore.for_thread(self.database.path)
             try:
