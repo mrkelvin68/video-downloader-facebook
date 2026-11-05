@@ -21,7 +21,7 @@ from app.services.csv_service import parse_video_csv
 class ManualVideoImportDialog(QDialog):
     """Modal editor for Title/URL rows, using the existing CSV validation pipeline."""
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, rows: list[dict[str, object]] | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Nhập danh sách video")
         self.resize(820, 520)
@@ -59,7 +59,14 @@ class ManualVideoImportDialog(QDialog):
         footer.addWidget(cancel)
         footer.addWidget(save)
         layout.addLayout(footer)
-        self.add_row()
+        if rows:
+            for row in rows:
+                self.add_row()
+                current = self.table.rowCount() - 1
+                self.table.item(current, 0).setText(str(row.get("ten_video") or ""))
+                self.table.item(current, 1).setText(str(row.get("url") or ""))
+        else:
+            self.add_row()
 
     def add_row(self) -> None:
         row = self.table.rowCount()

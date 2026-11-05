@@ -1,6 +1,7 @@
 import unittest
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -72,6 +73,24 @@ class GoogleSheetsImportTests(unittest.TestCase):
         self.assertEqual([row["stt"] for row in dialog.rows], [1, 2])
         self.assertIn("stt,title,url", dialog.csv_text)
         dialog.deleteLater()
+
+    def test_manual_dialog_keeps_rows_when_one_row_is_invalid(self):
+        dialog = ManualVideoImportDialog()
+        dialog.table.item(0, 0).setText("Good row")
+        dialog.table.item(0, 1).setText("https://www.facebook.com/reel/1")
+        dialog.add_row()
+        dialog.table.item(1, 0).setText("Bad row")
+        dialog.table.item(1, 1).setText("https://example.com/not-facebook")
+        with patch("app.ui.dialogs.manual_video_import_dialog.QMessageBox.warning"):
+            dialog.save_rows()
+        self.assertEqual(dialog.result(), dialog.DialogCode.Rejected)
+        self.assertEqual(dialog.table.item(0, 0).text(), "Good row")
+        self.assertEqual(dialog.table.item(1, 0).text(), "Bad row")
+        restored = ManualVideoImportDialog(rows=[{"ten_video": "Good row", "url": "https://www.facebook.com/reel/1"}])
+        self.assertEqual(restored.table.rowCount(), 1)
+        self.assertEqual(restored.table.item(0, 0).text(), "Good row")
+        dialog.deleteLater()
+        restored.deleteLater()
 
 
 if __name__ == "__main__":

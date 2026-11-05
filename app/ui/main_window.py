@@ -1339,13 +1339,18 @@ class MainWindow(QMainWindow):
     def import_manual_videos(self) -> None:
         if self.current_project is None:
             return
-        dialog = ManualVideoImportDialog(self)
-        if dialog.exec() != ManualVideoImportDialog.DialogCode.Accepted:
-            return
-        self.pending_csv_text = dialog.csv_text
-        self.pending_csv_rows = list(dialog.rows)
-        self.pending_csv_errors = []
-        self.confirm_import()
+        previous_rows: list[dict[str, object]] | None = None
+        while True:
+            dialog = ManualVideoImportDialog(self, rows=previous_rows)
+            if dialog.exec() != ManualVideoImportDialog.DialogCode.Accepted:
+                return
+            self.pending_csv_text = dialog.csv_text
+            self.pending_csv_rows = list(dialog.rows)
+            self.pending_csv_errors = []
+            self.confirm_import()
+            if self.pending_csv_text is None:
+                return
+            previous_rows = list(dialog.rows)
 
     def save_sample_csv(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
