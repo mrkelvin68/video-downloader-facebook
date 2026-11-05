@@ -81,6 +81,36 @@ class FacebookPhase52Tests(unittest.TestCase):
         status = self.service.list_jobs(self.project_id)[0]["status"]
         self.assertEqual(status, "PUBLISHING")
 
+    def test_processing_error_preserves_meta_status_details(self):
+        job_id = self.service.enqueue_from_draft(self.project_id, self.video_id, "page-1")
+        self.service.client = _PublishingClient({
+            "id": "remote-1",
+            "status": {
+                "video_status": "error",
+                "uploading_phase": {"status": "complete"},
+                "processing_phase": {"status": "complete"},
+                "publishing_phase": {"status": "not_started"},
+            },
+        })
+        with patch.object(self.service, "_inspect_video", return_value={"streams": [{"codec_type": "video"}]}):
+            with self.assertRaisesRegex(Exception, "video_status.*error"):
+                self.service.publish(job_id)
+        job = self.service.list_jobs(self.project_id)[0]
+        self.assertEqual(job["status"], "FAILED")
+        self.assertIn("publishing_phase", job["last_error"])
+
+    def test_processing_requires_published_phase_and_normalizes_permalink(self):
+        job_id = self.service.enqueue_from_draft(self.project_id, self.video_id, "page-1")
+        self.service.client = _PublishingClient({
+            "id": "remote-1",
+            "status": {"video_status": "ready", "publishing_phase": {"status": "published"}},
+            "permalink_url": "/reel/remote-1/",
+        })
+        with patch.object(self.service, "_inspect_video", return_value={"streams": [{"codec_type": "video"}]}):
+            result = self.service.publish(job_id)
+        self.assertEqual(result["status"], "PUBLISHED")
+        self.assertEqual(result["published_url"], "https://www.facebook.com/reel/remote-1/")
+
     def test_active_duplicate_is_rejected_before_second_upload(self):
         self.service.enqueue_from_draft(self.project_id, self.video_id, "page-1")
         with self.assertRaises(Exception):

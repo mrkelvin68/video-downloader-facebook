@@ -131,8 +131,34 @@ class MetaGraphPublishingClient:
         )
         payload = self._request(request)
         status = payload.get("status")
-        if isinstance(status, dict) and str(status.get("video_status", "")).lower() in {"error", "failed"}:
-            raise FacebookPublishingError("Meta không xử lý được video.")
+        if isinstance(status, dict):
+            processing = status.get("processing_phase")
+            publishing = status.get("publishing_phase")
+            processing = processing if isinstance(processing, dict) else {}
+            publishing = publishing if isinstance(publishing, dict) else {}
+            video_state = str(status.get("video_status") or processing.get("status") or "").casefold()
+            publish_state = str(
+                publishing.get("status") or publishing.get("publish_status") or ""
+            ).casefold()
+            if video_state in {"error", "failed"} or publish_state in {"error", "failed"}:
+                detail = json.dumps(status, ensure_ascii=False, sort_keys=True)
+                raise FacebookPublishingError(f"Meta processing error: {detail}")
+            if video_state in {"processing", "uploading", "transcoding", "pending"}:
+                raise FacebookPublishingPending("Meta đang xử lý video; chưa thể xác nhận đã đăng.")
+            permalink = str(payload.get("permalink_url") or "").strip()
+            ready_states = {"ready", "complete", "completed"}
+            published_states = {"complete", "completed", "published"}
+            if permalink and not permalink.startswith(("http://", "https://")):
+                permalink = "https://www.facebook.com" + (
+                    permalink if permalink.startswith("/") else "/" + permalink
+                )
+            if not (video_state in ready_states and publish_state in published_states and permalink):
+                raise FacebookPublishingPending(
+                    "Meta đã nhận video nhưng chưa xác nhận hoàn tất xử lý và xuất bản."
+                )
+            if permalink != payload.get("permalink_url"):
+                payload = dict(payload)
+                payload["permalink_url"] = permalink
         return payload
 
     def _request(self, request: Request) -> dict[str, Any]:
@@ -406,13 +432,18 @@ class FacebookPublishingService:
             if state in {"processing", "uploading", "transcoding", "pending"}:
                 raise FacebookPublishingPending("Meta đang xử lý video; chưa thể xác nhận đã đăng.")
             if state in {"error", "failed"}:
-                raise FacebookPublishingError(
-                    "Meta processing error: " + json.dumps(remote_status, ensure_ascii=False, sort_keys=True)
+                message = "Meta processing error: " + json.dumps(
+                    remote_status, ensure_ascii=False, sort_keys=True
                 )
+                self._fail(job_id, message)
+                raise FacebookPublishingError(message)
         post_id = str(remote.get("post_id") or remote.get("id") or upload_id)
         url = remote.get("url") or remote.get("permalink_url")
         if not post_id or not url:
             raise FacebookPublishingPending("Đã nhận video từ Meta nhưng chưa có permalink xác nhận.")
+        url = str(url).strip()
+        if not url.startswith(("http://", "https://")):
+            url = "https://www.facebook.com" + (url if url.startswith("/") else "/" + url)
         with self.database.connection:
             self.database.connection.execute(
                 """UPDATE facebook_publishing_jobs SET status='PUBLISHED',progress=100,
