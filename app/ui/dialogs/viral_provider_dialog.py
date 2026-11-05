@@ -23,7 +23,7 @@ class ViralProviderDialog(QDialog):
         form = QFormLayout()
         self.provider = QComboBox()
         self.provider.addItems(["Apify Facebook Reels Scraper", "Meta Graph API"])
-        self.provider.setCurrentText(viral_settings().value("viral_reels/provider", "Apify Facebook Reels Scraper"))
+        self.provider.setCurrentText(viral_settings().value("viral_reels/provider", "Meta Graph API"))
         self.token = QLineEdit(get_meta_token() if self.provider.currentText() == "Meta Graph API" else get_apify_token())
         self.provider.currentTextChanged.connect(self._provider_changed)
         self.provider_name = self.provider

@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from app.services.meta_graph_provider import MetaGraphReelsProvider
-from app.services.viral_reels_service import PageCandidate, ProviderAuthenticationError
+from app.services.viral_reels_service import DiscoveryRequest, PageCandidate, ProviderAuthenticationError
 
 
 class Response:
@@ -23,7 +23,10 @@ class MetaGraphTests(unittest.TestCase):
         open_url.side_effect = [Response({"id": "u1", "name": "User"}), Response({"id": "1301325469737954", "name": "Gấu Béo Review"}), Response({"data": [{"id": "r1", "permalink_url": "https://facebook.com/reel/1", "created_time": "2026-01-01T00:00:00Z"}]})]
         provider = MetaGraphReelsProvider("secret", page_id="1301325469737954")
         self.assertEqual(provider.test_connection()["page"]["id"], "1301325469737954")
-        self.assertEqual(list(provider.collect_reels(self.page()))[0].reel_id, "r1")
+        reel = list(provider.collect_reels(self.page()))[0]
+        self.assertEqual(reel.reel_id, "r1")
+        self.assertIsNone(reel.views)
+        self.assertIsNone(reel.likes)
         request = open_url.call_args_list[0].args[0]
         self.assertNotIn("access_token", request.full_url)
         self.assertEqual(request.headers["Authorization"], "Bearer secret")
@@ -34,6 +37,27 @@ class MetaGraphTests(unittest.TestCase):
         open_url.side_effect = HTTPError("", 401, "", {}, None)
         with self.assertRaises(ProviderAuthenticationError):
             MetaGraphReelsProvider("bad").test_connection()
+
+    @patch("app.services.meta_graph_provider.urlopen")
+    def test_find_pages_uses_graph_search_and_pagination(self, open_url):
+        open_url.side_effect = [
+            Response({
+                "data": [{"id": "p1", "name": "Page One", "link": "https://facebook.com/page-one"}],
+                "paging": {"next": "https://graph.facebook.com/v26.0/pages/search?after=next"},
+            }),
+            Response({
+                "data": [
+                    {"id": "p1", "name": "Page One", "link": "https://facebook.com/page-one"},
+                    {"id": "p2", "name": "Page Two", "link": "https://facebook.com/page-two"},
+                ],
+            }),
+        ]
+        provider = MetaGraphReelsProvider("secret")
+        pages = list(provider.discover_pages(DiscoveryRequest(keywords=("food",), maximum_pages=2)))
+        self.assertEqual([page.page_id for page in pages], ["p1", "p2"])
+        self.assertTrue(open_url.call_args_list[0].args[0].full_url.startswith("https://graph.facebook.com/v26.0/pages/search?"))
+        self.assertEqual(open_url.call_args_list[1].args[0].full_url, "https://graph.facebook.com/v26.0/pages/search?after=next")
+        self.assertEqual(pages[0].source, "Meta Graph API")
 
 
 if __name__ == "__main__": unittest.main()
