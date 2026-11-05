@@ -1,8 +1,10 @@
 import tempfile
 import unittest
+import io
+import json
 from pathlib import Path
 from unittest.mock import patch
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
 from app.services.facebook_publishing_service import (
@@ -24,7 +26,7 @@ class _ResumableClient(MetaGraphPublishingClient):
             return {"upload_session_id": "session-1", "video_id": "remote-1", "start_offset": "0", "end_offset": "0"}
         return {"success": True, "video_id": "remote-1"}
 
-    def _post_multipart(self, page_id, params, field, data):
+    def _post_multipart(self, page_id, params, field, data, **kwargs):
         self.calls.append(("transfer", params.copy()))
         self.chunk_sizes.append(len(data))
         self.offset += len(data)
@@ -32,8 +34,18 @@ class _ResumableClient(MetaGraphPublishingClient):
 
 
 class _BadOffsetClient(_ResumableClient):
-    def _post_multipart(self, page_id, params, field, data):
+    def _post_multipart(self, page_id, params, field, data, **kwargs):
         return {"start_offset": "0", "end_offset": "0"}
+
+
+class _RequestCaptureClient(MetaGraphPublishingClient):
+    def __init__(self):
+        super().__init__("secret-token")
+        self.requests = []
+
+    def _request(self, request):
+        self.requests.append(request)
+        return {"ok": True}
 
 
 class FacebookLargeUploadTests(unittest.TestCase):
@@ -70,6 +82,28 @@ class FacebookLargeUploadTests(unittest.TestCase):
             with self.assertRaisesRegex(FacebookPublishingError, "URLError"):
                 client._request(request)
         self.assertEqual(client.diagnostics[0]["endpoint"], "/v26.0/page-1/videos")
+        self.assertNotIn("secret-token", str(client.diagnostics))
+
+    def test_upload_uses_graph_video_and_file_part_metadata(self):
+        client = _RequestCaptureClient()
+        client._post_json("page-1", {"upload_phase": "start", "file_size": "3"})
+        client._post_multipart("page-1", {"upload_phase": "transfer"}, "video_file_chunk", b"abc", filename="video.mp4", content_type="video/mp4")
+        self.assertTrue(all("graph-video.facebook.com" in request.full_url for request in client.requests))
+        multipart_request = client.requests[1]
+        body = multipart_request.data
+        self.assertIn(b'filename="video.mp4"', body)
+        self.assertIn(b"Content-Type: video/mp4", body)
+
+    def test_meta_error_code_and_subcode_are_preserved_without_credentials(self):
+        client = MetaGraphPublishingClient("secret-token")
+        request = Request("https://graph-video.facebook.com/v26.0/page-1/videos", method="POST")
+        payload = json.dumps({"error": {"message": "Invalid parameter", "code": 100, "error_subcode": 1363030, "fbtrace_id": "trace-1"}}).encode()
+        error = HTTPError(request.full_url, 400, "bad request", {}, io.BytesIO(payload))
+        with patch("app.services.facebook_publishing_service.urlopen", side_effect=error):
+            with self.assertRaisesRegex(FacebookPublishingError, "100/1363030"):
+                client._request(request)
+        self.assertEqual(client.diagnostics[0]["meta_code"], "100")
+        self.assertEqual(client.diagnostics[0]["meta_subcode"], "1363030")
         self.assertNotIn("secret-token", str(client.diagnostics))
 
 

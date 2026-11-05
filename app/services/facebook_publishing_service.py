@@ -44,6 +44,7 @@ class MetaGraphPublishingClient:
             raise ValueError("Meta Page Access Token is required")
         self.token = page_access_token.strip()
         self.base_url = f"https://graph.facebook.com/{api_version}"
+        self.upload_base_url = f"https://graph-video.facebook.com/{api_version}"
         self.timeout = timeout
         self.diagnostics: list[dict[str, Any]] = []
 
@@ -74,7 +75,7 @@ class MetaGraphPublishingClient:
                 transfer = self._post_multipart(
                     page_id,
                     {"upload_phase": "transfer", "upload_session_id": session_id, "start_offset": str(next_offset)},
-                    "video_file_chunk", chunk,
+                    "video_file_chunk", chunk, filename=path.name, content_type="video/mp4",
                 )
                 confirmed = int(transfer.get("end_offset") or 0)
                 returned_start = int(transfer.get("start_offset") or next_offset)
@@ -104,19 +105,21 @@ class MetaGraphPublishingClient:
 
     def _post_json(self, page_id: str, params: dict[str, str]) -> dict[str, Any]:
         query = {**params, "access_token": self.token}
-        request = Request(f"{self.base_url}/{page_id}/videos?{urlencode(query)}", data=b"", method="POST")
+        request = Request(f"{self.upload_base_url}/{page_id}/videos?{urlencode(query)}", data=b"", method="POST")
         return self._request(request)
 
-    def _post_multipart(self, page_id: str, params: dict[str, str], field: str, data: bytes) -> dict[str, Any]:
+    def _post_multipart(self, page_id: str, params: dict[str, str], field: str, data: bytes,
+                        *, filename: str, content_type: str) -> dict[str, Any]:
         boundary = "----VideoDownloaderFacebookChunk"
         fields = b"".join(
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n".encode()
             for key, value in params.items()
         )
-        body = fields + f"--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"\r\n\r\n".encode() + data + f"\r\n--{boundary}--\r\n".encode()
+        file_header = f"--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n".encode()
+        body = fields + file_header + data + f"\r\n--{boundary}--\r\n".encode()
         query = {"access_token": self.token}
         request = Request(
-            f"{self.base_url}/{page_id}/videos?{urlencode(query)}", data=body, method="POST",
+            f"{self.upload_base_url}/{page_id}/videos?{urlencode(query)}", data=body, method="POST",
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
         return self._request(request)
@@ -134,10 +137,11 @@ class MetaGraphPublishingClient:
 
     def _request(self, request: Request) -> dict[str, Any]:
         endpoint = urlsplit(request.full_url).path
+        method = getattr(request, "method", None) or ("POST" if request.data is not None else "GET")
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-                self.diagnostics.append({"method": request.method or "GET", "endpoint": endpoint, "http_status": response.status, "result": "PASS"})
+                self.diagnostics.append({"method": method, "endpoint": endpoint, "http_status": response.status, "result": "PASS"})
         except HTTPError as exc:
             try:
                 details = json.loads(exc.read().decode("utf-8"))
@@ -146,19 +150,19 @@ class MetaGraphPublishingClient:
             error = details.get("error", {})
             code = str(error.get("code") or "")
             subcode = str(error.get("error_subcode") or "")
-            self.diagnostics.append({"method": request.method or "GET", "endpoint": endpoint, "http_status": exc.code, "meta_code": code or None, "meta_subcode": subcode or None, "fbtrace_id": error.get("fbtrace_id"), "result": "FAILED"})
+            self.diagnostics.append({"method": method, "endpoint": endpoint, "http_status": exc.code, "meta_code": code or None, "meta_subcode": subcode or None, "fbtrace_id": error.get("fbtrace_id"), "result": "FAILED"})
             message = error.get("message", "Meta Graph API request failed")
             if code:
                 message = f"Meta API error code {code}{f'/{subcode}' if subcode else ''}: {message}"
             raise FacebookPublishingError(str(message)) from exc
         except (URLError, TimeoutError, json.JSONDecodeError) as exc:
-            self.diagnostics.append({"method": request.method or "GET", "endpoint": endpoint, "error_type": type(exc).__name__, "result": "FAILED"})
+            self.diagnostics.append({"method": method, "endpoint": endpoint, "error_type": type(exc).__name__, "result": "FAILED"})
             raise FacebookPublishingError(f"Meta Graph API network request failed ({type(exc).__name__}) at {endpoint}.") from exc
         if "error" in payload:
             error = payload["error"]
             code = str(error.get("code") or "")
             subcode = str(error.get("error_subcode") or "")
-            self.diagnostics.append({"method": request.method or "GET", "endpoint": endpoint, "http_status": 200, "meta_code": code or None, "meta_subcode": subcode or None, "fbtrace_id": error.get("fbtrace_id"), "result": "FAILED"})
+            self.diagnostics.append({"method": method, "endpoint": endpoint, "http_status": 200, "meta_code": code or None, "meta_subcode": subcode or None, "fbtrace_id": error.get("fbtrace_id"), "result": "FAILED"})
             message = str(error.get("message", "Meta Graph API error"))
             if code:
                 message = f"Meta API error code {code}{f'/{subcode}' if subcode else ''}: {message}"
@@ -402,7 +406,9 @@ class FacebookPublishingService:
             if state in {"processing", "uploading", "transcoding", "pending"}:
                 raise FacebookPublishingPending("Meta đang xử lý video; chưa thể xác nhận đã đăng.")
             if state in {"error", "failed"}:
-                raise FacebookPublishingError("Meta báo xử lý video thất bại.")
+                raise FacebookPublishingError(
+                    "Meta processing error: " + json.dumps(remote_status, ensure_ascii=False, sort_keys=True)
+                )
         post_id = str(remote.get("post_id") or remote.get("id") or upload_id)
         url = remote.get("url") or remote.get("permalink_url")
         if not post_id or not url:
