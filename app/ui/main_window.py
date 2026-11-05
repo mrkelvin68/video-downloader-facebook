@@ -68,6 +68,16 @@ from app.ui.download_worker import DownloadWorker
 
 APP_DIR = Path.home() / ".video-downloader-facebook"
 DB_PATH = APP_DIR / "projects.sqlite3"
+APIFY_PROVIDER_NAME = "Apify Facebook Reels Scraper"
+
+
+def active_viral_provider_name() -> str:
+    settings = viral_settings()
+    if settings.value("viral_reels/provider", APIFY_PROVIDER_NAME, type=str) == "Meta Graph API":
+        if hasattr(settings, "setValue"):
+            settings.setValue("viral_reels/provider", APIFY_PROVIDER_NAME)
+            settings.sync()
+    return APIFY_PROVIDER_NAME
 
 
 class MainWindow(QMainWindow):
@@ -524,25 +534,22 @@ class MainWindow(QMainWindow):
             self._refresh_viral_provider_status()
 
     def _refresh_viral_provider_status(self) -> None:
-        provider_name = viral_settings().value("viral_reels/provider", "Meta Graph API", type=str)
+        provider_name = active_viral_provider_name()
         provider = self._viral_provider()
         if provider is None:
             self.viral_reels_page.set_provider_status(provider_name, "Not configured", "Unavailable")
             return
-        capabilities = "Find Pages + Scan authorized Pages" if provider_name == "Meta Graph API" else "Find Pages + Scan Page Reels"
+        capabilities = "Find Pages + Scan Page Reels"
         self.viral_reels_page.set_provider_status(provider.name, "Configured; connection unverified", capabilities)
 
     def _viral_provider(self):
-        provider_name = viral_settings().value("viral_reels/provider", "Meta Graph API", type=str)
-        token = get_meta_token() if provider_name == "Meta Graph API" else get_apify_token()
+        token = get_apify_token()
         if not token:
             return None
-        return MetaGraphReelsProvider(token) if provider_name == "Meta Graph API" else ApifyFacebookReelsProvider(token)
+        return ApifyFacebookReelsProvider(token)
 
     def find_viral_pages(self, values: dict) -> None:
-        provider_name = viral_settings().value("viral_reels/provider", "Meta Graph API", type=str)
-        meta = provider_name == "Meta Graph API"
-        token = get_meta_token() if meta else get_apify_token()
+        token = get_apify_token()
         keywords = tuple(item.strip() for item in values.get("keywords", "").split(",") if item.strip())
         maximum = max(1, min(int(values.get("max_results", 50)), 100))
         if not token:
@@ -553,14 +560,14 @@ class MainWindow(QMainWindow):
             self.viral_reels_page.set_busy(False)
             QMessageBox.information(self, "Find Pages", "Enter at least one keyword.")
             return
-        if not meta and QMessageBox.question(self, "Charge approval", "Facebook Page Search may incur Apify charges. Continue?") != QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self, "Charge approval", "Facebook Page Search may incur Apify charges. Continue?") != QMessageBox.StandardButton.Yes:
             self.viral_reels_page.set_busy(False)
             return
 
         def discover(cancel, progress):
             if cancel.is_set():
                 return []
-            provider = MetaGraphReelsProvider(token) if meta else ApifyFacebookPageSearchProvider(token)
+            provider = ApifyFacebookPageSearchProvider(token)
             provider.test_connection()
             progress(0, 1, "Searching Facebook Pages")
             request = DiscoveryRequest(country=values.get("country", "All"), keywords=keywords, maximum_pages=maximum)
@@ -627,9 +634,8 @@ class MainWindow(QMainWindow):
     def _scan_selected_pages(self, values: dict) -> None:
         """Scan the checked Pages with the ACTIVE provider (never depends on hidden data_source)."""
         page = self.viral_reels_page
-        provider_name = viral_settings().value("viral_reels/provider", "Meta Graph API", type=str)
-        meta = provider_name == "Meta Graph API"
-        token = get_meta_token() if meta else get_apify_token()
+        provider_name = active_viral_provider_name()
+        token = get_apify_token()
         if not token:
             page.set_busy(False)
             QMessageBox.information(self, "Provider required", f"Configure the {provider_name} token first (Configure provider).")
@@ -655,7 +661,7 @@ class MainWindow(QMainWindow):
             results_limit = min(max(max_res * 4, 30), ApifyFacebookReelsProvider.MAX_RESULTS_LIMIT)
         else:
             results_limit = max_res
-        if not meta:
+        if provider_name == APIFY_PROVIDER_NAME:
             names = "\n".join(f"• {p.page_name}" for p in pages[:10]) + (f"\n… +{len(pages) - 10} more" if len(pages) > 10 else "")
             answer = QMessageBox.question(
                 self,
@@ -671,16 +677,13 @@ class MainWindow(QMainWindow):
         def collect(cancel, progress):
             store = ViralReelsStore.for_thread(self.database.path)
             try:
-                if meta:
-                    provider = MetaGraphReelsProvider(token)
-                else:
-                    provider = self._build_apify_reels_provider(
-                        token,
-                        results_limit=results_limit,
-                        store=store,
-                        cancel_event=cancel,
-                        progress_callback=progress,
-                    )
+                provider = self._build_apify_reels_provider(
+                    token,
+                    results_limit=results_limit,
+                    store=store,
+                    cancel_event=cancel,
+                    progress_callback=progress,
+                )
                 results, state = ReelsCollectionService(store, provider).collect(pages, filters, cancel)
                 total_collected = state.reels_collected + state.duplicates_skipped
                 return results, list(state.messages), state.errors, total_collected

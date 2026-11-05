@@ -166,13 +166,13 @@ class ScanByPageTests(unittest.TestCase):
         self.assertTrue(any(k == "w" and "boom" in str(t) for k, t in self.msgs))
         self.assertEqual(len(self.page._records), 0)
 
-    def test_meta_provider_selected_no_charge_prompt(self):
+    def test_legacy_meta_setting_falls_back_to_apify(self):
         self.add(PAGE)
         RecordedProvider.data = {PAGE: [reel(3)]}
         with patch.object(mw, "viral_settings", lambda: Settings("Meta Graph API")):
             self.page.scan_reels_button.click()
             self.wait()
-        self.assertFalse(any(k == "q" for k, _ in self.msgs))
+        self.assertTrue(any(k == "q" and "Apify" in text for k, text in self.msgs))
         self.assertEqual(len(self.page._records), 1)
 
     def test_advanced_filters_do_not_hide_selected_page(self):

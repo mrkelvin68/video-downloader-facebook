@@ -3,8 +3,7 @@ from app.ui.pages.viral_reels_page import CancellableWorker
 from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout
 
 from app.services.apify_facebook_provider import ApifyFacebookReelsProvider
-from app.services.meta_graph_provider import MetaGraphReelsProvider
-from app.services.credential_service import delete_apify_token, delete_meta_token, get_apify_token, get_meta_token, set_apify_token, set_meta_token
+from app.services.credential_service import delete_apify_token, get_apify_token, set_apify_token
 
 SETTINGS_ORGANIZATION = "VideoDownloader"
 SETTINGS_APPLICATION = "VideoDownloaderFacebook"
@@ -22,9 +21,13 @@ class ViralProviderDialog(QDialog):
         layout.addWidget(QLabel("Configure authorized provider credentials. Tokens stay in Windows Credential Manager."))
         form = QFormLayout()
         self.provider = QComboBox()
-        self.provider.addItems(["Apify Facebook Reels Scraper", "Meta Graph API"])
-        self.provider.setCurrentText(viral_settings().value("viral_reels/provider", "Meta Graph API"))
-        self.token = QLineEdit(get_meta_token() if self.provider.currentText() == "Meta Graph API" else get_apify_token())
+        self.provider.addItems(["Apify Facebook Reels Scraper"])
+        settings = viral_settings()
+        if settings.value("viral_reels/provider", "Apify Facebook Reels Scraper") == "Meta Graph API":
+            settings.setValue("viral_reels/provider", "Apify Facebook Reels Scraper")
+            settings.sync()
+        self.provider.setCurrentText("Apify Facebook Reels Scraper")
+        self.token = QLineEdit(get_apify_token())
         self.provider.currentTextChanged.connect(self._provider_changed)
         self.provider_name = self.provider
         self.token.setEchoMode(QLineEdit.EchoMode.Password)
@@ -45,11 +48,11 @@ class ViralProviderDialog(QDialog):
         layout.addWidget(buttons)
 
     def _provider_changed(self, name: str) -> None:
-        self.token.setText(get_meta_token() if name == "Meta Graph API" else get_apify_token())
+        self.token.setText(get_apify_token())
         self.provider.setToolTip(name)
 
     def _provider(self, token: str):
-        return MetaGraphReelsProvider(token) if self.provider.currentText() == "Meta Graph API" else ApifyFacebookReelsProvider(token)
+        return ApifyFacebookReelsProvider(token)
 
     def test_connection(self):
         token = self.token.text().strip()
@@ -65,7 +68,7 @@ class ViralProviderDialog(QDialog):
 
     def delete_token(self):
         try:
-            (delete_meta_token if self.provider.currentText() == "Meta Graph API" else delete_apify_token)()
+            delete_apify_token()
         except Exception as error:
             self.status.setText(f"Credential storage failed: {error}")
             return
@@ -77,7 +80,7 @@ class ViralProviderDialog(QDialog):
         token = self.token.text().strip()
         try:
             if token:
-                (set_meta_token if provider_name == "Meta Graph API" else set_apify_token)(token)
+                set_apify_token(token)
             settings = viral_settings()
             settings.setValue("viral_reels/provider", provider_name)
             settings.sync()
