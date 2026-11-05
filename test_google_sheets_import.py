@@ -34,6 +34,13 @@ class GoogleSheetsImportTests(unittest.TestCase):
         self.assertIn("URL trùng", errors[0])
         self.assertEqual(csv_text, "")
 
+    def test_google_sheet_stt_column_is_ignored_and_auto_numbered(self):
+        _, rows, errors, _ = parse_google_sheet_csv(
+            "stt,title,url\n999,First,https://www.facebook.com/reel/1\ninvalid,Second,https://www.facebook.com/reel/2\n"
+        )
+        self.assertFalse(errors)
+        self.assertEqual([row["stt"] for row in rows], [1, 2])
+
     def test_missing_url_column_is_reported(self):
         _, rows, errors, stats = parse_google_sheet_csv("title\nVideo 1\n")
         self.assertEqual(rows, [])

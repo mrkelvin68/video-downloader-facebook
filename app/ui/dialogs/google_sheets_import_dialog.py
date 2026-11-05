@@ -89,7 +89,7 @@ class GoogleSheetsImportDialog(QDialog):
             f"URL không hợp lệ: {stats['invalid']} · URL trùng: {stats['duplicates']} · "
             f"Sẽ thêm: {len(self.rows) if not self.errors else 0}"
         )
-        preview_rows = [f"{row['stt']} | {row['ten_video']} | {row['url']}" for row in self.rows[:30]]
+        preview_rows = [f"{row['ten_video']} | {row['url']}" for row in self.rows[:30]]
         if self.errors:
             preview_rows.append("\nLỗi theo dòng:")
             preview_rows.extend(self.errors[:30])

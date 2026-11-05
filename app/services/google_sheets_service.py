@@ -66,7 +66,7 @@ def rows_to_video_csv(rows: list[Mapping[str, object]]) -> str:
 def parse_google_sheet_csv(text: str) -> tuple[str, list[dict[str, object]], list[str], dict[str, int]]:
     reader = csv.DictReader(io.StringIO(text.lstrip("\ufeff"), newline=""))
     headers = [str(header or "").strip().lower() for header in (reader.fieldnames or [])]
-    aliases = {"sequence": "stt", "order": "stt", "title": "ten_video", "name": "ten_video", "video_url": "url"}
+    aliases = {"title": "ten_video", "name": "ten_video", "video_url": "url"}
     headers = [aliases.get(header, header) for header in headers]
     if "url" not in headers:
         return "", [], ["Google Sheets thiếu cột bắt buộc: url"], {"total": 0, "valid": 0, "invalid": 0, "duplicates": 0}
@@ -77,7 +77,6 @@ def parse_google_sheet_csv(text: str) -> tuple[str, list[dict[str, object]], lis
     rows: list[dict[str, object]] = []
     errors: list[str] = []
     seen_urls: set[str] = set()
-    seen_stt: set[int] = set()
     total = duplicates = 0
     for line, raw in enumerate(reader, 2):
         if not raw or all(not str(value or "").strip() for value in raw.values()):
@@ -85,13 +84,9 @@ def parse_google_sheet_csv(text: str) -> tuple[str, list[dict[str, object]], lis
         total += 1
         values = list(raw.values())
         normalized_row = {header: str(values[index] or "") for index, header in enumerate(headers)}
-        raw_stt = normalized_row.get("stt", "").strip() or str(total)
+        stt = total
         title = normalized_row.get("ten_video", "").strip() or f"Video {total}"
         url = normalized_row.get("url", "").strip()
-        if not raw_stt.isdecimal() or int(raw_stt) < 1:
-            errors.append(f"Dòng {line}: stt phải là số nguyên dương")
-            continue
-        stt = int(raw_stt)
         normalized = normalize_video_url(url) if url else ""
         if normalized in seen_urls:
             errors.append(f"Dòng {line}: URL trùng")
@@ -102,11 +97,7 @@ def parse_google_sheet_csv(text: str) -> tuple[str, list[dict[str, object]], lis
         if row_errors:
             errors.extend(f"Dòng {line}: {error.split(': ', 1)[-1]}" for error in row_errors)
             continue
-        if stt in seen_stt:
-            errors.append(f"Dòng {line}: stt trùng")
-            continue
         seen_urls.add(normalized)
-        seen_stt.add(stt)
         rows.extend(parsed_rows)
 
     stats = {"total": total, "valid": len(rows), "invalid": total - len(rows), "duplicates": duplicates}
