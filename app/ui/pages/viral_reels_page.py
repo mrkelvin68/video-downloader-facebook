@@ -120,6 +120,7 @@ class ViralReelsPage(QWidget):
     pageAddRequested = Signal(str)
     pagesImportRequested = Signal(str)
     pagesDeleteRequested = Signal(list)
+    foundPagesDeleteRequested = Signal(list)
     exportPagesCsvRequested = Signal(list)
     recoverRunRequested = Signal()
     filtersChanged = Signal(dict)
@@ -441,10 +442,11 @@ class ViralReelsPage(QWidget):
         self.copy_url_button = self._button("Copy Page URL", "secondary", self.copy_found_urls)
         self.export_pages_button = self._button("Export CSV", "secondary", self._export_pages_csv)
         self.export_selected_button = self._button("Export Selected", "secondary", lambda: self._export_pages_csv(True))
+        self.delete_found_button = self._button("Delete Selected", "danger", self._delete_found_pages)
         for widget in (self.found_count, self.select_all_box):
             actions.addWidget(widget)
         actions.addStretch()
-        for widget in (self.copy_url_button, self.export_selected_button, self.export_pages_button):
+        for widget in (self.copy_url_button, self.export_selected_button, self.export_pages_button, self.delete_found_button):
             actions.addWidget(widget)
         box.addLayout(actions)
         self._update_found_actions()
@@ -490,6 +492,7 @@ class ViralReelsPage(QWidget):
         self.export_pages_button.setEnabled(total > 0)
         self.export_selected_button.setEnabled(selected > 0)
         self.copy_url_button.setEnabled(total > 0)
+        self.delete_found_button.setEnabled(selected > 0)
 
     def _select_all_found(self, checked: bool) -> None:
         state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
@@ -512,6 +515,27 @@ class ViralReelsPage(QWidget):
         rows = self.found_records(selected_only is True)
         if rows:
             self.exportPagesCsvRequested.emit(rows)
+
+    def _delete_found_pages(self) -> None:
+        rows = [
+            {key: self.found_model.item(row, column).text()
+             for column, (_, key) in enumerate(self.PAGE_COLUMNS) if column}
+            for row in range(self.found_model.rowCount())
+            if self.found_model.item(row, 0).checkState() == Qt.CheckState.Checked
+        ]
+        if rows and QMessageBox.question(
+            self, "Delete Pages", f"Delete {len(rows)} selected Page(s) from Find Pages results?"
+        ) == QMessageBox.StandardButton.Yes:
+            self.foundPagesDeleteRequested.emit(rows)
+
+    def remove_found_pages(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        identities = {(str(row.get("page_id") or ""), str(row.get("page_url") or "")) for row in rows}
+        for model_row in range(self.found_model.rowCount() - 1, -1, -1):
+            identity = (self.found_model.item(model_row, 3).text(), self.found_model.item(model_row, 2).text())
+            if identity in identities:
+                self.found_model.removeRow(model_row)
+        self.select_all_box.setChecked(False)
+        self._update_found_actions()
 
     def _find_mode_toggled(self, checked: bool) -> None:
         self.stack.setCurrentIndex(0 if checked else 1)
@@ -732,6 +756,10 @@ class ViralReelsPage(QWidget):
         self.scan_reels_button.setEnabled(not busy)
         self.recover_run_button.setEnabled(not busy)
         self.stop_button.setEnabled(busy)
+        if busy:
+            self.delete_pages_button.setEnabled(False)
+        else:
+            self._update_scan_pages_state()
 
     def set_progress(self, pages_done: int, pages_total: int, reels_done: int, reels_total: int) -> None:
         self.progress_label.setText(

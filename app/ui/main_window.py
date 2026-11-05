@@ -199,6 +199,7 @@ class MainWindow(QMainWindow):
         self.viral_reels_page.pageAddRequested.connect(self.add_viral_page)
         self.viral_reels_page.pagesImportRequested.connect(self.import_viral_pages)
         self.viral_reels_page.pagesDeleteRequested.connect(self.delete_viral_pages)
+        self.viral_reels_page.foundPagesDeleteRequested.connect(self.delete_found_viral_pages)
         self.viral_reels_page.filtersChanged.connect(self.apply_stored_viral_reels_filters)
         self.load_viral_pages()
         self.apply_stored_viral_reels_filters()
@@ -514,6 +515,10 @@ class MainWindow(QMainWindow):
         store.delete_pages(urls)
         self.load_viral_pages()
 
+    def delete_found_viral_pages(self, rows: list) -> None:
+        # Find Pages results are a view-level list; do not delete saved Pages.
+        self.viral_reels_page.remove_found_pages(rows)
+
     def configure_viral_provider(self) -> None:
         if ViralProviderDialog(self).exec() == ViralProviderDialog.DialogCode.Accepted:
             self._refresh_viral_provider_status()
@@ -564,7 +569,11 @@ class MainWindow(QMainWindow):
                 store.close()
 
         def show_pages(pages):
-            self.load_viral_pages()
+            self.viral_reels_page.set_found_pages([
+                {"page_name": page.page_name, "page_url": page.page_url,
+                 "page_id": page.page_id, "data_source": page.source}
+                for page in pages
+            ])
             self.viral_reels_page.set_progress(0, 0, 0, 0)
             if not pages:
                 QMessageBox.information(self, "Find Pages", "No Facebook Pages found.")
