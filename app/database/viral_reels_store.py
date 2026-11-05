@@ -111,8 +111,22 @@ class ViralReelsStore:
         if not page_urls:
             return 0
         with self.connection:
+            page_rows = self.connection.execute(
+                "SELECT page_id FROM discovered_pages WHERE page_url IN ({})".format(
+                    ",".join("?" for _ in page_urls)
+                ),
+                tuple(page_urls),
+            ).fetchall()
+            page_ids = [str(row["page_id"]) for row in page_rows]
+            if page_ids:
+                self.connection.execute(
+                    "DELETE FROM reels WHERE page_id IN ({}) OR page_url IN ({})".format(
+                        ",".join("?" for _ in page_ids), ",".join("?" for _ in page_urls)
+                    ),
+                    tuple(page_ids) + tuple(page_urls),
+                )
             cursor = self.connection.executemany(
-                "UPDATE discovered_pages SET is_saved=0 WHERE page_url=? AND is_saved=1",
+                "DELETE FROM discovered_pages WHERE page_url=?",
                 ((url,) for url in page_urls),
             )
         return cursor.rowcount
