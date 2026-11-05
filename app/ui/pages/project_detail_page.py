@@ -52,6 +52,7 @@ class ProjectDetailPage(QWidget):
     facebookJobErrorRequested = Signal(str)
     facebookJobCancelRequested = Signal(str)
     facebookJobOpenRequested = Signal(str)
+    facebookJobDeleteRequested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -248,7 +249,9 @@ class ProjectDetailPage(QWidget):
         self.facebook_cancel_job_button.clicked.connect(self._cancel_selected_job)
         self.facebook_open_job_button = QPushButton("Mở bài đăng")
         self.facebook_open_job_button.clicked.connect(self._open_selected_job)
-        for button in (self.facebook_reconcile_button, self.facebook_error_button, self.facebook_retry_button, self.facebook_cancel_job_button, self.facebook_open_job_button): job_actions.addWidget(button)
+        self.facebook_delete_job_button = QPushButton("Xóa lịch sử")
+        self.facebook_delete_job_button.clicked.connect(self._delete_selected_job)
+        for button in (self.facebook_reconcile_button, self.facebook_error_button, self.facebook_retry_button, self.facebook_cancel_job_button, self.facebook_open_job_button, self.facebook_delete_job_button): job_actions.addWidget(button)
         job_actions.addStretch(); history_layout.addLayout(job_actions); layout.addWidget(history)
         self._update_job_actions()
 
@@ -302,6 +305,20 @@ class ProjectDetailPage(QWidget):
         video_id = item.data(Qt.ItemDataRole.UserRole) if item else None
         if video_id:
             video_id = str(video_id)
+            jobs = self.facebook_jobs_by_video.get(video_id, [])
+            if jobs:
+                latest = jobs[0]
+                state = str(latest.get("display_status") or latest.get("status") or "")
+                self.facebook_job_table.selectRow(0)
+                if state in {"PROCESSING", "PUBLISHING", "UNRESOLVED"}:
+                    self.facebookJobReconcileRequested.emit(str(latest["id"]))
+                    return
+                if state == "FAILED":
+                    self.facebookJobRetryRequested.emit(str(latest["id"]))
+                    return
+                if state == "PUBLISHED" and latest.get("published_url"):
+                    self.facebookJobOpenRequested.emit(str(latest["published_url"]))
+                    return
             self.facebookPublishNowRequested.emit({"video_id": video_id, "page_id": self.facebook_page_combo.currentData(), "file_path": self.facebook_file_paths.get(video_id)})
 
     def _load_selected_facebook_draft(self) -> None:
@@ -343,6 +360,7 @@ class ProjectDetailPage(QWidget):
         self.facebook_retry_button.setEnabled(state in {"FAILED", "UNRESOLVED"})
         self.facebook_cancel_job_button.setEnabled(state == "PENDING")
         self.facebook_open_job_button.setEnabled(bool(job and job.get("published_url")))
+        self.facebook_delete_job_button.setEnabled(state in {"FAILED", "CANCELLED"})
 
     def _reconcile_selected_job(self) -> None:
         job_id = self._selected_job_id()
@@ -368,6 +386,11 @@ class ProjectDetailPage(QWidget):
         job = self._selected_job()
         if job and job.get("published_url"):
             self.facebookJobOpenRequested.emit(str(job["published_url"]))
+
+    def _delete_selected_job(self) -> None:
+        job_id = self._selected_job_id()
+        if job_id:
+            self.facebookJobDeleteRequested.emit(job_id)
 
     def _render_facebook_jobs(self, jobs: list[dict]) -> None:
         self.facebook_job_table.setRowCount(0)
@@ -423,13 +446,23 @@ class ProjectDetailPage(QWidget):
     def _update_publish_button(self) -> None:
         row = self._selected_facebook_row()
         ready = row >= 0 and bool(self.facebook_page_combo.currentData())
+        state = ""
         if ready:
             ready = self.facebook_table.item(row, 6).text() == "READY"
             ready = ready and self.facebook_table.item(row, 4).text() != "Không tìm thấy file video"
             video_item = self.facebook_table.item(row, 2)
             video_id = str(video_item.data(Qt.ItemDataRole.UserRole)) if video_item else ""
-            if self.facebook_jobs_by_video.get(video_id):
-                ready = False
+            jobs = self.facebook_jobs_by_video.get(video_id, [])
+            latest = jobs[0] if jobs else {}
+            state = str(latest.get("display_status") or latest.get("status") or "")
+        if state in {"PROCESSING", "PUBLISHING", "UNRESOLVED"}:
+            self.facebook_publish_button.setText("Kiểm tra trạng thái Meta")
+        elif state == "FAILED":
+            self.facebook_publish_button.setText("Đăng lại")
+        elif state == "PUBLISHED":
+            self.facebook_publish_button.setText("Mở bài đăng")
+        else:
+            self.facebook_publish_button.setText("Đăng ngay")
         self.facebook_publish_button.setEnabled(ready and not self.facebook_publish_button.is_loading)
 
     def set_project(self, project: Project) -> None:

@@ -408,6 +408,15 @@ class FacebookPublishingService:
             raise FacebookPublishingError("Chỉ có thể hủy job đang chờ đăng.")
         self._set_status(job_id, "CANCELLED")
 
+    def delete_job_history(self, job_id: str) -> None:
+        job = self.get_job(job_id)
+        if job is None:
+            raise FacebookPublishingError("Không tìm thấy job xuất bản.")
+        if job["status"] not in {"FAILED", "CANCELLED"}:
+            raise FacebookPublishingError("Chỉ có thể xóa lịch sử job FAILED hoặc CANCELLED.")
+        with self.database.connection:
+            self.database.connection.execute("DELETE FROM facebook_publishing_jobs WHERE id=?", (job_id,))
+
     def retry_job(self, job_id: str, *, risk_confirmed: bool = False) -> str:
         old = self.get_job(job_id)
         if old is None:

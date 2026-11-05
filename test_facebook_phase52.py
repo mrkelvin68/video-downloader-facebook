@@ -243,6 +243,19 @@ class FacebookPhase52Tests(unittest.TestCase):
         self.assertEqual(self.service.get_job(old_id)["display_status"], "UNRESOLVED")
         self.assertEqual(self.service.get_job(new_id)["retry_of_job_id"], old_id)
 
+    def test_delete_history_only_removes_terminal_failed_job(self):
+        job_id = self.service.enqueue_from_draft(self.project_id, self.video_id, "page-1")
+        with self.database.connection:
+            self.database.connection.execute("UPDATE facebook_publishing_jobs SET status='FAILED' WHERE id=?", (job_id,))
+        self.service.delete_job_history(job_id)
+        self.assertIsNone(self.service.get_job(job_id))
+
+    def test_delete_history_does_not_remove_processing_job(self):
+        job_id = self.service.enqueue_from_draft(self.project_id, self.video_id, "page-1")
+        with self.assertRaisesRegex(Exception, "FAILED hoặc CANCELLED"):
+            self.service.delete_job_history(job_id)
+        self.assertIsNotNone(self.service.get_job(job_id))
+
 
 if __name__ == "__main__":
     unittest.main()

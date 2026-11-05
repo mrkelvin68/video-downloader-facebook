@@ -230,6 +230,7 @@ class MainWindow(QMainWindow):
         self.detail_page.facebookJobErrorRequested.connect(self._show_facebook_job_error)
         self.detail_page.facebookJobCancelRequested.connect(self._cancel_facebook_job)
         self.detail_page.facebookJobOpenRequested.connect(lambda url: QDesktopServices.openUrl(QUrl(url)))
+        self.detail_page.facebookJobDeleteRequested.connect(self._delete_facebook_job_history)
         self.sidebar.projectsRequested.connect(self.show_projects)
         self.sidebar.queueRequested.connect(self.show_queue)
         self.sidebar.viralReelsRequested.connect(self.show_viral_reels)
@@ -708,6 +709,24 @@ class MainWindow(QMainWindow):
             self._refresh_facebook()
         except FacebookPublishingError as exc:
             QMessageBox.warning(self, "Hủy publishing job", str(exc))
+
+    def _delete_facebook_job_history(self, job_id: str) -> None:
+        job = self.facebook_publishing.get_job(job_id)
+        if job is None:
+            return
+        confirmation = QMessageBox.question(
+            self, "Xóa lịch sử publishing",
+            f"Xóa lịch sử job FAILED/CANCELLED này?\nJob: {job_id}\nFile: {job.get('local_file_path')}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirmation != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.facebook_publishing.delete_job_history(job_id)
+            self._refresh_facebook()
+        except FacebookPublishingError as exc:
+            QMessageBox.warning(self, "Xóa lịch sử publishing", str(exc))
 
     def _retry_facebook_job(self, job_id: str) -> None:
         if self.current_project is None or self._facebook_publish_worker is not None:
