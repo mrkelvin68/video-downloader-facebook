@@ -10,6 +10,7 @@ from app.database.connection import Database
 from app.services.project_service import ProjectService
 from app.services.video_service import VideoService
 from app.ui.pages.project_detail_page import ProjectDetailPage
+from app.ui.dialogs.manual_video_import_dialog import ManualVideoImportDialog
 
 
 class GoogleSheetsImportTests(unittest.TestCase):
@@ -51,14 +52,26 @@ class GoogleSheetsImportTests(unittest.TestCase):
             self.assertEqual([row["sequence_number"] for row in database.list_videos(project_id)], [1, 2])
             database.close()
 
-    def test_drop_zone_click_emits_csv_selection_without_dialog_logic(self):
+    def test_manual_import_button_emits_request(self):
         page = ProjectDetailPage()
         selected = []
-        page.csvChosen.connect(lambda: selected.append(True))
-        page.drop_zone.show()
-        QTest.mouseClick(page.drop_zone, Qt.MouseButton.LeftButton)
+        page.manualImportRequested.connect(lambda: selected.append(True))
+        QTest.mouseClick(page.manual_import_button, Qt.MouseButton.LeftButton)
         self.assertEqual(selected, [True])
         page.deleteLater()
+
+    def test_manual_dialog_saves_title_url_and_auto_numbers_rows(self):
+        dialog = ManualVideoImportDialog()
+        dialog.table.item(0, 0).setText("First")
+        dialog.table.item(0, 1).setText("https://www.facebook.com/reel/1")
+        dialog.add_row()
+        dialog.table.item(1, 0).setText("Second")
+        dialog.table.item(1, 1).setText("https://www.facebook.com/reel/2")
+        dialog.save_rows()
+        self.assertEqual(dialog.result(), dialog.DialogCode.Accepted)
+        self.assertEqual([row["stt"] for row in dialog.rows], [1, 2])
+        self.assertIn("stt,title,url", dialog.csv_text)
+        dialog.deleteLater()
 
 
 if __name__ == "__main__":

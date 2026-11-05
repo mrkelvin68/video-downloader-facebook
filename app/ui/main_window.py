@@ -53,6 +53,7 @@ from app.services.credential_service import get_apify_token, get_meta_token
 from app.ui.dialogs.viral_provider_dialog import ViralProviderDialog, viral_settings
 from app.ui.dialogs.csv_preview_dialog import CsvPreviewDialog
 from app.ui.dialogs.google_sheets_import_dialog import GoogleSheetsImportDialog
+from app.ui.dialogs.manual_video_import_dialog import ManualVideoImportDialog
 from app.ui.dialogs.matrix_configuration_dialog import (
     MatrixConfigurationDialog,
     MatrixEntryDialog,
@@ -218,10 +219,7 @@ class MainWindow(QMainWindow):
         self.viral_reels_page.exportCsvRequested.connect(self.export_viral_reels_csv)
         self.viral_reels_page.exportPagesCsvRequested.connect(self.export_viral_pages_csv)
         self.viral_reels_page.exportExcelRequested.connect(self.export_viral_reels_xlsx)
-        self.detail_page.csvChosen.connect(self.choose_csv)
-        self.detail_page.csvDropped.connect(self.load_csv)
-        self.detail_page.googleSheetsRequested.connect(self.import_google_sheets)
-        self.detail_page.sampleRequested.connect(self.save_sample_csv)
+        self.detail_page.manualImportRequested.connect(self.import_manual_videos)
         self.detail_page.exportRequested.connect(self.export_csv)
         self.detail_page.runNowRequested.connect(self.run_now)
         self.detail_page.enqueueRequested.connect(self.add_selected_to_queue)
@@ -1328,6 +1326,17 @@ class MainWindow(QMainWindow):
             return
         dialog = GoogleSheetsImportDialog(self)
         if dialog.exec() != GoogleSheetsImportDialog.DialogCode.Accepted:
+            return
+        self.pending_csv_text = dialog.csv_text
+        self.pending_csv_rows = list(dialog.rows)
+        self.pending_csv_errors = []
+        self.confirm_import()
+
+    def import_manual_videos(self) -> None:
+        if self.current_project is None:
+            return
+        dialog = ManualVideoImportDialog(self)
+        if dialog.exec() != ManualVideoImportDialog.DialogCode.Accepted:
             return
         self.pending_csv_text = dialog.csv_text
         self.pending_csv_rows = list(dialog.rows)
