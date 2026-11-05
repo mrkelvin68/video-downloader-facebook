@@ -370,6 +370,42 @@ class FacebookPublishingService:
                    WHERE id=? AND status='FAILED'""", (_now(), job_id)
             )
 
+    def reconcile_meta_failure(self, job_id: str, remote_status: dict[str, Any],
+                               diagnostics: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Persist a confirmed terminal Meta failure without creating a new upload."""
+        job = self.database.connection.execute(
+            "SELECT id,remote_video_id,page_id,status FROM facebook_publishing_jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+        if job is None:
+            raise FacebookPublishingError("Không tìm thấy job xuất bản.")
+        remote_id = str(remote_status.get("id") or "")
+        if remote_id and job["remote_video_id"] and remote_id != str(job["remote_video_id"]):
+            raise FacebookPublishingError("Remote Video ID không khớp job cần reconcile.")
+        status = remote_status.get("status") if isinstance(remote_status.get("status"), dict) else {}
+        video_state = str(status.get("video_status") or "").casefold()
+        processing = status.get("processing_phase") if isinstance(status.get("processing_phase"), dict) else {}
+        publishing = status.get("publishing_phase") if isinstance(status.get("publishing_phase"), dict) else {}
+        if video_state not in {"error", "failed"} and not any(
+            str(phase.get("status") or "").casefold() in {"error", "failed"}
+            for phase in (processing, publishing)
+        ):
+            raise FacebookPublishingError("Meta chưa xác nhận lỗi terminal cho job.")
+        error = {
+            "reason": "META_PROCESSING_FAILED",
+            "remote_status": remote_status,
+            "diagnostics": diagnostics or {},
+            "occurred_at": _now(),
+        }
+        with self.database.connection:
+            self.database.connection.execute(
+                "UPDATE facebook_publishing_jobs SET status='FAILED',last_error=?,updated_at=? WHERE id=?",
+                (json.dumps(error, ensure_ascii=False, sort_keys=True), _now(), job_id),
+            )
+        return dict(self.database.connection.execute(
+            "SELECT * FROM facebook_publishing_jobs WHERE id=?", (job_id,)
+        ).fetchone())
+
     def due_jobs(self, project_id: str, now: datetime | None = None) -> list[dict[str, Any]]:
         moment = (now or datetime.now(UTC)).astimezone(UTC).isoformat(timespec="seconds")
         return [dict(row) for row in self.database.connection.execute(

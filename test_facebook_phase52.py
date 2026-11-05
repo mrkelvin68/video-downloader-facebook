@@ -150,6 +150,23 @@ class FacebookPhase52Tests(unittest.TestCase):
         self.assertEqual(client.uploaded, [])
         self.assertEqual(self.service.list_jobs(self.project_id)[0]["status"], "FAILED")
 
+    def test_reconcile_meta_failure_preserves_remote_identifiers(self):
+        job_id = self.service.enqueue_from_draft(self.project_id, self.video_id, "page-1")
+        with self.database.connection:
+            self.database.connection.execute(
+                "UPDATE facebook_publishing_jobs SET status='PUBLISHING', remote_video_id=?, upload_session_id=? WHERE id=?",
+                ("remote-av1", "session-av1", job_id),
+            )
+        result = self.service.reconcile_meta_failure(
+            job_id,
+            {"id": "remote-av1", "status": {"video_status": "error", "processing_phase": {"status": "complete"}}},
+            {"http_status": 200, "endpoint": "/v26.0/remote-av1", "result": "PASS"},
+        )
+        self.assertEqual(result["status"], "FAILED")
+        self.assertEqual(result["remote_video_id"], "remote-av1")
+        self.assertEqual(result["upload_session_id"], "session-av1")
+        self.assertIn("META_PROCESSING_FAILED", result["last_error"])
+
 
 if __name__ == "__main__":
     unittest.main()
