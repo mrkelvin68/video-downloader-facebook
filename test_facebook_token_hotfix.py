@@ -15,11 +15,28 @@ class FacebookTokenHotfixTests(unittest.TestCase):
         with patch.object(client, "_get", side_effect=[
             {"id": "page-1", "name": "Page 1"},
             discovery_error,
+            {"id": "page-1", "name": "Page 1", "link": "https://facebook.com/page-1"},
             {"id": "page-1", "name": "Page 1", "tasks": ["CREATE_CONTENT"]},
         ]):
             pages = client.validate_and_list_pages()
         self.assertEqual(pages[0]["id"], "page-1")
         self.assertEqual(pages[0]["access_token"], "page-token")
+
+    def test_page_identity_success_is_not_false_expiration_when_accounts_returns_190(self):
+        client = MetaFacebookConnectionClient("page-token")
+        accounts_error = FacebookConnectionError(
+            "Access Token expired", category="expired", code="190", subcode="463"
+        )
+        optional_error = FacebookConnectionError("permission", category="permission", code="200")
+        with patch.object(client, "_get", side_effect=[
+            {"id": "page-1", "name": "Page 1"},
+            accounts_error,
+            {"id": "page-1", "name": "Page 1", "link": "https://facebook.com/page-1"},
+            optional_error,
+        ]):
+            pages = client.validate_and_list_pages()
+        self.assertEqual(pages[0]["id"], "page-1")
+        self.assertEqual(pages[0]["permissions"], [])
 
     def test_user_token_uses_accounts_discovery(self):
         client = MetaFacebookConnectionClient("user-token")

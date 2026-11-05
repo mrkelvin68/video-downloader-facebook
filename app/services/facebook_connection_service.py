@@ -17,9 +17,16 @@ REQUIRED_PERMISSIONS = {"pages_show_list", "pages_read_engagement", "pages_manag
 
 
 class FacebookConnectionError(FacebookPublishingError):
-    def __init__(self, message: str, *, category: str = "api") -> None:
+    def __init__(self, message: str, *, category: str = "api", code: str | None = None,
+                 subcode: str | None = None, error_type: str | None = None,
+                 http_status: int | None = None, fbtrace_id: str | None = None) -> None:
         super().__init__(message)
         self.category = category
+        self.code = code
+        self.subcode = subcode
+        self.error_type = error_type
+        self.http_status = http_status
+        self.fbtrace_id = fbtrace_id
 
 
 class MetaFacebookConnectionClient:
@@ -27,6 +34,7 @@ class MetaFacebookConnectionClient:
         self.token = token.strip()
         self.base_url = f"https://graph.facebook.com/{api_version}"
         self.timeout = timeout
+        self.diagnostics: list[dict[str, Any]] = []
         if not self.token:
             raise FacebookConnectionError("Vui lòng nhập Access Token hợp lệ.")
 
@@ -59,18 +67,25 @@ class MetaFacebookConnectionClient:
             raise FacebookConnectionError("Token hợp lệ nhưng không có Fanpage được cấp quyền.")
         return pages
 
-    def _get_page_identity(self, page_id: str) -> dict[str, Any] | None:
+    def _get_page_identity(self, page_id: str, *, raise_errors: bool = False) -> dict[str, Any] | None:
         if not page_id:
             return None
         try:
-            page = self._get(page_id, fields="id,name,link,tasks,perms")
+            page = self._get(page_id, fields="id,name,link")
         except FacebookConnectionError:
+            if raise_errors:
+                raise
             return None
         if str(page.get("id") or "") != page_id or not page.get("name"):
             return None
-        permissions = page.get("perms") or page.get("tasks") or []
-        if not permissions:
-            return None
+        permissions: list[Any] = []
+        try:
+            permission_payload = self._get(page_id, fields="tasks,perms")
+            permissions = permission_payload.get("perms") or permission_payload.get("tasks") or []
+        except FacebookConnectionError:
+            # Page identity is sufficient for connection. Publishing access is
+            # reported separately and must not turn into token expiration.
+            permissions = []
         return {
             "id": page_id,
             "name": str(page["name"]),
@@ -87,9 +102,11 @@ class MetaFacebookConnectionClient:
     def _get(self, path: str, **params: Any) -> dict[str, Any]:
         query = {**params, "access_token": self.token}
         request = Request(f"{self.base_url}/{path}?{urlencode(query)}", headers={"Accept": "application/json"})
+        endpoint = f"/{path}"
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
+                self.diagnostics.append({"method": "GET", "endpoint": endpoint, "http_status": response.status, "result": "PASS"})
         except HTTPError as exc:
             try:
                 payload = json.loads(exc.read().decode("utf-8"))
@@ -98,22 +115,26 @@ class MetaFacebookConnectionClient:
             message = payload.get("error", {}).get("message", "Meta Graph API request failed")
             error_code = str(payload.get("error", {}).get("code"))
             category = "expired" if exc.code == 401 or error_code == "190" else "permission" if exc.code in {403} or error_code in {"10", "200"} else "api"
+            error = payload.get("error", {})
+            self.diagnostics.append({"method": "GET", "endpoint": endpoint, "http_status": exc.code, "meta_code": error_code, "meta_subcode": str(error.get("error_subcode") or "") or None, "meta_type": error.get("type"), "fbtrace_id": error.get("fbtrace_id"), "result": "FAILED"})
             friendly = {
                 "expired": "Access Token đã hết hạn hoặc bị thu hồi.",
                 "permission": "Token hợp lệ nhưng không có quyền đăng bài hoặc lấy Fanpage.",
             }.get(category, str(message))
-            raise FacebookConnectionError(friendly, category=category) from exc
+            raise FacebookConnectionError(friendly, category=category, code=error_code, subcode=str(error.get("error_subcode") or "") or None, error_type=error.get("type"), http_status=exc.code, fbtrace_id=error.get("fbtrace_id")) from exc
         except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+            self.diagnostics.append({"method": "GET", "endpoint": endpoint, "result": "FAILED", "error": "network"})
             raise FacebookConnectionError("Không thể kết nối Meta Graph API.", category="network") from exc
         if "error" in payload:
             error = payload["error"]
             error_code = str(error.get("code"))
             category = "expired" if error_code == "190" else "permission" if error_code in {"10", "200"} else "api"
+            self.diagnostics.append({"method": "GET", "endpoint": endpoint, "http_status": 200, "meta_code": error_code, "meta_subcode": str(error.get("error_subcode") or "") or None, "meta_type": error.get("type"), "fbtrace_id": error.get("fbtrace_id"), "result": "FAILED"})
             friendly = {
                 "expired": "Access Token đã hết hạn hoặc bị thu hồi.",
                 "permission": "Token hợp lệ nhưng không có quyền đăng bài hoặc lấy Fanpage.",
             }.get(category, str(error.get("message", "Meta Graph API error")))
-            raise FacebookConnectionError(friendly, category=category)
+            raise FacebookConnectionError(friendly, category=category, code=error_code, subcode=str(error.get("error_subcode") or "") or None, error_type=error.get("type"), http_status=200, fbtrace_id=error.get("fbtrace_id"))
         return payload
 
 
@@ -144,9 +165,9 @@ class FacebookConnectionService:
         for stored in stored_pages:
             token = get_page_token(project_id, stored["page_id"])
             if token:
-                page = self.client_factory(token)._get_page_identity(stored["page_id"])
+                page = self.client_factory(token)._get_page_identity(stored["page_id"], raise_errors=True)
                 if page is None:
-                    raise FacebookConnectionError("Access Token đã hết hạn hoặc bị thu hồi.", category="auth")
+                    raise FacebookConnectionError("Không thể xác thực Facebook. Vui lòng xem chi tiết lỗi API.", category="api")
                 validated.append(page)
         if validated:
             return validated
