@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from app.services.viral_reels_service import (
@@ -96,17 +96,19 @@ class MetaGraphReelsProvider(ReelsProvider, PageDiscoveryProvider):
     def collect_reels(self, page: PageCandidate):
         if not page.page_id:
             raise ProviderError("Facebook Page ID is required for Meta Graph API scan")
-        path = f"{page.page_id}/video_reels"
+        path = f"{page.page_id}/videos"
         while path:
             payload = self._get(
                 path,
-                fields="id,permalink_url,created_time,description,views,likes.summary(true),comments.summary(true),shares",
+                fields="id,permalink_url,created_time,description,views,likes.summary(true),comments.summary(true)",
             )
             for item in payload.get("data", []):
                 url = item.get("permalink_url")
                 if not url:
                     continue
                 normalized = normalize_facebook_url(url)
+                if not any(part in urlsplit(normalized).path.lower() for part in ("/reel/", "/reels/")):
+                    continue
                 timestamp = item.get("created_time")
                 published = datetime.fromisoformat(timestamp.replace("Z", "+00:00")) if isinstance(timestamp, str) else None
                 likes = item.get("likes") or {}
@@ -124,4 +126,4 @@ class MetaGraphReelsProvider(ReelsProvider, PageDiscoveryProvider):
                     topic=page.topic, data_source=self.name,
                 )
             next_url = payload.get("paging", {}).get("next")
-            path = next_url.rsplit("/", 1)[-1].split("?", 1)[0] if next_url else ""
+            path = next_url or ""

@@ -59,5 +59,22 @@ class MetaGraphTests(unittest.TestCase):
         self.assertEqual(open_url.call_args_list[1].args[0].full_url, "https://graph.facebook.com/v26.0/pages/search?after=next")
         self.assertEqual(pages[0].source, "Meta Graph API")
 
+    @patch("app.services.meta_graph_provider.urlopen")
+    def test_scan_uses_videos_pagination_and_keeps_only_reels(self, open_url):
+        open_url.side_effect = [
+            Response({
+                "data": [
+                    {"id": "video", "permalink_url": "https://facebook.com/video/1"},
+                    {"id": "r1", "permalink_url": "https://facebook.com/reel/1", "views": 4},
+                ],
+                "paging": {"next": "https://graph.facebook.com/v26.0/1301325469737954/videos?after=next"},
+            }),
+            Response({"data": [{"id": "r2", "permalink_url": "https://facebook.com/reels/2", "views": 5}]}),
+        ]
+        provider = MetaGraphReelsProvider("secret")
+        reels = list(provider.collect_reels(self.page()))
+        self.assertEqual([item.reel_id for item in reels], ["r1", "r2"])
+        self.assertTrue(open_url.call_args_list[1].args[0].full_url.startswith("https://graph.facebook.com/v26.0/1301325469737954/videos?after=next&"))
+
 
 if __name__ == "__main__": unittest.main()
