@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QComboBox,
     QFormLayout,
+    QFileDialog,
     QLineEdit,
     QPushButton,
     QTableWidget,
@@ -187,6 +188,7 @@ class ProjectDetailPage(QWidget):
         actions.addStretch(); connection_layout.addLayout(actions); layout.addWidget(connection)
         self.facebook_table = QTableWidget(0, 9)
         self._facebook_selected_video_id: str | None = None
+        self.facebook_file_paths: dict[str, str] = {}
         self.facebook_table.setHorizontalHeaderLabels(("", "STT", "Mã video", "Tên video", "File local", "Fanpage", "Chuẩn bị", "Đăng", "Link Facebook"))
         self.facebook_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.facebook_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -214,11 +216,13 @@ class ProjectDetailPage(QWidget):
         save = QPushButton("Lưu nội dung"); save.clicked.connect(self._save_facebook_draft)
         restore = QPushButton("Khôi phục nội dung đã lưu"); restore.clicked.connect(self._load_selected_facebook_draft)
         self.facebook_prepare_button = LoadingButton("Kiểm tra video"); self.facebook_prepare_button.clicked.connect(self._prepare_selected_video)
+        self.facebook_select_file_button = QPushButton("Chọn file đăng")
+        self.facebook_select_file_button.clicked.connect(self._select_facebook_file)
         self.facebook_publish_button = LoadingButton("Đăng ngay")
         self.facebook_publish_button.setObjectName("primary")
         self.facebook_publish_button.setEnabled(False)
         self.facebook_publish_button.clicked.connect(self._publish_selected_video)
-        for button in (save, restore, self.facebook_prepare_button, self.facebook_publish_button): editor_actions.addWidget(button)
+        for button in (save, restore, self.facebook_select_file_button, self.facebook_prepare_button, self.facebook_publish_button): editor_actions.addWidget(button)
         editor_actions.addStretch(); editor_layout.addLayout(editor_actions); layout.addWidget(editor)
 
     def _default_page_changed(self, index: int) -> None:
@@ -242,7 +246,26 @@ class ProjectDetailPage(QWidget):
         row = self._selected_facebook_row()
         if row >= 0:
             item = self.facebook_table.item(row, 2)
-            self.facebookPrepareRequested.emit({"row": row, "video_id": item.data(Qt.ItemDataRole.UserRole)})
+            video_id = str(item.data(Qt.ItemDataRole.UserRole))
+            self.facebookPrepareRequested.emit({"row": row, "video_id": video_id, "file_path": self.facebook_file_paths.get(video_id)})
+
+    def _select_facebook_file(self) -> None:
+        row = self._selected_facebook_row()
+        if row < 0:
+            return
+        item = self.facebook_table.item(row, 2)
+        video_id = str(item.data(Qt.ItemDataRole.UserRole)) if item else ""
+        if not video_id:
+            return
+        current = self.facebook_file_paths.get(video_id, "")
+        selected, _ = QFileDialog.getOpenFileName(
+            self, "Chọn file video để đăng", current,
+            "Video (*.mp4 *.mov *.mkv *.webm);;All files (*.*)",
+        )
+        if selected:
+            self.facebook_file_paths[video_id] = selected
+            self.facebook_local_path.setText(selected)
+            self._update_publish_button()
 
     def _publish_selected_video(self) -> None:
         row = self._selected_facebook_row()
@@ -251,7 +274,8 @@ class ProjectDetailPage(QWidget):
         item = self.facebook_table.item(row, 2)
         video_id = item.data(Qt.ItemDataRole.UserRole) if item else None
         if video_id:
-            self.facebookPublishNowRequested.emit({"video_id": str(video_id), "page_id": self.facebook_page_combo.currentData()})
+            video_id = str(video_id)
+            self.facebookPublishNowRequested.emit({"video_id": video_id, "page_id": self.facebook_page_combo.currentData(), "file_path": self.facebook_file_paths.get(video_id)})
 
     def _load_selected_facebook_draft(self) -> None:
         row = self._selected_facebook_row()
@@ -262,7 +286,8 @@ class ProjectDetailPage(QWidget):
             return
         self._facebook_selected_video_id = str(video_id)
         self.facebook_video_title.setText(self.facebook_table.item(row, 3).text())
-        self.facebook_local_path.setText(self.facebook_table.item(row, 4).text())
+        original_path = self.facebook_table.item(row, 4).text()
+        self.facebook_local_path.setText(self.facebook_file_paths.get(str(video_id), original_path))
         title_item = self.facebook_table.item(row, 3)
         self.facebook_title.setText(title_item.data(Qt.ItemDataRole.UserRole) or title_item.text())
         self.facebook_description.setPlainText(title_item.data(Qt.ItemDataRole.UserRole + 1) or "")
@@ -280,7 +305,9 @@ class ProjectDetailPage(QWidget):
             row = self.facebook_table.rowCount(); self.facebook_table.insertRow(row)
             source_title = str(draft.get("video_title") or draft.get("title") or "")
             page_label = draft.get("page_name") or draft.get("page_id") or "-"
-            values = ("", str(draft.get("sequence_number", row + 1)), str(draft.get("video_code", "")), source_title, str(draft.get("local_video_path") or "Không tìm thấy file video"), str(page_label), str(draft.get("preparation_status", "NOT_PREPARED")), "Chưa đăng", "")
+            video_id = str(draft.get("video_id") or "")
+            local_path = self.facebook_file_paths.get(video_id) or str(draft.get("local_video_path") or "Không tìm thấy file video")
+            values = ("", str(draft.get("sequence_number", row + 1)), str(draft.get("video_code", "")), source_title, local_path, str(page_label), str(draft.get("preparation_status", "NOT_PREPARED")), "Chưa đăng", "")
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if col == 2: item.setData(Qt.ItemDataRole.UserRole, draft.get("video_id"))

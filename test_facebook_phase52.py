@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -45,6 +46,10 @@ class FacebookPhase52Tests(unittest.TestCase):
                 "UPDATE videos SET local_video_path=? WHERE id=?", (str(self.video_path), self.video_id)
             )
         self.service = FacebookPublishingService(self.database)
+        self.inspect_patcher = patch.object(
+            self.service, "_inspect_video", return_value={"streams": [{"codec_type": "video"}]}
+        )
+        self.inspect_patcher.start()
         self.service.save_pages(self.project_id, [{"id": "page-1", "name": "Page 1"}], "page-1")
         self.service.save_draft(
             self.project_id, self.video_id, page_id="page-1", facebook_title="FB title",
@@ -57,6 +62,7 @@ class FacebookPhase52Tests(unittest.TestCase):
             )
 
     def tearDown(self):
+        self.inspect_patcher.stop()
         self.database.close()
         self.temp.cleanup()
 
@@ -115,6 +121,34 @@ class FacebookPhase52Tests(unittest.TestCase):
         self.service.enqueue_from_draft(self.project_id, self.video_id, "page-1")
         with self.assertRaises(Exception):
             self.service.enqueue_from_draft(self.project_id, self.video_id, "page-1")
+
+    def test_selected_file_is_persisted_and_uploaded_without_fallback(self):
+        selected = Path(self.temp.name) / "h264-test.mp4"
+        selected.write_bytes(b"selected-media")
+        identity = self.service.file_identity(selected)
+        job_id = self.service.enqueue_from_draft(
+            self.project_id, self.video_id, "page-1",
+            file_path=selected, confirmed_identity=identity,
+        )
+        job = self.service.list_jobs(self.project_id)[0]
+        self.assertEqual(job["local_file_path"], str(selected))
+        self.assertEqual(job["local_file_identity"], json.dumps(identity, ensure_ascii=False, sort_keys=True))
+        self.service.client = _PublishingClient({"id": "post-selected", "permalink_url": "https://facebook.com/selected"})
+        result = self.service.publish(job_id)
+        self.assertEqual(result["status"], "PUBLISHED")
+        self.assertEqual(self.service.client.uploaded[0]["file_path"], str(selected))
+
+    def test_changed_selected_file_stops_before_upload(self):
+        selected = Path(self.temp.name) / "h264-test.mp4"
+        selected.write_bytes(b"selected-media")
+        job_id = self.service.enqueue_from_draft(self.project_id, self.video_id, "page-1", file_path=selected)
+        selected.write_bytes(b"changed-media")
+        client = _PublishingClient({"id": "post-selected", "permalink_url": "https://facebook.com/selected"})
+        self.service.client = client
+        with self.assertRaisesRegex(Exception, "thay đổi"):
+            self.service.publish(job_id)
+        self.assertEqual(client.uploaded, [])
+        self.assertEqual(self.service.list_jobs(self.project_id)[0]["status"], "FAILED")
 
 
 if __name__ == "__main__":

@@ -393,6 +393,7 @@ def _create_facebook_publishing_tables(connection: sqlite3.Connection) -> None:
         ("upload_start_offset", "INTEGER"),
         ("upload_end_offset", "INTEGER"),
         ("upload_phase", "TEXT"),
+        ("local_file_identity", "TEXT"),
     ):
         if name not in job_columns:
             connection.execute(f"ALTER TABLE facebook_publishing_jobs ADD COLUMN {name} {definition}")

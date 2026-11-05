@@ -6,6 +6,7 @@ desktop UI can run it in its existing worker architecture.
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import uuid
 from datetime import UTC, datetime
@@ -259,13 +260,13 @@ class FacebookPublishingService:
                 (project_id, video_id, page_id, facebook_title, description, hashtags, _now()),
             )
 
-    def prepare_video(self, project_id: str, video_id: str) -> dict[str, Any]:
+    def prepare_video(self, project_id: str, video_id: str, file_path: str | Path | None = None) -> dict[str, Any]:
         row = self.database.connection.execute(
             "SELECT local_video_path FROM videos WHERE id=? AND project_id=?", (video_id, project_id)
         ).fetchone()
         if row is None:
             raise FacebookPublishingError("Video không thuộc dự án hiện tại.")
-        path = Path(row["local_video_path"] or "")
+        path = Path(file_path or row["local_video_path"] or "")
         status, payload, error = "READY", {}, None
         if not path.is_file():
             status, error = "MISSING_FILE", "Không tìm thấy file video"
@@ -289,15 +290,22 @@ class FacebookPublishingService:
         return {"status": status, "metadata": payload, "error": error}
 
     def enqueue(self, project_id: str, video_id: str, page_id: str, *, title: str | None = None,
-                description: str = "", scheduled_at: str | None = None, timezone: str = "UTC") -> str:
+                description: str = "", scheduled_at: str | None = None, timezone: str = "UTC",
+                file_path: str | Path | None = None,
+                confirmed_identity: dict[str, Any] | None = None) -> str:
         video = self.database.connection.execute(
             "SELECT title, local_video_path, download_status FROM videos WHERE id=? AND project_id=?",
             (video_id, project_id),
         ).fetchone()
         if video is None:
             raise FacebookPublishingError("Video không thuộc dự án hiện tại.")
-        if not video["local_video_path"] or not Path(video["local_video_path"]).is_file():
+        selected_path = Path(file_path or video["local_video_path"] or "")
+        if not selected_path.is_file():
             raise FacebookPublishingError("Tệp video cục bộ không tồn tại.")
+        self._inspect_video(selected_path)
+        identity = self.file_identity(selected_path)
+        if confirmed_identity is not None and identity != confirmed_identity:
+            raise FacebookPublishingError("File video đã thay đổi sau khi xác nhận; hãy xác nhận lại file.")
         if self.database.connection.execute(
             "SELECT 1 FROM facebook_pages WHERE project_id=? AND page_id=?", (project_id, page_id)
         ).fetchone() is None:
@@ -309,16 +317,19 @@ class FacebookPublishingService:
             with self.database.connection:
                 self.database.connection.execute(
                     """INSERT INTO facebook_publishing_jobs
-                       (id,project_id,video_id,page_id,local_file_path,title,description,scheduled_at,timezone,status,created_at,updated_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (job_id, project_id, video_id, page_id, video["local_video_path"],
-                     title if title is not None else video["title"], description, scheduled_at, timezone, status, now, now),
+                       (id,project_id,video_id,page_id,local_file_path,title,description,scheduled_at,timezone,status,created_at,updated_at,local_file_identity)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (job_id, project_id, video_id, page_id, str(selected_path),
+                     title if title is not None else video["title"], description, scheduled_at, timezone, status, now, now,
+                     json.dumps(identity, ensure_ascii=False, sort_keys=True)),
                 )
         except Exception as exc:
             raise FacebookPublishingError("Video đã có job xuất bản đang hoạt động trên Fanpage này.") from exc
         return job_id
 
-    def enqueue_from_draft(self, project_id: str, video_id: str, page_id: str) -> str:
+    def enqueue_from_draft(self, project_id: str, video_id: str, page_id: str, *,
+                           file_path: str | Path | None = None,
+                           confirmed_identity: dict[str, Any] | None = None) -> str:
         draft = self.database.connection.execute(
             "SELECT * FROM facebook_drafts WHERE project_id=? AND video_id=?",
             (project_id, video_id),
@@ -334,6 +345,8 @@ class FacebookPublishingService:
         return self.enqueue(
             project_id, video_id, page_id, title=draft["facebook_title"],
             description=description,
+            file_path=file_path,
+            confirmed_identity=confirmed_identity,
         )
 
     def list_jobs(self, project_id: str) -> list[dict[str, Any]]:
@@ -398,6 +411,9 @@ class FacebookPublishingService:
         self.update_progress(job_id, 0, "PREPARING")
         try:
             self._inspect_video(path)
+            stored_identity = json.loads(job["local_file_identity"] or "{}")
+            if stored_identity and self.file_identity(path) != stored_identity:
+                raise FacebookPublishingError("File video đã thay đổi sau khi xác nhận; cần xác nhận lại trước khi upload.")
         except FacebookPublishingError as exc:
             self._fail(job_id, str(exc))
             raise
@@ -475,6 +491,15 @@ class FacebookPublishingService:
                 "UPDATE facebook_publishing_jobs SET status='FAILED',last_error=?,updated_at=? WHERE id=?",
                 (message, _now(), job_id),
             )
+
+    @staticmethod
+    def file_identity(path: Path) -> dict[str, Any]:
+        stat = path.stat()
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return {"path": str(path), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "sha256": digest.hexdigest()}
 
     @staticmethod
     def _inspect_video(path: Path) -> dict[str, Any]:

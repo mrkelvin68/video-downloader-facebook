@@ -568,7 +568,7 @@ class MainWindow(QMainWindow):
         if self.current_project is None:
             return
         try:
-            self.facebook_publishing.prepare_video(self.current_project.uuid, values["video_id"])
+            self.facebook_publishing.prepare_video(self.current_project.uuid, values["video_id"], values.get("file_path"))
             self._refresh_facebook()
         except Exception as exc:
             QMessageBox.warning(self, "Kiểm tra video", str(exc))
@@ -591,8 +591,15 @@ class MainWindow(QMainWindow):
         if video is None or draft is None:
             QMessageBox.warning(self, "Đăng Facebook", "Hãy lưu nội dung và chọn video hợp lệ.")
             return
-        if str(draft["preparation_status"] or "") != "READY" or not Path(video["local_video_path"] or "").is_file():
+        selected_path = Path(values.get("file_path") or video["local_video_path"] or "")
+        if str(draft["preparation_status"] or "") != "READY" or not selected_path.is_file():
             QMessageBox.warning(self, "Đăng Facebook", "Video chưa sẵn sàng hoặc không còn file local.")
+            return
+        try:
+            FacebookPublishingService._inspect_video(selected_path)
+            confirmed_identity = FacebookPublishingService.file_identity(selected_path)
+        except FacebookPublishingError as exc:
+            QMessageBox.warning(self, "Đăng Facebook", str(exc))
             return
         active = self.database.connection.execute(
             """SELECT status FROM facebook_publishing_jobs
@@ -614,7 +621,7 @@ class MainWindow(QMainWindow):
             description = f"{description}\n\n{hashtags}" if description else hashtags
         confirmation = QMessageBox.question(
             self, "Xác nhận đăng video",
-            f"Video: {video['title']}\nFile: {video['local_video_path']}\nFanpage: {page['page_name']}\n"
+            f"Video: {video['title']}\nFile: {selected_path}\nFanpage: {page['page_name']}\n"
             f"Page ID: {page_id}\nTiêu đề: {draft['facebook_title']}\nCaption: {description}\n"
             f"Loại: Page video thường\n\nĐăng ngay?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -626,7 +633,10 @@ class MainWindow(QMainWindow):
             token = get_page_token(project_id, page_id)
             if not token:
                 raise FacebookPublishingError("Chưa có Page Access Token cho Fanpage này.")
-            job_id = self.facebook_publishing.enqueue_from_draft(project_id, video_id, page_id)
+            job_id = self.facebook_publishing.enqueue_from_draft(
+                project_id, video_id, page_id, file_path=str(selected_path),
+                confirmed_identity=confirmed_identity,
+            )
         except (FacebookPublishingError, ValueError) as exc:
             QMessageBox.warning(self, "Đăng Facebook", str(exc))
             return
