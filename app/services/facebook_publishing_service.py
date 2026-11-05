@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from app.database.connection import Database
@@ -45,29 +45,81 @@ class MetaGraphPublishingClient:
         self.token = page_access_token.strip()
         self.base_url = f"https://graph.facebook.com/{api_version}"
         self.timeout = timeout
+        self.diagnostics: list[dict[str, Any]] = []
 
     def upload_video(self, *, page_id: str, file_path: str, title: str, description: str,
-                     progress_callback: Callable[[float], None] | None = None) -> dict[str, Any]:
-        boundary = "----VideoDownloaderFacebookBoundary"
+                     progress_callback: Callable[[float], None] | None = None,
+                     checkpoint_callback: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
         path = Path(file_path)
-        data = path.read_bytes()
-        parts = [
-            f"--{boundary}\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\n{title}\r\n".encode(),
-            f"--{boundary}\r\nContent-Disposition: form-data; name=\"description\"\r\n\r\n{description}\r\n".encode(),
-            f"--{boundary}\r\nContent-Disposition: form-data; name=\"source\"; filename=\"{path.name}\"\r\nContent-Type: video/mp4\r\n\r\n".encode() + data + b"\r\n",
-            f"--{boundary}--\r\n".encode(),
-        ]
+        file_size = path.stat().st_size
+        start = self._post_json(page_id, {"upload_phase": "start", "file_size": str(file_size)})
+        session_id = str(start.get("upload_session_id") or "")
+        remote_video_id = str(start.get("video_id") or start.get("id") or "")
+        if not session_id:
+            raise FacebookPublishingError("Meta không trả về upload session cho video.")
+        next_offset = int(start.get("start_offset") or 0)
+        end_offset = int(start.get("end_offset") or next_offset)
+        self._checkpoint(checkpoint_callback, session_id, remote_video_id, next_offset, end_offset, "START")
+        chunk_size = 8 * 1024 * 1024
+        iterations = 0
+        with path.open("rb") as stream:
+            while next_offset < file_size:
+                iterations += 1
+                if iterations > (file_size // chunk_size) + 100:
+                    raise FacebookPublishingError("Meta trả về offset upload không hợp lệ.")
+                stream.seek(next_offset)
+                chunk = stream.read(min(chunk_size, file_size - next_offset))
+                if not chunk:
+                    raise FacebookPublishingError("Không đọc được chunk video cần upload.")
+                transfer = self._post_multipart(
+                    page_id,
+                    {"upload_phase": "transfer", "upload_session_id": session_id, "start_offset": str(next_offset)},
+                    "video_file_chunk", chunk,
+                )
+                confirmed = int(transfer.get("end_offset") or 0)
+                returned_start = int(transfer.get("start_offset") or next_offset)
+                if confirmed <= next_offset or confirmed > file_size:
+                    raise FacebookPublishingError("Meta trả về offset upload không hợp lệ.")
+                next_offset = confirmed
+                end_offset = int(transfer.get("end_offset") or confirmed)
+                self._checkpoint(checkpoint_callback, session_id, remote_video_id, returned_start, end_offset, "TRANSFER")
+                if progress_callback:
+                    progress_callback(next_offset * 100.0 / file_size)
+        finish_params = {
+            "upload_phase": "finish", "upload_session_id": session_id,
+            "title": title, "description": description, "published": "true",
+        }
+        if remote_video_id:
+            finish_params["video_id"] = remote_video_id
+        finish = self._post_json(page_id, finish_params)
+        final_video_id = str(finish.get("video_id") or finish.get("id") or remote_video_id or "")
+        if not final_video_id:
+            raise FacebookPublishingPending("Meta đã hoàn tất upload nhưng chưa trả về video ID.")
+        self._checkpoint(checkpoint_callback, session_id, final_video_id, file_size, file_size, "FINISH")
+        return {"upload_id": final_video_id, "remote_video_id": final_video_id, "upload_session_id": session_id, **finish}
+
+    def _checkpoint(self, callback, session_id: str, video_id: str, start: int, end: int, phase: str) -> None:
+        if callback:
+            callback({"upload_session_id": session_id, "remote_video_id": video_id, "start_offset": start, "end_offset": end, "upload_phase": phase})
+
+    def _post_json(self, page_id: str, params: dict[str, str]) -> dict[str, Any]:
+        query = {**params, "access_token": self.token}
+        request = Request(f"{self.base_url}/{page_id}/videos?{urlencode(query)}", data=b"", method="POST")
+        return self._request(request)
+
+    def _post_multipart(self, page_id: str, params: dict[str, str], field: str, data: bytes) -> dict[str, Any]:
+        boundary = "----VideoDownloaderFacebookChunk"
+        fields = b"".join(
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n".encode()
+            for key, value in params.items()
+        )
+        body = fields + f"--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"\r\n\r\n".encode() + data + f"\r\n--{boundary}--\r\n".encode()
+        query = {"access_token": self.token}
         request = Request(
-            f"{self.base_url}/{page_id}/videos?" + urlencode({"access_token": self.token}),
-            data=b"".join(parts), method="POST",
+            f"{self.base_url}/{page_id}/videos?{urlencode(query)}", data=body, method="POST",
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
-        if progress_callback:
-            progress_callback(0.0)
-        payload = self._request(request)
-        if progress_callback:
-            progress_callback(100.0)
-        return {"upload_id": payload.get("id") or payload.get("video_id"), **payload}
+        return self._request(request)
 
     def wait_for_processing(self, page_id: str, upload_id: str) -> dict[str, Any]:
         request = Request(
@@ -80,22 +132,37 @@ class MetaGraphPublishingClient:
             raise FacebookPublishingError("Meta không xử lý được video.")
         return payload
 
-    @staticmethod
-    def _request(request: Request) -> dict[str, Any]:
+    def _request(self, request: Request) -> dict[str, Any]:
+        endpoint = urlsplit(request.full_url).path
         try:
-            with urlopen(request, timeout=60) as response:
+            with urlopen(request, timeout=self.timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
+                self.diagnostics.append({"method": request.method or "GET", "endpoint": endpoint, "http_status": response.status, "result": "PASS"})
         except HTTPError as exc:
             try:
                 details = json.loads(exc.read().decode("utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
                 details = {}
-            message = details.get("error", {}).get("message", "Meta Graph API request failed")
+            error = details.get("error", {})
+            code = str(error.get("code") or "")
+            subcode = str(error.get("error_subcode") or "")
+            self.diagnostics.append({"method": request.method or "GET", "endpoint": endpoint, "http_status": exc.code, "meta_code": code or None, "meta_subcode": subcode or None, "fbtrace_id": error.get("fbtrace_id"), "result": "FAILED"})
+            message = error.get("message", "Meta Graph API request failed")
+            if code:
+                message = f"Meta API error code {code}{f'/{subcode}' if subcode else ''}: {message}"
             raise FacebookPublishingError(str(message)) from exc
         except (URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise FacebookPublishingError("Meta Graph API network request failed.") from exc
+            self.diagnostics.append({"method": request.method or "GET", "endpoint": endpoint, "error_type": type(exc).__name__, "result": "FAILED"})
+            raise FacebookPublishingError(f"Meta Graph API network request failed ({type(exc).__name__}) at {endpoint}.") from exc
         if "error" in payload:
-            raise FacebookPublishingError(str(payload["error"].get("message", "Meta Graph API error")))
+            error = payload["error"]
+            code = str(error.get("code") or "")
+            subcode = str(error.get("error_subcode") or "")
+            self.diagnostics.append({"method": request.method or "GET", "endpoint": endpoint, "http_status": 200, "meta_code": code or None, "meta_subcode": subcode or None, "fbtrace_id": error.get("fbtrace_id"), "result": "FAILED"})
+            message = str(error.get("message", "Meta Graph API error"))
+            if code:
+                message = f"Meta API error code {code}{f'/{subcode}' if subcode else ''}: {message}"
+            raise FacebookPublishingError(message)
         return payload
 
 
@@ -309,6 +376,7 @@ class FacebookPublishingService:
             result = self.client.upload_video(
                 page_id=job["page_id"], file_path=str(path), title=job["title"],
                 description=job["description"], progress_callback=lambda value: self._progress(job_id, value, progress),
+                checkpoint_callback=lambda checkpoint: self._persist_checkpoint(job_id, checkpoint),
             )
         except Exception as exc:
             self._fail(job_id, str(exc))
@@ -316,8 +384,9 @@ class FacebookPublishingService:
         upload_id = str(result.get("upload_id") or result.get("id") or "")
         with self.database.connection:
             self.database.connection.execute(
-                "UPDATE facebook_publishing_jobs SET remote_upload_id=?, status='PROCESSING', updated_at=? WHERE id=?",
-                (upload_id, _now(), job_id),
+                """UPDATE facebook_publishing_jobs SET remote_upload_id=?, remote_video_id=?,
+                   upload_phase='FINISH', status='PROCESSING', updated_at=? WHERE id=?""",
+                (upload_id, result.get("remote_video_id") or upload_id, _now(), job_id),
             )
         self.update_progress(job_id, 100, "PUBLISHING")
         try:
@@ -352,6 +421,16 @@ class FacebookPublishingService:
         self.update_progress(job_id, value, "UPLOADING")
         if callback:
             callback(value)
+
+    def _persist_checkpoint(self, job_id: str, checkpoint: dict[str, Any]) -> None:
+        with self.database.connection:
+            self.database.connection.execute(
+                """UPDATE facebook_publishing_jobs SET upload_session_id=?,remote_video_id=?,
+                   upload_start_offset=?,upload_end_offset=?,upload_phase=?,updated_at=? WHERE id=?""",
+                (checkpoint.get("upload_session_id"), checkpoint.get("remote_video_id"),
+                 checkpoint.get("start_offset"), checkpoint.get("end_offset"),
+                 checkpoint.get("upload_phase"), _now(), job_id),
+            )
 
     def _fail(self, job_id: str, message: str) -> None:
         with self.database.connection:

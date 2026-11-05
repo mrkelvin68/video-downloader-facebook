@@ -386,6 +386,16 @@ def _create_facebook_publishing_tables(connection: sqlite3.Connection) -> None:
         """CREATE INDEX IF NOT EXISTS ix_facebook_publish_schedule
            ON facebook_publishing_jobs(project_id, status, scheduled_at)"""
     )
+    job_columns = {row["name"] for row in connection.execute("PRAGMA table_info(facebook_publishing_jobs)")}
+    for name, definition in (
+        ("upload_session_id", "TEXT"),
+        ("remote_video_id", "TEXT"),
+        ("upload_start_offset", "INTEGER"),
+        ("upload_end_offset", "INTEGER"),
+        ("upload_phase", "TEXT"),
+    ):
+        if name not in job_columns:
+            connection.execute(f"ALTER TABLE facebook_publishing_jobs ADD COLUMN {name} {definition}")
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS facebook_drafts (
