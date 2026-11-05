@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (
     QFrame,
@@ -17,6 +19,9 @@ from app.ui.widgets.loading_button import LoadingButton
 
 class ProjectDetailPage(QWidget):
     backRequested = Signal()
+    csvChosen = Signal()
+    csvDropped = Signal(object)
+    googleSheetsRequested = Signal()
     manualImportRequested = Signal()
     sampleRequested = Signal()
     exportRequested = Signal()
@@ -45,7 +50,7 @@ class ProjectDetailPage(QWidget):
         layout.addSpacing(10)
         steps = QHBoxLayout()
         steps.setSpacing(12)
-        for index, label in enumerate(("Tạo dự án", "Nhập danh sách", "Tải video", "Hoàn tất"), 1):
+        for index, label in enumerate(("Tạo dự án", "Import CSV", "Tải video", "Hoàn tất"), 1):
             step = QFrame()
             step.setObjectName("stepActive" if index == 2 else "step")
             step_layout = QVBoxLayout(step)
@@ -64,19 +69,37 @@ class ProjectDetailPage(QWidget):
         import_box = QFrame()
         import_box.setObjectName("detailNotice")
         import_layout = QVBoxLayout(import_box)
-        section_title = QLabel("Bước 2: Nhập danh sách video")
+        section_title = QLabel("Bước 2: Import danh sách video từ CSV")
         section_title.setObjectName("cardTitle")
         import_layout.addWidget(section_title)
         import_layout.addWidget(
-            QLabel("Nhập trực tiếp Title và URL Facebook; STT sẽ tự động tăng khi lưu.")
+            QLabel("CSV gồm các cột stt, title, url (có hỗ trợ tên cũ ten_video).")
         )
+        self.drop_zone = _DropZone()
+        self.drop_zone.setObjectName("dropZone")
+        self.drop_zone.setMinimumHeight(58)
+        self.drop_zone.fileDropped.connect(self.csvDropped)
+        self.drop_zone.clicked.connect(self.csvChosen)
+        import_layout.addWidget(self.drop_zone)
         actions = QHBoxLayout()
+        choose = QPushButton("Chọn CSV")
+        choose.setObjectName("primary")
+        choose.clicked.connect(self.csvChosen.emit)
+        sheets = QPushButton("Nhập Google Sheets")
+        sheets.setObjectName("secondary")
+        sheets.clicked.connect(self.googleSheetsRequested.emit)
+        sample = QPushButton("Tải CSV mẫu")
+        sample.setObjectName("secondary")
+        sample.clicked.connect(self.sampleRequested.emit)
         self.manual_import_button = QPushButton("Nhập danh sách video")
         self.manual_import_button.setObjectName("primary")
         self.manual_import_button.clicked.connect(self.manualImportRequested.emit)
         export = QPushButton("Xuất CSV")
         export.setObjectName("secondary")
         export.clicked.connect(self.exportRequested.emit)
+        actions.addWidget(choose)
+        actions.addWidget(sheets)
+        actions.addWidget(sample)
         actions.addWidget(self.manual_import_button)
         actions.addWidget(export)
         actions.addStretch()
@@ -158,3 +181,34 @@ class ProjectDetailPage(QWidget):
         )
         self.csv_errors.clear()
         self.csv_errors.hide()
+
+
+class _DropZone(QLabel):
+    fileDropped = Signal(object)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__("Kéo thả CSV vào đây hoặc chọn tệp", parent)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setAcceptDrops(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    clicked = Signal()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:
+        urls = event.mimeData().urls()
+        if urls:
+            self.fileDropped.emit(Path(urls[0].toLocalFile()))
+            event.acceptProposedAction()
+        else:
+            event.ignore()
