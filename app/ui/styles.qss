@@ -58,6 +58,8 @@ QLineEdit:focus, QTextEdit:focus, QComboBox:focus { border:1px solid #60a5fa; }
 #stepText { color:#b8c8dd; font-weight:600; }
 #detailNotice { background:#13233a; border:1px solid #284365; border-radius:9px; color:#b8cae2; }
 #facebookCard { background:#14223a; border:1px solid #284365; border-radius:9px; }
+QDialog#facebookComposerDialog { background:#0f1b2d; }
+QDialog#facebookComposerDialog #facebookCard { border-radius:8px; }
 #facebookSectionTitle { color:#f8fafc; font-size:16px; font-weight:650; }
 QFrame#facebookCard QLabel { background:transparent; }
 QTableWidget#facebookVideoTable, QTableWidget#facebookJobTable { background:#0c1729; alternate-background-color:#101c30; border:1px solid #284365; color:#d7e0ef; gridline-color:#1c2d46; selection-background-color:#1d3c66; }

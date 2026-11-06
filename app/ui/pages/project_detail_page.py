@@ -6,9 +6,11 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QComboBox,
+    QDialog,
     QFormLayout,
     QFileDialog,
     QLineEdit,
+    QSizePolicy,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -209,33 +211,47 @@ class ProjectDetailPage(QWidget):
     def _build_facebook_editor(self, layout: QVBoxLayout) -> None:
         connection = QFrame(); connection.setObjectName("facebookCard")
         connection_layout = QVBoxLayout(connection)
-        connection_layout.setContentsMargins(18, 16, 18, 16)
-        connection_layout.setSpacing(10)
-        title = QLabel("Kết nối Facebook")
-        title.setObjectName("facebookSectionTitle")
-        connection_layout.addWidget(title)
+        connection_layout.setContentsMargins(12, 8, 12, 8)
+        connection_layout.setSpacing(6)
+        toolbar = QHBoxLayout()
         self.facebook_status = QLabel("Chưa kết nối Facebook")
-        self.facebook_status.setObjectName("detailMeta"); connection_layout.addWidget(self.facebook_status)
-        form = QFormLayout()
-        self.facebook_token = QLineEdit(); self.facebook_token.setEchoMode(QLineEdit.EchoMode.Password)
-        self.facebook_token.setPlaceholderText("Nhập User/Page Access Token"); form.addRow("Access Token:", self.facebook_token)
+        self.facebook_status.setObjectName("detailMeta")
+        toolbar.addWidget(self.facebook_status)
+        toolbar.addWidget(QLabel("Fanpage:"))
         self.facebook_page_combo = QComboBox(); self.facebook_page_combo.currentIndexChanged.connect(self._default_page_changed)
-        form.addRow("Fanpage mặc định:", self.facebook_page_combo); connection_layout.addLayout(form)
-        actions = QHBoxLayout()
-        self.facebook_connect_button = LoadingButton("Kết nối Facebook"); self.facebook_connect_button.setObjectName("primary"); self.facebook_connect_button.clicked.connect(lambda: self.facebookConnectRequested.emit(self.facebook_token.text()))
+        self.facebook_page_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        toolbar.addWidget(self.facebook_page_combo, 1)
+        self.facebook_connection_config_button = QPushButton("Cấu hình kết nối")
+        self.facebook_connection_config_button.setObjectName("secondary")
+        self.facebook_connection_config_button.clicked.connect(self._toggle_facebook_connection_form)
+        toolbar.addWidget(self.facebook_connection_config_button)
         self.facebook_test_button = LoadingButton("Kiểm tra"); self.facebook_test_button.setObjectName("secondary"); self.facebook_test_button.clicked.connect(self.facebookTestRequested.emit)
         self.facebook_refresh_button = LoadingButton("Làm mới Fanpage"); self.facebook_refresh_button.setObjectName("secondary"); self.facebook_refresh_button.clicked.connect(self.facebookRefreshRequested.emit)
-        disconnect = QPushButton("Ngắt kết nối"); disconnect.setObjectName("danger"); disconnect.clicked.connect(self.facebookDisconnectRequested.emit)
-        for button in (self.facebook_connect_button, self.facebook_test_button, self.facebook_refresh_button, disconnect): actions.addWidget(button)
-        actions.addStretch(); connection_layout.addLayout(actions); layout.addWidget(connection)
-        self.facebook_table = QTableWidget(0, 9)
+        self.facebook_disconnect_button = QPushButton("Ngắt kết nối"); self.facebook_disconnect_button.setObjectName("danger"); self.facebook_disconnect_button.clicked.connect(self.facebookDisconnectRequested.emit)
+        for button in (self.facebook_test_button, self.facebook_refresh_button, self.facebook_disconnect_button): toolbar.addWidget(button)
+        connection_layout.addLayout(toolbar)
+        self.facebook_connection_form = QWidget()
+        form = QHBoxLayout(self.facebook_connection_form)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.addWidget(QLabel("Access Token:"))
+        self.facebook_token = QLineEdit(); self.facebook_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.facebook_token.setPlaceholderText("Nhập User/Page Access Token")
+        form.addWidget(self.facebook_token, 1)
+        self.facebook_connect_button = LoadingButton("Kết nối Facebook"); self.facebook_connect_button.setObjectName("primary"); self.facebook_connect_button.clicked.connect(lambda: self.facebookConnectRequested.emit(self.facebook_token.text()))
+        form.addWidget(self.facebook_connect_button)
+        connection_layout.addWidget(self.facebook_connection_form)
+        layout.addWidget(connection)
+        self._set_facebook_connection_state(False)
+        self.facebook_table = QTableWidget(0, 10)
         self.facebook_table.setObjectName("facebookVideoTable")
-        self.facebook_table.setMinimumHeight(112)
-        self.facebook_table.setMaximumHeight(140)
+        self.facebook_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._facebook_selected_video_id: str | None = None
         self.facebook_file_paths: dict[str, str] = {}
         self.facebook_jobs_by_video: dict[str, list[dict]] = {}
-        self.facebook_table.setHorizontalHeaderLabels(("", "STT", "Mã video", "Tên video", "File local", "Fanpage", "Chuẩn bị", "Đăng", "Link Facebook"))
+        self._facebook_pages_cache: list[dict] = []
+        self._facebook_drafts_cache: list[dict] = []
+        self._facebook_jobs_cache: dict[str, list[dict]] = {}
+        self.facebook_table.setHorizontalHeaderLabels(("", "STT", "Mã video", "Tên video", "File local", "Fanpage", "Chuẩn bị", "Đăng", "Link Facebook", "Thao tác"))
         self.facebook_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.facebook_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.facebook_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -245,11 +261,13 @@ class ProjectDetailPage(QWidget):
         header.setSectionResizeMode(1, header.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, header.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(3, header.ResizeMode.Stretch)
-        header.setSectionResizeMode(4, header.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, header.ResizeMode.Interactive)
+        self.facebook_table.setColumnWidth(4, 220)
         header.setSectionResizeMode(5, header.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(6, header.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(7, header.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(8, header.ResizeMode.Stretch)
+        header.setSectionResizeMode(9, header.ResizeMode.ResizeToContents)
         self.facebook_table.itemSelectionChanged.connect(self._load_selected_facebook_draft)
         facebook_tabs = QTabWidget()
         facebook_tabs.setObjectName("facebookTabs")
@@ -257,17 +275,51 @@ class ProjectDetailPage(QWidget):
         compose_layout = QVBoxLayout(compose_tab)
         compose_layout.setContentsMargins(0, 12, 0, 0)
         compose_layout.setSpacing(12)
-        compose_layout.addWidget(self.facebook_table)
+        publishing_toolbar = QHBoxLayout()
+        self.facebook_video_total = QLabel("0 video")
+        self.facebook_video_total.setObjectName("detailMeta")
+        publishing_toolbar.addWidget(self.facebook_video_total)
+        publishing_toolbar.addStretch()
+        publishing_toolbar.addWidget(QLabel("Chuẩn bị:"))
+        self.facebook_prepare_filter = QComboBox()
+        self.facebook_prepare_filter.addItem("Tất cả", "")
+        self.facebook_prepare_filter.addItem("Chưa chuẩn bị", "NOT_PREPARED")
+        self.facebook_prepare_filter.addItem("Sẵn sàng", "READY")
+        self.facebook_prepare_filter.currentIndexChanged.connect(self._apply_facebook_filters)
+        publishing_toolbar.addWidget(self.facebook_prepare_filter)
+        publishing_toolbar.addWidget(QLabel("Đăng:"))
+        self.facebook_publish_filter = QComboBox()
+        self.facebook_publish_filter.addItem("Tất cả", "")
+        self.facebook_publish_filter.addItem("Chưa đăng", "NOT_POSTED")
+        self.facebook_publish_filter.addItem("Đang đăng", "PROCESSING")
+        self.facebook_publish_filter.addItem("Đã đăng", "PUBLISHED")
+        self.facebook_publish_filter.currentIndexChanged.connect(self._apply_facebook_filters)
+        publishing_toolbar.addWidget(self.facebook_publish_filter)
+        self.facebook_list_refresh_button = QPushButton("Làm mới danh sách")
+        self.facebook_list_refresh_button.setObjectName("secondary")
+        self.facebook_list_refresh_button.clicked.connect(self._refresh_facebook_table)
+        publishing_toolbar.addWidget(self.facebook_list_refresh_button)
+        compose_layout.addLayout(publishing_toolbar)
+        compose_layout.addWidget(self.facebook_table, 1)
+        self.facebook_table.itemDoubleClicked.connect(lambda _item: self._open_facebook_composer())
         editor = QFrame(); editor.setObjectName("facebookCard"); editor_layout = QVBoxLayout(editor)
         editor_layout.setContentsMargins(18, 16, 18, 16); editor_layout.setSpacing(10)
-        editor_title = QLabel("Nội dung đăng")
+        editor_title = QLabel("Soạn nội dung đăng")
         editor_title.setObjectName("facebookSectionTitle")
-        editor_layout.addWidget(editor_title); editor_form = QFormLayout()
-        self.facebook_video_title = QLabel("-"); editor_form.addRow("Video title:", self.facebook_video_title)
-        self.facebook_title = QLineEdit(); editor_form.addRow("Facebook title:", self.facebook_title)
-        self.facebook_description = QTextEdit(); self.facebook_description.setMinimumHeight(70); editor_form.addRow("Caption / Description:", self.facebook_description)
-        self.facebook_hashtags = QLineEdit(); editor_form.addRow("Hashtags:", self.facebook_hashtags)
-        self.facebook_local_path = QLabel("-"); editor_form.addRow("File local:", self.facebook_local_path); editor_layout.addLayout(editor_form)
+        editor_layout.addWidget(editor_title)
+        self.facebook_video_title = QLabel("-")
+        self.facebook_video_title.setObjectName("dialogSubtitle")
+        editor_layout.addWidget(self.facebook_video_title)
+        editor_form = QFormLayout()
+        self.facebook_title = QLineEdit(); self.facebook_title.setPlaceholderText("Nhập tiêu đề hiển thị trên Facebook"); editor_form.addRow("Tiêu đề video", self.facebook_title)
+        self.facebook_description = QTextEdit(); self.facebook_description.setMinimumHeight(100); self.facebook_description.setPlaceholderText("Viết nội dung bài đăng..."); editor_form.addRow("Nội dung / Caption", self.facebook_description)
+        self.facebook_hashtags = QLineEdit(); self.facebook_hashtags.setPlaceholderText("Ví dụ: #phimai #review"); editor_form.addRow("Thẻ / Hashtags", self.facebook_hashtags)
+        editor_layout.addLayout(editor_form)
+        file_row = QHBoxLayout()
+        self.facebook_local_path = QLabel("-")
+        self.facebook_local_path.setObjectName("dialogSubtitle")
+        file_row.addWidget(QLabel("File:")); file_row.addWidget(self.facebook_local_path, 1)
+        editor_layout.addLayout(file_row)
         editor_actions = QHBoxLayout()
         save = QPushButton("Lưu nội dung"); save.setObjectName("secondary"); save.clicked.connect(self._save_facebook_draft)
         restore = QPushButton("Khôi phục nội dung đã lưu"); restore.setObjectName("secondary"); restore.clicked.connect(self._load_selected_facebook_draft)
@@ -280,7 +332,19 @@ class ProjectDetailPage(QWidget):
         self.facebook_publish_button.setEnabled(False)
         self.facebook_publish_button.clicked.connect(self._publish_selected_video)
         for button in (save, restore, self.facebook_select_file_button, self.facebook_prepare_button, self.facebook_publish_button): editor_actions.addWidget(button)
-        editor_actions.addStretch(); editor_layout.addLayout(editor_actions); compose_layout.addWidget(editor, 1)
+        close_composer = QPushButton("Đóng")
+        close_composer.setObjectName("secondary")
+        editor_actions.addWidget(close_composer)
+        editor_actions.addStretch(); editor_layout.addLayout(editor_actions)
+        self.facebook_composer_dialog = QDialog(self)
+        self.facebook_composer_dialog.setObjectName("facebookComposerDialog")
+        self.facebook_composer_dialog.setWindowTitle("Soạn nội dung đăng Facebook")
+        self.facebook_composer_dialog.setModal(True)
+        self.facebook_composer_dialog.resize(680, 430)
+        close_composer.clicked.connect(self.facebook_composer_dialog.reject)
+        dialog_layout = QVBoxLayout(self.facebook_composer_dialog)
+        dialog_layout.setContentsMargins(0, 0, 0, 0)
+        dialog_layout.addWidget(editor)
         history = QFrame(); history.setObjectName("facebookCard"); history_layout = QVBoxLayout(history)
         history_layout.setContentsMargins(18, 16, 18, 16); history_layout.setSpacing(10)
         history_title = QLabel("Lịch sử đăng Facebook")
@@ -319,6 +383,64 @@ class ProjectDetailPage(QWidget):
         layout.addWidget(facebook_tabs, 1)
         self._update_job_actions()
 
+    def _set_facebook_connection_state(self, connected: bool) -> None:
+        self.facebook_connection_form.setVisible(not connected)
+        self.facebook_connection_config_button.setVisible(connected)
+        self.facebook_test_button.setVisible(connected)
+        self.facebook_refresh_button.setVisible(connected)
+        self.facebook_disconnect_button.setVisible(connected)
+        self.facebook_connection_config_button.setText("Cấu hình kết nối")
+
+    def _toggle_facebook_connection_form(self) -> None:
+        visible = not self.facebook_connection_form.isVisible()
+        self.facebook_connection_form.setVisible(visible)
+        self.facebook_connection_config_button.setText(
+            "Ẩn cấu hình" if visible else "Cấu hình kết nối"
+        )
+
+    @staticmethod
+    def _facebook_preparation_label(status: str) -> str:
+        return {
+            "READY": "Sẵn sàng",
+            "PREPARING": "Đang chuẩn bị",
+            "FAILED": "Lỗi chuẩn bị",
+            "NOT_PREPARED": "Chưa chuẩn bị",
+        }.get(status, status or "Chưa chuẩn bị")
+
+    @staticmethod
+    def _facebook_publish_label(status: str) -> str:
+        return {
+            "PUBLISHED": "Đã đăng",
+            "PROCESSING": "Đang đăng",
+            "PUBLISHING": "Đang đăng",
+            "FAILED": "Lỗi đăng",
+            "NOT_POSTED": "Chưa đăng",
+            "PENDING": "Chưa đăng",
+        }.get(status, status or "Chưa đăng")
+
+    def _apply_facebook_filters(self) -> None:
+        preparation = str(self.facebook_prepare_filter.currentData() or "")
+        publishing = str(self.facebook_publish_filter.currentData() or "")
+        for row in range(self.facebook_table.rowCount()):
+            prepare_item = self.facebook_table.item(row, 6)
+            publish_item = self.facebook_table.item(row, 7)
+            prepare_state = str(prepare_item.data(Qt.ItemDataRole.UserRole + 10) or "") if prepare_item else ""
+            publish_state = str(publish_item.data(Qt.ItemDataRole.UserRole + 10) or "") if publish_item else ""
+            preparation_matches = not preparation or prepare_state == preparation
+            publishing_matches = (
+                not publishing
+                or publish_state == publishing
+                or (publishing == "NOT_POSTED" and publish_state in {"", "PENDING", "NOT_POSTED"})
+            )
+            self.facebook_table.setRowHidden(row, not (preparation_matches and publishing_matches))
+
+    def _refresh_facebook_table(self) -> None:
+        self.set_facebook_data(
+            self._facebook_pages_cache,
+            self._facebook_drafts_cache,
+            self._facebook_jobs_cache,
+        )
+
     def _default_page_changed(self, index: int) -> None:
         self._update_publish_button()
         if index >= 0:
@@ -327,6 +449,16 @@ class ProjectDetailPage(QWidget):
     def _selected_facebook_row(self) -> int:
         rows = self.facebook_table.selectionModel().selectedRows()
         return rows[0].row() if rows else -1
+
+    def _open_facebook_composer(self) -> None:
+        if self._selected_facebook_row() < 0:
+            return
+        self._load_selected_facebook_draft()
+        self.facebook_composer_dialog.exec()
+
+    def _open_facebook_composer_for_row(self, row: int) -> None:
+        self.facebook_table.selectRow(row)
+        self._open_facebook_composer()
 
     def _save_facebook_draft(self) -> None:
         row = self._selected_facebook_row()
@@ -396,6 +528,10 @@ class ProjectDetailPage(QWidget):
         self.facebook_video_title.setText(self.facebook_table.item(row, 3).text())
         original_path = self.facebook_table.item(row, 4).text()
         self.facebook_local_path.setText(self.facebook_file_paths.get(str(video_id), original_path))
+        file_name = self.facebook_local_path.text().replace("\\", "/").rsplit("/", 1)[-1]
+        self.facebook_composer_dialog.setWindowTitle(
+            f"Soạn nội dung đăng Facebook — {file_name or video_id}"
+        )
         title_item = self.facebook_table.item(row, 3)
         self.facebook_title.setText(title_item.data(Qt.ItemDataRole.UserRole) or title_item.text())
         self.facebook_description.setPlainText(title_item.data(Qt.ItemDataRole.UserRole + 1) or "")
@@ -469,10 +605,14 @@ class ProjectDetailPage(QWidget):
         self._update_job_actions()
 
     def set_facebook_data(self, pages: list[dict], drafts: list[dict], jobs_by_video: dict[str, list[dict]] | None = None) -> None:
+        self._facebook_pages_cache = list(pages)
+        self._facebook_drafts_cache = list(drafts)
+        self._facebook_jobs_cache = dict(jobs_by_video or {})
         self.facebook_jobs_by_video = jobs_by_video or {}
         self.facebook_page_combo.blockSignals(True); self.facebook_page_combo.clear()
         for page in pages: self.facebook_page_combo.addItem(str(page.get("page_name", page.get("name", ""))), str(page.get("page_id", page.get("id", ""))))
         self.facebook_page_combo.blockSignals(False); self.facebook_status.setText("Đã kết nối Facebook" if pages else "Chưa kết nối Facebook")
+        self._set_facebook_connection_state(bool(pages))
         selected_id = self._facebook_selected_video_id
         self.facebook_table.blockSignals(True)
         self.facebook_table.setRowCount(0)
@@ -484,16 +624,30 @@ class ProjectDetailPage(QWidget):
             local_path = self.facebook_file_paths.get(video_id) or str(draft.get("local_video_path") or "Không tìm thấy file video")
             jobs = self.facebook_jobs_by_video.get(video_id, [])
             latest = jobs[0] if jobs else {}
-            values = ("", str(draft.get("sequence_number", row + 1)), str(draft.get("video_code", "")), source_title, local_path, str(page_label), str(draft.get("preparation_status", "NOT_PREPARED")), str(latest.get("display_status") or latest.get("status") or "Chưa đăng"), str(latest.get("published_url") or ""))
+            preparation_status = str(draft.get("preparation_status", "NOT_PREPARED"))
+            publishing_status = str(latest.get("display_status") or latest.get("status") or "NOT_POSTED")
+            values = ("", str(draft.get("sequence_number", row + 1)), str(draft.get("video_code", "")), source_title, local_path, str(page_label), self._facebook_preparation_label(preparation_status), self._facebook_publish_label(publishing_status), str(latest.get("published_url") or ""))
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if col == 2: item.setData(Qt.ItemDataRole.UserRole, draft.get("video_id"))
+                if col == 4: item.setToolTip(local_path)
+                if col == 6: item.setData(Qt.ItemDataRole.UserRole + 10, preparation_status)
+                if col == 7: item.setData(Qt.ItemDataRole.UserRole + 10, publishing_status)
                 if col == 3:
                     item.setData(Qt.ItemDataRole.UserRole, draft.get("facebook_title") or source_title)
                     item.setData(Qt.ItemDataRole.UserRole + 1, draft.get("description") or "")
                     item.setData(Qt.ItemDataRole.UserRole + 2, draft.get("hashtags") or "")
                 self.facebook_table.setItem(row, col, item)
+            compose_button = QPushButton("⋯")
+            compose_button.setObjectName("primary")
+            compose_button.setToolTip("Soạn nội dung đăng")
+            compose_button.clicked.connect(
+                lambda _checked=False, target_row=row: self._open_facebook_composer_for_row(target_row)
+            )
+            self.facebook_table.setCellWidget(row, 9, compose_button)
         self.facebook_table.blockSignals(False)
+        self.facebook_video_total.setText(f"{self.facebook_table.rowCount()} video")
+        self._apply_facebook_filters()
         if selected_id:
             for row in range(self.facebook_table.rowCount()):
                 item = self.facebook_table.item(row, 2)
@@ -512,7 +666,8 @@ class ProjectDetailPage(QWidget):
         ready = row >= 0 and bool(self.facebook_page_combo.currentData())
         state = ""
         if ready:
-            ready = self.facebook_table.item(row, 6).text() == "READY"
+            preparation_item = self.facebook_table.item(row, 6)
+            ready = bool(preparation_item and preparation_item.data(Qt.ItemDataRole.UserRole + 10) == "READY")
             ready = ready and self.facebook_table.item(row, 4).text() != "Không tìm thấy file video"
             video_item = self.facebook_table.item(row, 2)
             video_id = str(video_item.data(Qt.ItemDataRole.UserRole)) if video_item else ""
