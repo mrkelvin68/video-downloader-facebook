@@ -2,7 +2,7 @@ import csv
 from io import StringIO
 
 from app.core.exceptions import CsvValidationError
-from app.core.validators import normalize_video_url, validate_facebook_url
+from app.core.validators import normalize_video_url, validate_supported_video_url
 
 
 def _dialect(text: str) -> type[csv.Dialect]:
@@ -89,9 +89,14 @@ def parse_video_csv(text: str) -> tuple[list[dict[str, object]], list[str]]:
                     row_errors.append("stt trùng")
         if not title:
             row_errors.append("tên video không được để trống")
-        valid_url = validate_facebook_url(url)
+        valid_url = validate_supported_video_url(url)
         if not valid_url:
-            row_errors.append("URL Facebook không hợp lệ")
+            host = url.split("//", 1)[-1].split("/", 1)[0].lower()
+            platform = (
+                "YouTube" if "youtu" in host else "Instagram"
+                if "instagram" in host else "Facebook"
+            )
+            row_errors.append(f"URL {platform} không hợp lệ")
         normalized_url = normalize_video_url(url) if valid_url else ""
         if valid_url and normalized_url in urls:
             row_errors.append("URL trùng")

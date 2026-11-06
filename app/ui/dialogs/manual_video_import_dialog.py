@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.csv_service import parse_video_csv
+from app.services.video_download_provider import platform_label, provider_for_url
 
 
 class ManualVideoImportDialog(QDialog):
@@ -29,13 +31,27 @@ class ManualVideoImportDialog(QDialog):
         self.rows: list[dict[str, object]] = []
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Nhập Title và URL Facebook. STT sẽ được tự động tăng theo thứ tự dòng."))
-        self.table = QTableWidget(0, 2, self)
-        self.table.setHorizontalHeaderLabels(("Title", "URL"))
+        layout.addWidget(QLabel("Nhập Title và URL Facebook, YouTube hoặc Instagram. STT sẽ được tự động tăng theo thứ tự dòng."))
+        layout.addWidget(QLabel("Dán nhiều URL (mỗi dòng một URL) để tự động nhận diện nguồn:"))
+        self.url_paste = QPlainTextEdit()
+        self.url_paste.setPlaceholderText("Dán URL Facebook, YouTube hoặc Instagram...")
+        self.url_paste.setMaximumHeight(84)
+        layout.addWidget(self.url_paste)
+        paste_actions = QHBoxLayout()
+        add_urls = QPushButton("Thêm URL vào danh sách")
+        add_urls.setObjectName("secondary")
+        add_urls.clicked.connect(self.add_pasted_urls)
+        paste_actions.addWidget(add_urls)
+        paste_actions.addStretch()
+        layout.addLayout(paste_actions)
+        self.table = QTableWidget(0, 3, self)
+        self.table.setHorizontalHeaderLabels(("Title", "URL", "Nền tảng"))
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setStretchLastSection(False)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.table.setAlternatingRowColors(True)
         layout.addWidget(self.table, 1)
 
@@ -64,7 +80,9 @@ class ManualVideoImportDialog(QDialog):
                 self.add_row()
                 current = self.table.rowCount() - 1
                 self.table.item(current, 0).setText(str(row.get("ten_video") or ""))
-                self.table.item(current, 1).setText(str(row.get("url") or ""))
+                url = str(row.get("url") or "")
+                self.table.item(current, 1).setText(url)
+                self.table.item(current, 2).setText(platform_label(provider_for_url(url)))
         else:
             self.add_row()
 
@@ -73,7 +91,37 @@ class ManualVideoImportDialog(QDialog):
         self.table.insertRow(row)
         self.table.setItem(row, 0, QTableWidgetItem())
         self.table.setItem(row, 1, QTableWidgetItem())
+        self.table.setItem(row, 2, QTableWidgetItem())
         self.table.setCurrentCell(row, 0)
+
+    def add_pasted_urls(self) -> None:
+        invalid: list[str] = []
+        added = 0
+        for raw_url in self.url_paste.toPlainText().splitlines():
+            url = raw_url.strip()
+            if not url:
+                continue
+            provider = provider_for_url(url)
+            if provider is None:
+                invalid.append(url)
+                continue
+            self.add_row()
+            row = self.table.rowCount() - 1
+            self.table.item(row, 0).setText(
+                f"{platform_label(provider)} - {provider.video_id}"
+            )
+            self.table.item(row, 1).setText(url)
+            self.table.item(row, 2).setText(platform_label(provider))
+            added += 1
+        self.url_paste.clear()
+        if invalid:
+            QMessageBox.warning(
+                self,
+                "URL không hợp lệ",
+                "Không nhận diện được URL hỗ trợ:\n" + "\n".join(invalid[:10]),
+            )
+        if added:
+            self.table.setFocus()
 
     def delete_rows(self) -> None:
         rows = sorted({index.row() for index in self.table.selectionModel().selectedRows()}, reverse=True)

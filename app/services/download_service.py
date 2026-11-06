@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from app.database.connection import Database
+from app.services.video_download_provider import provider_for_url
 
 
 class DownloadError(RuntimeError):
@@ -145,6 +146,13 @@ class DownloadService:
         if video["download_status"] not in ("pending", "waiting", "failed"):
             raise DownloadError("Video không ở trạng thái cho phép tải")
 
+        provider = provider_for_url(str(video["source_url"]))
+        if provider is None:
+            raise DownloadError(
+                "URL không thuộc Facebook, YouTube hoặc Instagram được hỗ trợ",
+                category="unsupported",
+            )
+
         root = Path(project["output_dir"]).resolve()
         root.mkdir(parents=True, exist_ok=True)
         target = root / video["video_code"]
@@ -180,7 +188,7 @@ class DownloadService:
                     command.extend(["--ffmpeg-location", ffmpeg_loc])
                 command.extend([
                     "-o", str(folder / (video["video_code"] + ".%(ext)s")),
-                    video["source_url"],
+                    provider.normalized_url,
                 ])
 
                 try:
