@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
     QFileDialog,
+    QProgressBar,
     QLineEdit,
     QPushButton,
     QTableWidget,
@@ -22,7 +23,7 @@ from PySide6.QtWidgets import (
 from app.models.project import Project
 from app.ui.widgets.video_table import VideoTable
 from app.ui.widgets.sidebar import button_icon
-from app.ui.widgets.loading_button import LoadingButton
+from app.ui.widgets.loading_button import LoadingButton, LoadingSpinner
 
 
 class ProjectDetailPage(QWidget):
@@ -161,12 +162,34 @@ class ProjectDetailPage(QWidget):
         self.queue_button = QPushButton("Xem hàng đợi")
         self.queue_button.setObjectName("secondary")
         self.queue_button.clicked.connect(self.queueRequested.emit)
-        self.queue_status = QLabel("Hàng đợi đang dừng")
-        self.queue_status.setObjectName("detailMeta")
         download_actions.addWidget(self.run_now_button)
         download_actions.addWidget(self.enqueue_button)
         download_actions.addWidget(self.queue_button)
-        download_actions.addWidget(self.queue_status, 1)
+        download_actions.addStretch()
+        self.queue_activity = QFrame()
+        self.queue_activity.setObjectName("downloadActivity")
+        activity_layout = QHBoxLayout(self.queue_activity)
+        activity_layout.setContentsMargins(14, 9, 14, 9)
+        activity_layout.setSpacing(10)
+        self.queue_spinner = LoadingSpinner(20, self.queue_activity)
+        activity_layout.addWidget(self.queue_spinner)
+        activity_text = QVBoxLayout()
+        activity_text.setSpacing(1)
+        self.queue_activity_title = QLabel("Hàng đợi sẵn sàng")
+        self.queue_activity_title.setObjectName("downloadActivityTitle")
+        self.queue_status = QLabel("Chọn video rồi nhấn Chạy ngay")
+        self.queue_status.setObjectName("downloadActivityDetail")
+        activity_text.addWidget(self.queue_activity_title)
+        activity_text.addWidget(self.queue_status)
+        activity_layout.addLayout(activity_text, 1)
+        self.queue_progress = QProgressBar()
+        self.queue_progress.setObjectName("downloadActivityProgress")
+        self.queue_progress.setRange(0, 100)
+        self.queue_progress.setValue(0)
+        self.queue_progress.setTextVisible(False)
+        self.queue_progress.setFixedWidth(180)
+        self.queue_progress.setFixedHeight(8)
+        activity_layout.addWidget(self.queue_progress)
         tabs = QTabWidget()
         tabs.setObjectName("projectTabs")
         project_tab = QWidget()
@@ -198,7 +221,18 @@ class ProjectDetailPage(QWidget):
         tabs.addTab(import_box, "Quản lý video")
         tabs.addTab(publish_tab, "Đăng Facebook")
         import_layout.addLayout(download_actions)
+        import_layout.addWidget(self.queue_activity)
         layout.addWidget(tabs, 1)
+
+    def set_queue_activity(self, loading: bool, *, title: str | None = None) -> None:
+        self.queue_spinner.set_running(loading)
+        if title is not None:
+            self.queue_activity_title.setText(title)
+        if not loading:
+            self.queue_progress.setValue(0)
+
+    def set_queue_progress(self, percent: float) -> None:
+        self.queue_progress.setValue(max(0, min(100, round(float(percent)))))
 
     def _apply_video_search(self) -> None:
         self.video_table.set_text_filter(

@@ -1921,6 +1921,7 @@ class MainWindow(QMainWindow):
 
     def _set_queue_loading(self, loading: bool) -> None:
         self.queue_page.set_queue_loading(loading)
+        self.detail_page.set_queue_activity(loading, title="Đang tải video" if loading else "Hàng đợi sẵn sàng")
         if not loading:
             self.detail_page.run_now_button.set_loading(False)
 
@@ -1950,6 +1951,7 @@ class MainWindow(QMainWindow):
         status = f"Đang tải {code}: {percent:.1f}% · {rate}{remaining}"
         self.queue_page.queue_status.setText(status)
         self.detail_page.queue_status.setText(status)
+        self.detail_page.set_queue_progress(percent)
         self._update_queue_stats()
 
     def _run_pending_deletions(self) -> bool:

@@ -67,6 +67,11 @@ QTableWidget#facebookVideoTable::item, QTableWidget#facebookJobTable::item { pad
 #actionStatus { background:#13233a; border:1px solid #284365; border-radius:9px; min-height:48px; }
 #actionStatusTitle { color:#f8fafc; font-size:16px; font-weight:700; }
 #actionStatusDetail { color:#b8c8dd; }
+#downloadActivity { background:#0f1d31; border:1px solid #284365; border-radius:8px; min-height:46px; }
+#downloadActivityTitle { color:#f8fafc; font-weight:650; }
+#downloadActivityDetail { color:#8ea1bb; }
+#downloadActivityProgress { background:#1a2b43; border:0; border-radius:4px; }
+#downloadActivityProgress::chunk { background:#3b82f6; border-radius:4px; }
 QTableView#videoTable { background:#0c1729; alternate-background-color:#101c30; border:1px solid #284365; color:#d7e0ef; gridline-color:#1c2d46; selection-background-color:#1d3c66; }
 QTableView#videoTable QHeaderView::section { color:#c6d7ee; font-weight:650; padding:10px 9px; }
 QTableView#csvPreviewTable { background:#0c1729; alternate-background-color:#101c30; border:1px solid #284365; color:#d7e0ef; gridline-color:#1c2d46; selection-background-color:#1d3c66; }

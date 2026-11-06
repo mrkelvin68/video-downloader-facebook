@@ -70,13 +70,19 @@ class LoadingSpinner(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         center = self._size / 2
         painter.translate(center, center)
-        painter.rotate(self._angle)
         parent = self.parentWidget()
         color = parent.palette().color(parent.foregroundRole()) if parent else QColor("white")
-        pen = QPen(QColor(color), 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen)
+        dot_color = QColor(color)
         radius = max(4.0, center - 4.0)
-        painter.drawArc(int(-radius), int(-radius), int(radius * 2), int(radius * 2), 35 * 16, 285 * 16)
+        painter.setPen(Qt.PenStyle.NoPen)
+        for index in range(10):
+            painter.save()
+            painter.rotate(self._angle + index * 36)
+            dot_color.setAlpha(70 + int(185 * ((index + 1) / 10)))
+            painter.setBrush(dot_color)
+            dot = 2.0 if index < 7 else 1.6
+            painter.drawEllipse(int(-dot / 2), int(-radius), int(dot), int(dot))
+            painter.restore()
         painter.end()
 
 
