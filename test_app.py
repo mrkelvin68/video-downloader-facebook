@@ -317,12 +317,12 @@ class DatabaseTransactionTests(unittest.TestCase):
         self.assertEqual(imported, 1000)
         self.assertEqual(len(self.store.list_videos(project_b)), 0)
         exported = self.store.export_csv(self.project_id)
-        self.assertTrue(exported.startswith("\ufeffstt,title,url\r\n"))
+        self.assertTrue(exported.startswith("\ufefftitle,url\r\n"))
         parsed, errors = parse_video_csv(exported)
         self.assertEqual(errors, [])
         self.assertEqual(parsed[0]["ten_video"], "Video 1")
-        self.assertIn("1,Video 1,https://www.facebook.com/watch/?v=1", exported)
-        self.assertLess(exported.index(",Video 1,"), exported.index(",Video 1000,"))
+        self.assertIn("Video 1,https://www.facebook.com/watch/?v=1", exported)
+        self.assertLess(exported.index("Video 1,"), exported.index("Video 1000,"))
 
 
 class VideoTableTests(unittest.TestCase):
@@ -365,6 +365,10 @@ class VideoTableTests(unittest.TestCase):
             table.model().data(first_checkbox, Qt.ItemDataRole.CheckStateRole),
             Qt.CheckState.Checked,
         )
+        table.set_text_filter("title", "Video 25")
+        self.assertEqual(table.model().rowCount(), 11)
+        table.set_sort("video_code", True)
+        self.assertEqual(table.model().data(table.model().index(0, 2)), "ep1-6-259")
         table.resize(1366, 768)
         table.resize(1920, 1080)
         self.application.processEvents()

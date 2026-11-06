@@ -70,6 +70,13 @@ class CsvRegressionTests(unittest.TestCase):
             ],
         )
 
+    def test_title_and_url_are_imported_without_stt(self):
+        rows, errors = parse_video_csv(
+            "title,url\nVideo mẫu,https://www.facebook.com/watch/?v=1\n"
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(rows[0]["stt"], 1)
+
     def test_excel_crlf_and_quoted_comma(self):
         rows, errors = parse_video_csv(
             'stt,ten_video,url\r\n'
@@ -173,6 +180,19 @@ class ImportPersistenceRegressionTests(unittest.TestCase):
             self.store.import_csv(self.project_id, self.video_csv("CSV B", "2"))
         row = self.store.list_videos(self.project_id)[0]
         self.assertEqual((row["title"], row["local_video_path"]), ("CSV A", "saved.mp4"))
+
+    def test_replacement_error_identifies_the_blocking_video(self):
+        self.store.import_csv(self.project_id, self.video_csv("CSV A"))
+        self.store.connection.execute(
+            "UPDATE videos SET download_status='completed', local_video_path='saved.mp4'"
+        )
+        self.store.connection.commit()
+        with self.assertRaisesRegex(
+            ValueError, r"ep1-6-1.*CSV A.*đã tải.*đã có tệp video"
+        ):
+            self.store.import_csv(
+                self.project_id, self.video_csv("CSV B", "2"), replace_confirmed=True
+            )
 
     def test_prefix_and_output_directory_cannot_change_after_import(self):
         self.store.import_csv(self.project_id, self.video_csv("CSV A"))

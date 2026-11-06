@@ -15,14 +15,20 @@ from PySide6.QtWidgets import (
 
 
 class CsvPreviewModel(QAbstractTableModel):
-    HEADERS = ("STT", "Mã video dự kiến", "Tên video", "URL nguồn")
+    HEADERS = ("Mã video dự kiến", "Tên video", "URL nguồn")
 
     def __init__(
-        self, rows: list[dict], project_prefix: str, parent: QWidget | None = None
+        self,
+        rows: list[dict],
+        project_prefix: str,
+        parent: QWidget | None = None,
+        *,
+        start_sequence: int = 1,
     ) -> None:
         super().__init__(parent)
         self._rows = list(rows)
         self._project_prefix = project_prefix
+        self._start_sequence = start_sequence
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._rows)
@@ -47,17 +53,16 @@ class CsvPreviewModel(QAbstractTableModel):
         if not index.isValid():
             return None
         row = self._rows[index.row()]
-        sequence = row["stt"]
+        sequence = self._start_sequence + index.row()
         url = str(row["url"])
         if role == Qt.ItemDataRole.ToolTipRole:
-            if index.column() == 3:
+            if index.column() == 2:
                 return url
-            if index.column() == 1:
+            if index.column() == 0:
                 return f"{self._project_prefix}-{sequence}"
         if role != Qt.ItemDataRole.DisplayRole:
             return None
         values = (
-            sequence,
             f"{self._project_prefix}-{sequence}",
             row["ten_video"],
             self._compact_url(url),
@@ -84,6 +89,8 @@ class CsvPreviewDialog(QDialog):
         errors: list[str],
         project_prefix: str,
         parent: QWidget | None = None,
+        *,
+        start_sequence: int = 1,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Xem trước CSV")
@@ -124,7 +131,9 @@ class CsvPreviewDialog(QDialog):
 
         self.table = QTableView(self)
         self.table.setObjectName("csvPreviewTable")
-        self.model = CsvPreviewModel(rows, project_prefix, self.table)
+        self.model = CsvPreviewModel(
+            rows, project_prefix, self.table, start_sequence=start_sequence
+        )
         self.table.setModel(self.model)
         self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
@@ -137,7 +146,6 @@ class CsvPreviewDialog(QDialog):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.table, 1)
 
         if errors:

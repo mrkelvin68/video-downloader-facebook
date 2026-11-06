@@ -18,7 +18,12 @@ class VideoService:
         return [Video.from_row(row) for row in self.database.list_videos(project_id)]
 
     def import_csv(
-        self, project_id: str, text: str, *, replace_confirmed: bool = False
+        self,
+        project_id: str,
+        text: str,
+        *,
+        replace_confirmed: bool = False,
+        append: bool = False,
     ) -> int:
         rows = parse_and_validate_video_csv(text)
         project = self.database.get_project(project_id)
@@ -29,6 +34,8 @@ class VideoService:
             for row in rows
         ]
         try:
+            if append:
+                return self.database.append_videos(project_id, rows)
             return self.database.replace_videos(
                 project_id, rows, replace_confirmed=replace_confirmed
             )

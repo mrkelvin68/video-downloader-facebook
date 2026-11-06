@@ -314,6 +314,9 @@ class ProjectService:
                 (project_id,),
             )
         connection.execute("DELETE FROM download_jobs WHERE project_id=?", (project_id,))
+        connection.execute("DELETE FROM facebook_publishing_jobs WHERE project_id=?", (project_id,))
+        connection.execute("DELETE FROM facebook_drafts WHERE project_id=?", (project_id,))
+        connection.execute("DELETE FROM facebook_pages WHERE project_id=?", (project_id,))
         connection.execute("DELETE FROM videos WHERE project_id=?", (project_id,))
         connection.execute("DELETE FROM projects WHERE uuid=?", (project_id,))
 

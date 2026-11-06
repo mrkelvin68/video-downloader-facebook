@@ -14,6 +14,8 @@ QWidget { background:#0d1526; color:#d7e0ef; font-family:"Segoe UI"; font-size:1
 #breadcrumb { color:#91a4bf; }
 #phaseTag { background:#1e3a5f; border-radius:5px; color:#7dd3fc; font-size:11px; font-weight:700; padding:5px 8px; }
 #title { color:#f8fafc; font-size:27px; font-weight:700; }
+#pageTitle { color:#f8fafc; font-size:27px; font-weight:700; }
+#projectName { color:#f8fafc; font-size:22px; font-weight:650; }
 #detailMeta, #muted { color:#8ea1bb; }
 QPushButton { color:#c5d2e5; background:transparent; border:1px solid transparent; border-radius:7px; padding:9px 13px; }
 QPushButton:hover:enabled { background:#17263d; color:#fff; }
@@ -46,7 +48,8 @@ QDialog { background:#101b2e; }
 #dialogFooter { background:#14233b; border-top:1px solid #293e5d; }
 QFormLayout > QLabel { color:#dbe7f7; font-weight:600; }
 QLineEdit, QTextEdit { background:#0c1729; border:1px solid #304766; border-radius:7px; color:#f8fafc; padding:9px 10px; }
-QLineEdit:focus, QTextEdit:focus { border:1px solid #60a5fa; }
+QComboBox { background:#0c1729; border:1px solid #304766; border-radius:7px; color:#f8fafc; padding:8px 10px; }
+QLineEdit:focus, QTextEdit:focus, QComboBox:focus { border:1px solid #60a5fa; }
 #error { color:#fca5a5; background:#3a1f2a; border:1px solid #713342; border-radius:6px; padding:8px 10px; }
 #stepActive, #step { background:#14223a; border:1px solid #283e5e; border-radius:10px; min-height:88px; }
 #stepActive { border-color:#3b82f6; background:#163158; }
@@ -54,12 +57,18 @@ QLineEdit:focus, QTextEdit:focus { border:1px solid #60a5fa; }
 #stepNumberActive { background:#2563eb; color:#fff; }
 #stepText { color:#b8c8dd; font-weight:600; }
 #detailNotice { background:#13233a; border:1px solid #284365; border-radius:9px; color:#b8cae2; }
+#facebookCard { background:#14223a; border:1px solid #284365; border-radius:9px; }
+#facebookSectionTitle { color:#f8fafc; font-size:16px; font-weight:650; }
+QFrame#facebookCard QLabel { background:transparent; }
+QTableWidget#facebookVideoTable, QTableWidget#facebookJobTable { background:#0c1729; alternate-background-color:#101c30; border:1px solid #284365; color:#d7e0ef; gridline-color:#1c2d46; selection-background-color:#1d3c66; }
+QTableWidget#facebookVideoTable::item, QTableWidget#facebookJobTable::item { padding:4px 6px; }
 #dropZone { border:2px dashed #304766; border-radius:8px; color:#8ea1bb; background:#0c1729; }
 #dropZone:hover { border-color:#3b82f6; color:#d7e0ef; }
 #actionStatus { background:#13233a; border:1px solid #284365; border-radius:9px; min-height:48px; }
 #actionStatusTitle { color:#f8fafc; font-size:16px; font-weight:700; }
 #actionStatusDetail { color:#b8c8dd; }
 QTableView#videoTable { background:#0c1729; alternate-background-color:#101c30; border:1px solid #284365; color:#d7e0ef; gridline-color:#1c2d46; selection-background-color:#1d3c66; }
+QTableView#videoTable QHeaderView::section { color:#c6d7ee; font-weight:650; padding:10px 9px; }
 QTableView#csvPreviewTable { background:#0c1729; alternate-background-color:#101c30; border:1px solid #284365; color:#d7e0ef; gridline-color:#1c2d46; selection-background-color:#1d3c66; }
 QTableView#downloadQueueTable { background:#0c1729; alternate-background-color:#101c30; border:1px solid #284365; color:#d7e0ef; gridline-color:#1c2d46; selection-background-color:#1d3c66; }
 QTableView#matrixTable { background:#0c1729; border:1px solid #284365; color:#d7e0ef; gridline-color:#1c2d46; selection-background-color:#1d3c66; }
@@ -68,6 +77,14 @@ QTableView#projectVideoListTable::item { padding:3px; }
 QTabWidget#matrixContentTabs::pane { border:1px solid #243955; border-radius:7px; top:-1px; }
 QTabWidget#matrixContentTabs QTabBar::tab { background:#101c30; color:#9fb0c7; border:1px solid #263a58; border-bottom:0; border-top-left-radius:7px; border-top-right-radius:7px; margin-right:5px; padding:8px 14px; }
 QTabWidget#matrixContentTabs QTabBar::tab:selected { background:#17345b; color:#f8fafc; border-color:#3b82f6; }
+QTabWidget#projectTabs::pane { background:transparent; border:0; }
+QTabWidget#projectTabs QTabBar::tab { background:#101c30; color:#9fb0c7; border:1px solid #263a58; border-bottom:0; border-top-left-radius:7px; border-top-right-radius:7px; margin-right:5px; padding:8px 14px; }
+QTabWidget#projectTabs QTabBar::tab:selected { background:#17345b; color:#f8fafc; border-color:#3b82f6; }
+QTabWidget#projectTabs QTabBar::tab:hover { background:#17263d; }
+QTabWidget#facebookTabs::pane { background:transparent; border:0; }
+QTabWidget#facebookTabs QTabBar::tab { background:#101c30; color:#9fb0c7; border:1px solid #263a58; border-bottom:0; border-top-left-radius:7px; border-top-right-radius:7px; margin-right:5px; padding:7px 12px; }
+QTabWidget#facebookTabs QTabBar::tab:selected { background:#17345b; color:#f8fafc; border-color:#3b82f6; }
+QTabWidget#facebookTabs QTabBar::tab:hover { background:#17263d; }
 #matrixHeader { background:transparent; border-bottom:1px solid #1d2b43; }
 #matrixTabs::tab { background:#101c30; color:#9fb0c7; border:1px solid #263a58; border-radius:7px; margin-right:6px; padding:9px 14px; }
 #matrixTabs::tab:selected { background:#17345b; color:#f8fafc; border-color:#3b82f6; }
