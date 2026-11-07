@@ -1,5 +1,7 @@
 import unittest
 import tempfile
+import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +15,41 @@ from app.services.video_service import VideoService
 
 
 class VideoPlatformImportTests(unittest.TestCase):
+    def test_metadata_migration_preserves_existing_video(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database_path = Path(temporary_directory) / "legacy.sqlite3"
+            legacy = sqlite3.connect(database_path)
+            legacy.executescript(
+                """CREATE TABLE projects (
+                    uuid TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, prefix TEXT NOT NULL,
+                    output_dir TEXT NOT NULL UNIQUE, notes TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                CREATE TABLE videos (
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, sequence_number INTEGER NOT NULL,
+                    video_code TEXT NOT NULL, title TEXT NOT NULL, source_url TEXT NOT NULL,
+                    normalized_url TEXT NOT NULL, download_status TEXT NOT NULL DEFAULT 'pending',
+                    local_video_path TEXT, thumbnail_path TEXT,
+                    facebook_uploaded INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    UNIQUE(project_id, sequence_number), UNIQUE(project_id, normalized_url),
+                    UNIQUE(project_id, video_code));
+                INSERT INTO projects VALUES ('p1', 'Project', 'p', 'C:/output', '', 'now', 'now');
+                INSERT INTO videos (id, project_id, sequence_number, video_code, title, source_url,
+                    normalized_url, created_at, updated_at)
+                    VALUES ('v1', 'p1', 1, 'p-1', 'Existing', 'https://www.facebook.com/reel/1',
+                    'https://facebook.com/reel/1', 'now', 'now');"""
+            )
+            legacy.commit()
+            legacy.close()
+            database = Database(database_path)
+            try:
+                video = database.list_videos("p1")[0]
+                self.assertEqual(video["title"], "Existing")
+                self.assertIn("platform", video.keys())
+                self.assertIsNone(video["platform"])
+            finally:
+                database.close()
+
     def test_recognizes_youtube_watch_short_and_shortlink(self):
         cases = {
             "https://www.youtube.com/watch?v=abc123XYZ09": "abc123XYZ09",
@@ -96,6 +133,18 @@ class VideoPlatformImportTests(unittest.TestCase):
                     download_command[:] = command
                     output = Path(command[command.index("-o") + 1].replace("%(ext)s", "mp4"))
                     output.write_bytes(b"mock mp4")
+                    output.with_name("import-1.info.json").write_text(
+                        json.dumps(
+                            {
+                                "id": "abc123XYZ09",
+                                "channel": "Test channel",
+                                "duration": 12.5,
+                                "width": 1920,
+                                "height": 1080,
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
                     return SimpleNamespace(returncode=0, stderr="", stdout="")
 
                 output, _thumbnail = DownloadService(
@@ -109,6 +158,12 @@ class VideoPlatformImportTests(unittest.TestCase):
                 self.assertEqual(
                     database.list_videos(project_id)[0]["download_status"], "completed"
                 )
+                saved = database.list_videos(project_id)[0]
+                self.assertEqual(saved["platform"], "youtube")
+                self.assertEqual(saved["external_video_id"], "abc123XYZ09")
+                self.assertEqual(saved["author_name"], "Test channel")
+                self.assertEqual(saved["duration_seconds"], 12.5)
+                self.assertEqual(saved["resolution"], "1920x1080")
             finally:
                 database.close()
 

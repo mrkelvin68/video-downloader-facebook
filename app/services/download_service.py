@@ -11,11 +11,12 @@ import tempfile
 import threading
 import time
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 
 from app.database.connection import Database
-from app.services.video_download_provider import provider_for_url
+from app.services.video_download_provider import VideoDownloadProvider, provider_for_url
 
 
 class DownloadError(RuntimeError):
@@ -147,11 +148,7 @@ class DownloadService:
             raise DownloadError("Video không ở trạng thái cho phép tải")
 
         provider = provider_for_url(str(video["source_url"]))
-        if provider is None:
-            raise DownloadError(
-                "URL không thuộc Facebook, YouTube hoặc Instagram được hỗ trợ",
-                category="unsupported",
-            )
+        source_url = provider.normalized_url if provider else str(video["source_url"])
 
         root = Path(project["output_dir"]).resolve()
         root.mkdir(parents=True, exist_ok=True)
@@ -166,7 +163,7 @@ class DownloadService:
                 ffmpeg_loc = self._find_ffmpeg()
                 command = [
                     *self._yt_dlp_command(), "--no-playlist",
-                    "--no-overwrites", "--write-thumbnail", "--convert-thumbnails", "jpg",
+                    "--no-overwrites", "--write-thumbnail", "--write-info-json", "--convert-thumbnails", "jpg",
                     "-f", "bv*+ba/b", "--merge-output-format", "mp4", "--remux-video", "mp4",
                 ]
                 if progress_callback is None:
@@ -188,7 +185,7 @@ class DownloadService:
                     command.extend(["--ffmpeg-location", ffmpeg_loc])
                 command.extend([
                     "-o", str(folder / (video["video_code"] + ".%(ext)s")),
-                    provider.normalized_url,
+                    source_url,
                 ])
 
                 try:
@@ -225,6 +222,9 @@ class DownloadService:
                 if not video_path.is_file() or video_path.stat().st_size == 0:
                     raise DownloadError("Không tìm thấy MP4 sau khi tải")
                 self._validate_media(video_path)
+                metadata = self._read_download_metadata(
+                    folder / f"{video['video_code']}.info.json", provider
+                )
 
                 # Thumbnail chuẩn hóa thành thumbnail.jpg nếu có
                 thumb_candidates = list(folder.glob(f"{video['video_code']}.*"))
@@ -242,6 +242,7 @@ class DownloadService:
                 os.replace(folder, target)
                 output = target / video_path.name
                 thumbnail = target / "thumbnail.jpg" if has_thumbnail else None
+                self._set_video_metadata(project_id, video_id, metadata)
                 self._set_status(project_id, video_id, "completed", str(output), str(thumbnail) if thumbnail else None)
                 return output, thumbnail
         except Exception as download_error:
@@ -462,6 +463,57 @@ class DownloadService:
             return configured
         tools = DownloadService._find_static_ffmpeg()
         return tools[1] if tools else None
+
+    @staticmethod
+    def _read_download_metadata(
+        info_path: Path, provider: VideoDownloadProvider | None
+    ) -> dict[str, object]:
+        if not info_path.is_file():
+            return {
+                "platform": provider.platform.value if provider else None,
+                "canonical_url": provider.normalized_url if provider else None,
+                "external_video_id": provider.video_id if provider else None,
+            }
+        try:
+            payload = json.loads(info_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return {
+                "platform": provider.platform.value if provider else None,
+                "canonical_url": provider.normalized_url if provider else None,
+                "external_video_id": provider.video_id if provider else None,
+            }
+        width, height = payload.get("width"), payload.get("height")
+        resolution = f"{width}x{height}" if width and height else None
+        return {
+            "platform": provider.platform.value if provider else payload.get("extractor_key"),
+            "canonical_url": provider.normalized_url if provider else payload.get("webpage_url"),
+            "external_video_id": payload.get("id") or (provider.video_id if provider else None),
+            "author_name": payload.get("channel") or payload.get("uploader"),
+            "duration_seconds": payload.get("duration"),
+            "resolution": resolution,
+        }
+
+    def _set_video_metadata(
+        self, project_id: str, video_id: str, metadata: dict[str, object]
+    ) -> None:
+        with self.database.connection:
+            self.database.connection.execute(
+                """UPDATE videos
+                   SET platform=COALESCE(?, platform),
+                       canonical_url=COALESCE(?, canonical_url),
+                       external_video_id=COALESCE(?, external_video_id),
+                       author_name=COALESCE(?, author_name),
+                       duration_seconds=COALESCE(?, duration_seconds),
+                       resolution=COALESCE(?, resolution),
+                       updated_at=?
+                   WHERE id=? AND project_id=?""",
+                (
+                    metadata.get("platform"), metadata.get("canonical_url"),
+                    metadata.get("external_video_id"), metadata.get("author_name"),
+                    metadata.get("duration_seconds"), metadata.get("resolution"),
+                    datetime.now(UTC).isoformat(timespec="seconds"), video_id, project_id,
+                ),
+            )
 
     def _set_status(
         self, project_id: str, video_id: str, status: str, video_path: str | None = None, thumb_path: str | None = None

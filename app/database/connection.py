@@ -158,6 +158,9 @@ class Database:
                         row["ten_video"],
                         row["url"],
                         row["normalized_url"],
+                        row.get("platform"),
+                        row.get("canonical_url"),
+                        row.get("external_video_id"),
                         now,
                         now,
                     )
@@ -165,8 +168,9 @@ class Database:
             self.connection.executemany(
                 """INSERT INTO videos
                     (id, project_id, sequence_number, video_code, title, source_url,
-                     normalized_url, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     normalized_url, platform, canonical_url, external_video_id,
+                     created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 prepared,
             )
             self.connection.commit()
@@ -203,6 +207,9 @@ class Database:
                     row["ten_video"],
                     row["url"],
                     row["normalized_url"],
+                    row.get("platform"),
+                    row.get("canonical_url"),
+                    row.get("external_video_id"),
                     now,
                     now,
                 )
@@ -211,8 +218,9 @@ class Database:
             self.connection.executemany(
                 """INSERT INTO videos
                     (id, project_id, sequence_number, video_code, title, source_url,
-                     normalized_url, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     normalized_url, platform, canonical_url, external_video_id,
+                     created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 prepared,
             )
             self.connection.commit()
