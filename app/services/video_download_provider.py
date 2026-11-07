@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+import re
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 
@@ -47,6 +48,12 @@ def _safe_parts(url: str):
         return None
 
 
+def _valid_video_id(video_id: str, *, exact_length: int | None = None) -> bool:
+    if exact_length is not None and len(video_id) != exact_length:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]+", video_id))
+
+
 def provider_for_url(url: str) -> VideoDownloadProvider | None:
     """Recognize and canonicalize a supported public video URL.
 
@@ -60,7 +67,7 @@ def provider_for_url(url: str) -> VideoDownloadProvider | None:
     path_parts = [part for part in parts.path.split("/") if part]
 
     if host == "youtu.be":
-        if not path_parts:
+        if not path_parts or not _valid_video_id(path_parts[0], exact_length=11):
             return None
         video_id = path_parts[0]
         return YouTubeDownloadProvider(
@@ -75,7 +82,7 @@ def provider_for_url(url: str) -> VideoDownloadProvider | None:
             video_id = path_parts[1]
         else:
             video_id = ""
-        if not video_id:
+        if not _valid_video_id(video_id, exact_length=11):
             return None
         return YouTubeDownloadProvider(
             VideoPlatform.YOUTUBE,
@@ -86,6 +93,8 @@ def provider_for_url(url: str) -> VideoDownloadProvider | None:
         if len(path_parts) < 2 or path_parts[0] not in {"reel", "p"}:
             return None
         kind, video_id = path_parts[0], path_parts[1]
+        if not _valid_video_id(video_id) or len(video_id) < 5:
+            return None
         return InstagramDownloadProvider(
             VideoPlatform.INSTAGRAM,
             video_id,
@@ -95,10 +104,27 @@ def provider_for_url(url: str) -> VideoDownloadProvider | None:
         if not (parts.path.strip("/") or parts.query):
             return None
         path = parts.path.rstrip("/") or "/"
+        if path_parts[:1] == ["reel"]:
+            if len(path_parts) < 2 or not _valid_video_id(path_parts[1]):
+                return None
+            return FacebookDownloadProvider(
+                VideoPlatform.FACEBOOK,
+                path_parts[1],
+                f"https://facebook.com/reel/{path_parts[1]}",
+            )
+        if path_parts[:1] == ["watch"]:
+            video_id = (parse_qs(parts.query).get("v") or [""])[0]
+            if not video_id:
+                return None
+            return FacebookDownloadProvider(
+                VideoPlatform.FACEBOOK,
+                video_id,
+                f"https://facebook.com/watch/?v={video_id}",
+            )
         return FacebookDownloadProvider(
             VideoPlatform.FACEBOOK,
             path_parts[-1] if path_parts else (parse_qs(parts.query).get("v") or [""])[0],
-            urlunsplit((parts.scheme.lower(), host, path, parts.query, "")),
+            urlunsplit((parts.scheme.lower(), host, path, "", "")),
         )
     return None
 

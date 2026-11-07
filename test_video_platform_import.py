@@ -4,11 +4,12 @@ import json
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.core.validators import normalize_video_url, validate_supported_video_url
 from app.database.connection import Database
 from app.services.csv_service import parse_video_csv
-from app.services.download_service import DownloadService
+from app.services.download_service import DownloadService, classify_download_error
 from app.services.project_service import ProjectService
 from app.services.video_download_provider import VideoPlatform, provider_for_url
 from app.services.video_service import VideoService
@@ -78,15 +79,37 @@ class VideoPlatformImportTests(unittest.TestCase):
                 self.assertEqual(provider.platform, VideoPlatform.INSTAGRAM)
                 self.assertEqual(provider.normalized_url, f"https://www.instagram.com/{expected}/ABC123/")
 
+    def test_recognizes_facebook_reel_and_watch(self):
+        for url, expected_id in (
+            ("https://www.facebook.com/reel/1195289147628387?tracking=1", "1195289147628387"),
+            ("https://www.facebook.com/watch/?v=647537299265662&utm_source=test", "647537299265662"),
+        ):
+            with self.subTest(url=url):
+                provider = provider_for_url(url)
+                self.assertIsNotNone(provider)
+                self.assertEqual(provider.platform, VideoPlatform.FACEBOOK)
+                self.assertEqual(provider.video_id, expected_id)
+
     def test_rejects_invalid_or_unsupported_urls(self):
         for url in (
             "https://www.youtube.com/watch",
+            "https://youtu.be/too-short",
+            "https://www.youtube.com/shorts/not-an-id!",
             "https://www.instagram.com/stories/example/",
+            "https://www.instagram.com/reel/a!bad/",
+            "https://www.facebook.com/reel/bad!id/",
+            "ftp://www.youtube.com/watch?v=abc123XYZ09",
             "https://example.com/video",
             "not a url",
         ):
             with self.subTest(url=url):
                 self.assertFalse(validate_supported_video_url(url))
+
+    def test_platform_access_restrictions_are_permanent(self):
+        self.assertEqual(
+            classify_download_error("This video is not available in your country"),
+            ("blocked", False),
+        )
 
     def test_csv_accepts_mixed_platforms_and_canonicalizes_duplicates(self):
         text = (
@@ -101,6 +124,10 @@ class VideoPlatformImportTests(unittest.TestCase):
         self.assertEqual(
             normalize_video_url("https://youtu.be/abc123XYZ09?t=1"),
             "https://www.youtube.com/watch?v=abc123XYZ09",
+        )
+        self.assertEqual(
+            normalize_video_url("https://www.facebook.com/watch/?v=1&utm_source=test"),
+            "https://facebook.com/watch/?v=1",
         )
         duplicate_rows, duplicate_errors = parse_video_csv(
             "title,url\nOne,https://youtu.be/abc123XYZ09\nTwo,https://www.youtube.com/watch?v=abc123XYZ09\n"
@@ -164,6 +191,80 @@ class VideoPlatformImportTests(unittest.TestCase):
                 self.assertEqual(saved["author_name"], "Test channel")
                 self.assertEqual(saved["duration_seconds"], 12.5)
                 self.assertEqual(saved["resolution"], "1920x1080")
+            finally:
+                database.close()
+
+    def test_failed_completion_recovers_valid_file_without_redownload(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            database = Database(root / "project.sqlite3")
+            try:
+                project_id = ProjectService(database).create(
+                    "Recovery test", "recovery", str(root / "videos")
+                )
+                VideoService(database).import_csv(
+                    project_id, "title,url\nYouTube,https://youtu.be/abc123XYZ09\n"
+                )
+                video = database.list_videos(project_id)[0]
+                target = root / "videos" / video["video_code"]
+                target.mkdir(parents=True)
+                (target / f"{video['video_code']}.mp4").write_bytes(b"valid")
+                with database.connection:
+                    database.connection.execute(
+                        "UPDATE videos SET download_status='failed' WHERE id=?", (video["id"],)
+                    )
+                service = DownloadService(
+                    database,
+                    runner=lambda *_args, **_kwargs: self.fail("must not re-download"),
+                    ffprobe=lambda: "ffprobe",
+                )
+                service._validate_media = lambda _path: None
+                output, _thumbnail = service.download(project_id, video["id"])
+                self.assertTrue(output.is_file())
+                self.assertEqual(
+                    database.list_videos(project_id)[0]["download_status"], "completed"
+                )
+            finally:
+                database.close()
+
+    def test_metadata_database_failure_keeps_valid_file_recoverable(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            database = Database(root / "project.sqlite3")
+            try:
+                project_id = ProjectService(database).create(
+                    "Metadata failure", "metadata", str(root / "videos")
+                )
+                VideoService(database).import_csv(
+                    project_id, "title,url\nYouTube,https://youtu.be/abc123XYZ09\n"
+                )
+                video = database.list_videos(project_id)[0]
+
+                def runner(command, **_kwargs):
+                    if command[0] == "ffprobe":
+                        return SimpleNamespace(
+                            returncode=0,
+                            stderr="",
+                            stdout='{"streams":[{"codec_type":"video"}],"format":{"duration":"1"}}',
+                        )
+                    output = Path(command[command.index("-o") + 1].replace("%(ext)s", "mp4"))
+                    output.write_bytes(b"valid")
+                    return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+                service = DownloadService(database, runner=runner, ffprobe=lambda: "ffprobe")
+                with patch.object(
+                    service, "_set_video_metadata", side_effect=sqlite3.OperationalError("metadata write failed")
+                ):
+                    with self.assertRaises(sqlite3.OperationalError):
+                        service.download(project_id, video["id"])
+                target = root / "videos" / video["video_code"] / f"{video['video_code']}.mp4"
+                self.assertTrue(target.is_file())
+                self.assertEqual(database.list_videos(project_id)[0]["download_status"], "failed")
+                output, _thumbnail = DownloadService(
+                    database, runner=runner, ffprobe=lambda: "ffprobe"
+                ).download(project_id, video["id"])
+                self.assertEqual(output, target)
+                self.assertEqual(database.list_videos(project_id)[0]["download_status"], "completed")
             finally:
                 database.close()
 

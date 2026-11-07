@@ -43,6 +43,17 @@ def classify_download_error(message: str) -> tuple[str, bool]:
     normalized = message.casefold()
     if any(
         marker in normalized
+        for marker in (
+            "geo restriction",
+            "not available in your country",
+            "region restricted",
+            "access denied",
+            "forbidden",
+        )
+    ):
+        return "blocked", False
+    if any(
+        marker in normalized
         for marker in ("timed out", "timeout", "quá thời gian", "hết thời gian")
     ):
         return "timeout", True
@@ -154,6 +165,22 @@ class DownloadService:
         root.mkdir(parents=True, exist_ok=True)
         target = root / video["video_code"]
         if target.exists():
+            existing_video = target / f"{video['video_code']}.mp4"
+            if video["download_status"] == "failed" and existing_video.is_file():
+                self._validate_media(existing_video)
+                metadata = self._read_download_metadata(
+                    target / f"{video['video_code']}.info.json", provider
+                )
+                thumbnail = target / "thumbnail.jpg"
+                self._set_video_metadata(project_id, video_id, metadata)
+                self._set_status(
+                    project_id,
+                    video_id,
+                    "completed",
+                    str(existing_video),
+                    str(thumbnail) if thumbnail.is_file() else None,
+                )
+                return existing_video, thumbnail if thumbnail.is_file() else None
             raise DownloadError(f"Thư mục đích đã tồn tại, không ghi đè: {target}")
 
         self._set_status(project_id, video_id, "downloading")
@@ -162,7 +189,7 @@ class DownloadService:
                 folder = Path(work)
                 ffmpeg_loc = self._find_ffmpeg()
                 command = [
-                    *self._yt_dlp_command(), "--no-playlist",
+                    *self._yt_dlp_command(), "--no-playlist", "--playlist-items", "1",
                     "--no-overwrites", "--write-thumbnail", "--write-info-json", "--convert-thumbnails", "jpg",
                     "-f", "bv*+ba/b", "--merge-output-format", "mp4", "--remux-video", "mp4",
                 ]
@@ -487,7 +514,7 @@ class DownloadService:
         return {
             "platform": provider.platform.value if provider else payload.get("extractor_key"),
             "canonical_url": provider.normalized_url if provider else payload.get("webpage_url"),
-            "external_video_id": payload.get("id") or (provider.video_id if provider else None),
+            "external_video_id": provider.video_id if provider else payload.get("id"),
             "author_name": payload.get("channel") or payload.get("uploader"),
             "duration_seconds": payload.get("duration"),
             "resolution": resolution,

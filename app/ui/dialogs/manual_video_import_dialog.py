@@ -96,7 +96,14 @@ class ManualVideoImportDialog(QDialog):
 
     def add_pasted_urls(self) -> None:
         invalid: list[str] = []
+        duplicates: list[str] = []
         added = 0
+        known_urls = {
+            provider.normalized_url
+            for row in range(self.table.rowCount())
+            if (item := self.table.item(row, 1))
+            and (provider := provider_for_url(item.text().strip())) is not None
+        }
         for raw_url in self.url_paste.toPlainText().splitlines():
             url = raw_url.strip()
             if not url:
@@ -105,6 +112,9 @@ class ManualVideoImportDialog(QDialog):
             if provider is None:
                 invalid.append(url)
                 continue
+            if provider.normalized_url in known_urls:
+                duplicates.append(url)
+                continue
             self.add_row()
             row = self.table.rowCount() - 1
             self.table.item(row, 0).setText(
@@ -112,6 +122,7 @@ class ManualVideoImportDialog(QDialog):
             )
             self.table.item(row, 1).setText(url)
             self.table.item(row, 2).setText(platform_label(provider))
+            known_urls.add(provider.normalized_url)
             added += 1
         self.url_paste.clear()
         if invalid:
@@ -119,6 +130,12 @@ class ManualVideoImportDialog(QDialog):
                 self,
                 "URL không hợp lệ",
                 "Không nhận diện được URL hỗ trợ:\n" + "\n".join(invalid[:10]),
+            )
+        if duplicates:
+            QMessageBox.information(
+                self,
+                "URL trùng",
+                "Đã bỏ qua URL đã có trong danh sách:\n" + "\n".join(duplicates[:10]),
             )
         if added:
             self.table.setFocus()
