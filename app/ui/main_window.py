@@ -1713,7 +1713,11 @@ class MainWindow(QMainWindow):
             return
         previous_rows: list[dict[str, object]] | None = None
         while True:
-            dialog = ManualVideoImportDialog(self, rows=previous_rows)
+            dialog = ManualVideoImportDialog(
+                self,
+                rows=previous_rows,
+                project_id=self.current_project.uuid,
+            )
             if dialog.exec() != ManualVideoImportDialog.DialogCode.Accepted:
                 return
             self.pending_csv_text = dialog.csv_text
@@ -1721,6 +1725,7 @@ class MainWindow(QMainWindow):
             self.pending_csv_errors = []
             self.confirm_import()
             if self.pending_csv_text is None:
+                dialog.clear_draft()
                 return
             previous_rows = list(dialog.rows)
 
