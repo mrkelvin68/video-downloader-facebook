@@ -27,7 +27,7 @@ class Database:
                 """SELECT p.*,
                           (SELECT COUNT(*) FROM matrices m
                            WHERE m.project_id=p.uuid) AS matrix_count
-                   FROM projects p ORDER BY p.name COLLATE NOCASE"""
+                   FROM projects p ORDER BY p.created_at DESC, p.name COLLATE NOCASE"""
             )
         )
 

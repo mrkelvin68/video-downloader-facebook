@@ -33,6 +33,21 @@ class ProjectManagementTests(unittest.TestCase):
         row = next(item for item in self.store.list_projects() if item["uuid"] == first_id)
         self.assertEqual((row["name"], row["notes"]), ("Đã sửa", "Ghi chú"))
 
+    def test_list_projects_is_sorted_by_created_at_descending(self):
+        id_1 = self.create("A Older Project", "old", "videos-old")
+        id_2 = self.create("Z Newer Project", "new", "videos-new")
+        self.store.database.connection.execute(
+            "UPDATE projects SET created_at='2026-01-01T00:00:00+00:00' WHERE uuid=?",
+            (id_1,),
+        )
+        self.store.database.connection.execute(
+            "UPDATE projects SET created_at='2026-01-02T00:00:00+00:00' WHERE uuid=?",
+            (id_2,),
+        )
+        self.store.database.connection.commit()
+        projects = self.store.list_projects()
+        self.assertEqual([p["uuid"] for p in projects], [id_2, id_1])
+
     def test_output_folder_permissions_and_no_overwrite(self):
         occupied = self.root / "occupied"
         occupied.mkdir()
