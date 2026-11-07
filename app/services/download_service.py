@@ -189,11 +189,14 @@ class DownloadService:
             with tempfile.TemporaryDirectory(prefix=".download-", dir=root) as work:
                 folder = Path(work)
                 ffmpeg_loc = self._find_ffmpeg()
+                cookies_file = self._find_cookies_file()
                 command = [
                     *self._yt_dlp_command(), "--no-playlist", "--playlist-items", "1",
                     "--no-overwrites", "--write-thumbnail", "--write-info-json", "--convert-thumbnails", "jpg",
                     "-f", "bv*+ba/b", "--merge-output-format", "mp4", "--remux-video", "mp4",
                 ]
+                if cookies_file:
+                    command.extend(["--cookies", cookies_file])
                 if progress_callback is None:
                     command.append("--no-progress")
                 else:
@@ -246,8 +249,9 @@ class DownloadService:
                     reason = (result.stderr or result.stdout or "Không rõ nguyên nhân").strip()
                     if "cannot parse data" in reason.casefold():
                         raise DownloadError(
-                            "Video không khả dụng, đã bị xóa hoặc ở chế độ riêng tư trên nền tảng nguồn "
-                            f"({reason[-300:]})",
+                            "Video yêu cầu đăng nhập Facebook (ví dụ: nội dung tài trợ/affiliate hoặc giới hạn độ tuổi) "
+                            "hoặc không khả dụng ở chế độ khách. Hãy đặt file cookies.txt tại "
+                            f"~/.video-downloader-facebook/cookies.txt để tải ({reason[-300:]})",
                             category="unavailable",
                             retryable=False,
                         )
@@ -454,6 +458,19 @@ class DownloadService:
                 return [str(bundled)]
             return [sys.executable, "--yt-dlp"]
         return [sys.executable, "-m", "yt_dlp"]
+
+    @staticmethod
+    def _find_cookies_file() -> str | None:
+        configured = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
+        if configured and Path(configured).is_file():
+            return str(Path(configured))
+        for candidate in (
+            Path.home() / ".video-downloader-facebook" / "cookies.txt",
+            Path("cookies.txt"),
+        ):
+            if candidate.is_file():
+                return str(candidate.resolve())
+        return None
 
     @staticmethod
     def _find_ffmpeg() -> str | None:

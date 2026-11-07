@@ -143,6 +143,28 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(self.db.list_videos(self.project)[0]["download_status"], "failed")
         self.assertFalse((self.root / "project" / "episode-1").exists())
 
+    def test_cannot_parse_data_explains_facebook_login_cookie_requirement(self):
+        runner = lambda *a, **k: SimpleNamespace(
+            returncode=1,
+            stderr="ERROR: [facebook] 28755749490762508: Cannot parse data",
+            stdout="",
+        )
+        with self.assertRaises(DownloadError) as error:
+            DownloadService(self.db, runner=runner).download(self.project, self.video["id"])
+        self.assertEqual(error.exception.category, "unavailable")
+        self.assertFalse(error.exception.retryable)
+        self.assertIn("cookies.txt", str(error.exception))
+
+    def test_cookies_file_is_passed_to_ytdlp_when_present(self):
+        cookies_path = self.root / "cookies.txt"
+        cookies_path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+        service = DownloadService(self.db, runner=self._runner)
+        with patch.object(service, "_find_cookies_file", return_value=str(cookies_path)):
+            service.download(self.project, self.video["id"])
+        self.assertIn("--cookies", self._download_command)
+        cookies_index = self._download_command.index("--cookies")
+        self.assertEqual(self._download_command[cookies_index + 1], str(cookies_path))
+
     def test_ffprobe_failure_marks_failed(self):
         def runner(command, **kwargs):
             if "-show_streams" in command:
