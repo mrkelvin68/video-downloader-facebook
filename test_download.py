@@ -149,11 +149,46 @@ class DownloadTests(unittest.TestCase):
             stderr="ERROR: [facebook] 28755749490762508: Cannot parse data",
             stdout="",
         )
-        with self.assertRaises(DownloadError) as error:
-            DownloadService(self.db, runner=runner).download(self.project, self.video["id"])
+        service = DownloadService(self.db, runner=runner)
+        with patch.object(service, "_resolve_facebook_mirror_url", return_value=None):
+            with self.assertRaises(DownloadError) as error:
+                service.download(self.project, self.video["id"])
         self.assertEqual(error.exception.category, "unavailable")
         self.assertFalse(error.exception.retryable)
         self.assertIn("cookies.txt", str(error.exception))
+
+    def test_cannot_parse_data_falls_back_to_facebook_mirror_reel_when_found(self):
+        calls = []
+
+        def runner(command, **kwargs):
+            if "-show_streams" in command:
+                return SimpleNamespace(
+                    returncode=0,
+                    stderr="",
+                    stdout='{"streams":[{"codec_type":"video"}],"format":{"duration":"1.0"}}',
+                )
+            calls.append(list(command))
+            if len(calls) == 1:
+                return SimpleNamespace(
+                    returncode=1,
+                    stderr="ERROR: [facebook] 28755749490762508: Cannot parse data",
+                    stdout="",
+                )
+            template = command[command.index("-o") + 1]
+            output = Path(template.replace("%(ext)s", "mp4"))
+            output.write_bytes(b"mock mp4")
+            return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+        service = DownloadService(self.db, runner=runner)
+        with patch.object(
+            service,
+            "_resolve_facebook_mirror_url",
+            return_value="https://www.facebook.com/reel/1970655827226751",
+        ):
+            out, _ = service.download(self.project, self.video["id"])
+        self.assertTrue(out.is_file())
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1][-1], "https://www.facebook.com/reel/1970655827226751")
 
     def test_cookies_file_is_passed_to_ytdlp_when_present(self):
         cookies_path = self.root / "cookies.txt"

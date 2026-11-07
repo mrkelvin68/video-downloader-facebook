@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Callable
 
 from app.database.connection import Database
-from app.services.video_download_provider import VideoDownloadProvider, provider_for_url
+from app.services.credential_service import get_apify_token
+from app.services.video_download_provider import VideoDownloadProvider, VideoPlatform, provider_for_url
 
 
 class DownloadError(RuntimeError):
@@ -245,6 +246,26 @@ class DownloadService:
                         category="timeout",
                         retryable=True,
                     ) from exc
+                if result.returncode != 0 and "cannot parse data" in (
+                    result.stderr or result.stdout or ""
+                ).casefold():
+                    fallback_url = self._resolve_facebook_mirror_url(
+                        video=video, provider=provider
+                    )
+                    if fallback_url:
+                        fallback_command = [*command[:-1], fallback_url]
+                        if progress_callback is None:
+                            result = self.runner(
+                                fallback_command,
+                                capture_output=True,
+                                text=True,
+                                timeout=1800,
+                                check=False,
+                            )
+                        else:
+                            result = self._run_with_progress(
+                                fallback_command, progress_callback, cancel_event
+                            )
                 if result.returncode != 0:
                     reason = (result.stderr or result.stdout or "Không rõ nguyên nhân").strip()
                     if "cannot parse data" in reason.casefold():
@@ -278,7 +299,16 @@ class DownloadService:
                         has_thumbnail = True
                         break
 
-                os.replace(folder, target)
+                for attempt in range(5):
+                    try:
+                        os.replace(folder, target)
+                        break
+                    except PermissionError:
+                        if target.is_dir() and (target / video_path.name).is_file():
+                            break
+                        if attempt == 4:
+                            raise
+                        time.sleep(0.25 * (attempt + 1))
                 output = target / video_path.name
                 thumbnail = target / "thumbnail.jpg" if has_thumbnail else None
                 self._set_video_metadata(project_id, video_id, metadata)
@@ -470,6 +500,64 @@ class DownloadService:
         ):
             if candidate.is_file():
                 return str(candidate.resolve())
+        return None
+
+    @staticmethod
+    def _resolve_facebook_mirror_url(
+        *, video: object, provider: VideoDownloadProvider | None
+    ) -> str | None:
+        if provider is None or provider.platform != VideoPlatform.FACEBOOK:
+            return None
+        title = str(video["title"] or "").strip() if video else ""
+        if not title:
+            return None
+        query = title.split("|")[-1].strip() if "|" in title else title
+        if len(query) < 8:
+            return None
+        try:
+            token = get_apify_token().strip()
+        except Exception:
+            return None
+        if not token:
+            return None
+        from urllib.request import Request, urlopen
+
+        payload = {
+            "searchType": "posts",
+            "categories": [query],
+            "resultsLimit": 5,
+        }
+        req = Request(
+            "https://api.apify.com/v2/acts/apify~facebook-search-scraper/run-sync-get-dataset-items",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(req, timeout=45) as resp:
+                items = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return None
+        if not isinstance(items, list):
+            return None
+        normalized_query = " ".join(query.casefold().split())
+        source_id = provider.video_id
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            cand_url = str(item.get("url") or "").strip()
+            cand_text = " ".join(str(item.get("text") or "").casefold().split())
+            cand_provider = provider_for_url(cand_url)
+            if (
+                cand_provider is not None
+                and cand_provider.platform == VideoPlatform.FACEBOOK
+                and cand_provider.video_id != source_id
+                and normalized_query in cand_text
+            ):
+                return cand_provider.normalized_url
         return None
 
     @staticmethod
