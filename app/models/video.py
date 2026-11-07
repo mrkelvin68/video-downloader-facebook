@@ -18,6 +18,12 @@ class Video:
     facebook_uploaded: bool
     created_at: str
     updated_at: str
+    platform: str | None = None
+    canonical_url: str | None = None
+    external_video_id: str | None = None
+    author_name: str | None = None
+    duration_seconds: float | None = None
+    resolution: str | None = None
 
     @classmethod
     def from_row(

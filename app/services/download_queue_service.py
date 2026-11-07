@@ -112,8 +112,10 @@ class DownloadQueueService:
                        ORDER BY rowid DESC LIMIT 1""",
                     (project_id, row["id"]),
                 ).fetchone()
-                if retry is not None and self._is_permanent_error(
-                    retry["error_message"]
+                if (
+                    retry is not None
+                    and not run_now
+                    and self._is_permanent_error(retry["error_message"])
                 ):
                     raise ValueError(
                         "Không thể thêm video có lỗi tải vĩnh viễn vào hàng đợi."
@@ -564,7 +566,7 @@ class DownloadQueueService:
                 )
         return len(ordered_ids)
 
-    def retry(self, job_ids: list[str]) -> list[str]:
+    def retry(self, job_ids: list[str], *, force: bool = False) -> list[str]:
         if not job_ids:
             return []
         placeholders = ",".join("?" for _ in job_ids)
@@ -592,7 +594,7 @@ class DownloadQueueService:
             created: list[str] = []
             now = _now()
             for index, row in enumerate(selected_by_video.values()):
-                if self._is_permanent_error(row["error_message"]):
+                if not force and self._is_permanent_error(row["error_message"]):
                     continue
                 video = connection.execute(
                     "SELECT download_status FROM videos WHERE id=? AND project_id=?",

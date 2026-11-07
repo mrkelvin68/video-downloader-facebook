@@ -2,6 +2,8 @@ import os
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+from app.services.video_download_provider import provider_for_url
+
 INVALID_WINDOWS_NAME_CHARS = '<>:"/\\|?*'
 RESERVED_WINDOWS_NAMES = {
     "CON", "PRN", "AUX", "NUL",
@@ -39,6 +41,9 @@ def validate_output_dir(value: str, *, may_exist: bool) -> Path:
 
 
 def normalize_video_url(url: str) -> str:
+    provider = provider_for_url(url)
+    if provider is not None:
+        return provider.normalized_url
     parts = urlsplit(url.strip())
     host = (parts.hostname or "").lower().removeprefix("www.")
     path = parts.path.rstrip("/") or "/"
@@ -46,17 +51,9 @@ def normalize_video_url(url: str) -> str:
 
 
 def validate_facebook_url(url: str) -> bool:
-    try:
-        parts = urlsplit(url.strip())
-        host = (parts.hostname or "").lower()
-        _ = parts.port
-        if parts.scheme.lower() not in {"http", "https"} or parts.username or parts.password:
-            return False
-        is_facebook_host = (
-            host == "fb.watch"
-            or host == "facebook.com"
-            or host.endswith(".facebook.com")
-        )
-        return is_facebook_host and bool(parts.path.strip("/") or parts.query)
-    except ValueError:
-        return False
+    provider = provider_for_url(url)
+    return bool(provider and provider.platform.value == "facebook")
+
+
+def validate_supported_video_url(url: str) -> bool:
+    return provider_for_url(url) is not None

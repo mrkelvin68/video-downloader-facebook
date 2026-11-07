@@ -8,6 +8,7 @@ from app.services.csv_service import (
     export_video_csv,
     parse_and_validate_video_csv,
 )
+from app.services.video_download_provider import provider_for_url
 
 
 class VideoService:
@@ -30,7 +31,13 @@ class VideoService:
         if project is None:
             raise ValueError("Dự án không tồn tại")
         rows = [
-            {**row, "normalized_url": normalize_video_url(str(row["url"]))}
+            {
+                **row,
+                "normalized_url": normalize_video_url(str(row["url"])),
+                "platform": provider.platform.value if (provider := provider_for_url(str(row["url"]))) else None,
+                "canonical_url": provider.normalized_url if provider else None,
+                "external_video_id": provider.video_id if provider else None,
+            }
             for row in rows
         ]
         try:

@@ -1713,7 +1713,11 @@ class MainWindow(QMainWindow):
             return
         previous_rows: list[dict[str, object]] | None = None
         while True:
-            dialog = ManualVideoImportDialog(self, rows=previous_rows)
+            dialog = ManualVideoImportDialog(
+                self,
+                rows=previous_rows,
+                project_id=self.current_project.uuid,
+            )
             if dialog.exec() != ManualVideoImportDialog.DialogCode.Accepted:
                 return
             self.pending_csv_text = dialog.csv_text
@@ -1721,6 +1725,7 @@ class MainWindow(QMainWindow):
             self.pending_csv_errors = []
             self.confirm_import()
             if self.pending_csv_text is None:
+                dialog.clear_draft()
                 return
             previous_rows = list(dialog.rows)
 
@@ -2069,11 +2074,13 @@ class MainWindow(QMainWindow):
         if not selected:
             return
         try:
-            created = self.download_queue.retry(selected)
+            created = self.download_queue.retry(selected, force=True)
         except (ValueError, sqlite3.Error) as exc:
             QMessageBox.warning(self, "Không thể retry", str(exc))
             return
         self.refresh_queue()
+        if self.current_project is not None:
+            self._refresh_project_videos()
         self.queue_page.queue_status.setText(
             f"Đã đưa {len(created)} job vào hàng đợi. "
             "Bấm Bắt đầu hàng đợi để chạy."
