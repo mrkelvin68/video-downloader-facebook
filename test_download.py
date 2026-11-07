@@ -45,6 +45,7 @@ class DownloadTests(unittest.TestCase):
             ("The operation timed out", "timeout", True),
             ("Login required", "authentication", False),
             ("This video is not available", "unavailable", False),
+            ("ERROR: [facebook] 28755749490762508: Cannot parse data", "unavailable", False),
             ("HTTP Error 404: Not Found", "unavailable", False),
             ("HTTP Error 503: Service Unavailable", "network", True),
             ("Unsupported URL", "unsupported", False),

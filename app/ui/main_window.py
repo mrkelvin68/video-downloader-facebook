@@ -2074,11 +2074,13 @@ class MainWindow(QMainWindow):
         if not selected:
             return
         try:
-            created = self.download_queue.retry(selected)
+            created = self.download_queue.retry(selected, force=True)
         except (ValueError, sqlite3.Error) as exc:
             QMessageBox.warning(self, "Không thể retry", str(exc))
             return
         self.refresh_queue()
+        if self.current_project is not None:
+            self._refresh_project_videos()
         self.queue_page.queue_status.setText(
             f"Đã đưa {len(created)} job vào hàng đợi. "
             "Bấm Bắt đầu hàng đợi để chạy."

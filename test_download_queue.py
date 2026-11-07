@@ -310,6 +310,8 @@ class DownloadQueueServiceTests(unittest.TestCase):
         )
         self.assertEqual(self.queue.retry([permanent]), [])
         self.assertEqual(self.queue.get_job(permanent)["retry_count"], 0)
+        self.assertEqual(self.queue.retry([permanent], force=True), [permanent])
+        self.assertEqual(self.queue.get_job(permanent)["status"], "queued")
 
         current_job = self.queue.enqueue(self.project_id, [self.video_ids[1]])[0]
         self.queue.claim(current_job)

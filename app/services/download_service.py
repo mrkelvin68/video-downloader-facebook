@@ -94,6 +94,7 @@ def classify_download_error(message: str) -> tuple[str, bool]:
             "removed",
             "deleted",
             "does not exist",
+            "cannot parse data",
         )
     ):
         return "unavailable", False
@@ -243,6 +244,13 @@ class DownloadService:
                     ) from exc
                 if result.returncode != 0:
                     reason = (result.stderr or result.stdout or "Không rõ nguyên nhân").strip()
+                    if "cannot parse data" in reason.casefold():
+                        raise DownloadError(
+                            "Video không khả dụng, đã bị xóa hoặc ở chế độ riêng tư trên nền tảng nguồn "
+                            f"({reason[-300:]})",
+                            category="unavailable",
+                            retryable=False,
+                        )
                     raise DownloadError("yt-dlp thất bại: " + reason[-600:])
 
                 video_path = folder / f"{video['video_code']}.mp4"
