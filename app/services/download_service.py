@@ -11,10 +11,13 @@ import tempfile
 import threading
 import time
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 
 from app.database.connection import Database
+from app.services.credential_service import get_apify_token
+from app.services.video_download_provider import VideoDownloadProvider, VideoPlatform, provider_for_url
 
 
 class DownloadError(RuntimeError):
@@ -39,6 +42,17 @@ class DownloadCancelled(RuntimeError):
 
 def classify_download_error(message: str) -> tuple[str, bool]:
     normalized = message.casefold()
+    if any(
+        marker in normalized
+        for marker in (
+            "geo restriction",
+            "not available in your country",
+            "region restricted",
+            "access denied",
+            "forbidden",
+        )
+    ):
+        return "blocked", False
     if any(
         marker in normalized
         for marker in ("timed out", "timeout", "quá thời gian", "hết thời gian")
@@ -81,6 +95,7 @@ def classify_download_error(message: str) -> tuple[str, bool]:
             "removed",
             "deleted",
             "does not exist",
+            "cannot parse data",
         )
     ):
         return "unavailable", False
@@ -145,10 +160,29 @@ class DownloadService:
         if video["download_status"] not in ("pending", "waiting", "failed"):
             raise DownloadError("Video không ở trạng thái cho phép tải")
 
+        provider = provider_for_url(str(video["source_url"]))
+        source_url = provider.normalized_url if provider else str(video["source_url"])
+
         root = Path(project["output_dir"]).resolve()
         root.mkdir(parents=True, exist_ok=True)
         target = root / video["video_code"]
         if target.exists():
+            existing_video = target / f"{video['video_code']}.mp4"
+            if video["download_status"] == "failed" and existing_video.is_file():
+                self._validate_media(existing_video)
+                metadata = self._read_download_metadata(
+                    target / f"{video['video_code']}.info.json", provider
+                )
+                thumbnail = target / "thumbnail.jpg"
+                self._set_video_metadata(project_id, video_id, metadata)
+                self._set_status(
+                    project_id,
+                    video_id,
+                    "completed",
+                    str(existing_video),
+                    str(thumbnail) if thumbnail.is_file() else None,
+                )
+                return existing_video, thumbnail if thumbnail.is_file() else None
             raise DownloadError(f"Thư mục đích đã tồn tại, không ghi đè: {target}")
 
         self._set_status(project_id, video_id, "downloading")
@@ -156,11 +190,14 @@ class DownloadService:
             with tempfile.TemporaryDirectory(prefix=".download-", dir=root) as work:
                 folder = Path(work)
                 ffmpeg_loc = self._find_ffmpeg()
+                cookies_file = self._find_cookies_file()
                 command = [
-                    *self._yt_dlp_command(), "--no-playlist",
-                    "--no-overwrites", "--write-thumbnail", "--convert-thumbnails", "jpg",
+                    *self._yt_dlp_command(), "--no-playlist", "--playlist-items", "1",
+                    "--no-overwrites", "--write-thumbnail", "--write-info-json", "--convert-thumbnails", "jpg",
                     "-f", "bv*+ba/b", "--merge-output-format", "mp4", "--remux-video", "mp4",
                 ]
+                if cookies_file:
+                    command.extend(["--cookies", cookies_file])
                 if progress_callback is None:
                     command.append("--no-progress")
                 else:
@@ -180,7 +217,7 @@ class DownloadService:
                     command.extend(["--ffmpeg-location", ffmpeg_loc])
                 command.extend([
                     "-o", str(folder / (video["video_code"] + ".%(ext)s")),
-                    video["source_url"],
+                    source_url,
                 ])
 
                 try:
@@ -209,14 +246,45 @@ class DownloadService:
                         category="timeout",
                         retryable=True,
                     ) from exc
+                if result.returncode != 0 and "cannot parse data" in (
+                    result.stderr or result.stdout or ""
+                ).casefold():
+                    fallback_url = self._resolve_facebook_mirror_url(
+                        video=video, provider=provider
+                    )
+                    if fallback_url:
+                        fallback_command = [*command[:-1], fallback_url]
+                        if progress_callback is None:
+                            result = self.runner(
+                                fallback_command,
+                                capture_output=True,
+                                text=True,
+                                timeout=1800,
+                                check=False,
+                            )
+                        else:
+                            result = self._run_with_progress(
+                                fallback_command, progress_callback, cancel_event
+                            )
                 if result.returncode != 0:
                     reason = (result.stderr or result.stdout or "Không rõ nguyên nhân").strip()
+                    if "cannot parse data" in reason.casefold():
+                        raise DownloadError(
+                            "Video yêu cầu đăng nhập Facebook (ví dụ: nội dung tài trợ/affiliate hoặc giới hạn độ tuổi) "
+                            "hoặc không khả dụng ở chế độ khách. Hãy đặt file cookies.txt tại "
+                            f"~/.video-downloader-facebook/cookies.txt để tải ({reason[-300:]})",
+                            category="unavailable",
+                            retryable=False,
+                        )
                     raise DownloadError("yt-dlp thất bại: " + reason[-600:])
 
                 video_path = folder / f"{video['video_code']}.mp4"
                 if not video_path.is_file() or video_path.stat().st_size == 0:
                     raise DownloadError("Không tìm thấy MP4 sau khi tải")
                 self._validate_media(video_path)
+                metadata = self._read_download_metadata(
+                    folder / f"{video['video_code']}.info.json", provider
+                )
 
                 # Thumbnail chuẩn hóa thành thumbnail.jpg nếu có
                 thumb_candidates = list(folder.glob(f"{video['video_code']}.*"))
@@ -231,9 +299,19 @@ class DownloadService:
                         has_thumbnail = True
                         break
 
-                os.replace(folder, target)
+                for attempt in range(5):
+                    try:
+                        os.replace(folder, target)
+                        break
+                    except PermissionError:
+                        if target.is_dir() and (target / video_path.name).is_file():
+                            break
+                        if attempt == 4:
+                            raise
+                        time.sleep(0.25 * (attempt + 1))
                 output = target / video_path.name
                 thumbnail = target / "thumbnail.jpg" if has_thumbnail else None
+                self._set_video_metadata(project_id, video_id, metadata)
                 self._set_status(project_id, video_id, "completed", str(output), str(thumbnail) if thumbnail else None)
                 return output, thumbnail
         except Exception as download_error:
@@ -412,6 +490,77 @@ class DownloadService:
         return [sys.executable, "-m", "yt_dlp"]
 
     @staticmethod
+    def _find_cookies_file() -> str | None:
+        configured = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
+        if configured and Path(configured).is_file():
+            return str(Path(configured))
+        for candidate in (
+            Path.home() / ".video-downloader-facebook" / "cookies.txt",
+            Path("cookies.txt"),
+        ):
+            if candidate.is_file():
+                return str(candidate.resolve())
+        return None
+
+    @staticmethod
+    def _resolve_facebook_mirror_url(
+        *, video: object, provider: VideoDownloadProvider | None
+    ) -> str | None:
+        if provider is None or provider.platform != VideoPlatform.FACEBOOK:
+            return None
+        title = str(video["title"] or "").strip() if video else ""
+        if not title:
+            return None
+        query = title.split("|")[-1].strip() if "|" in title else title
+        if len(query) < 8:
+            return None
+        try:
+            token = get_apify_token().strip()
+        except Exception:
+            return None
+        if not token:
+            return None
+        from urllib.request import Request, urlopen
+
+        payload = {
+            "searchType": "posts",
+            "categories": [query],
+            "resultsLimit": 5,
+        }
+        req = Request(
+            "https://api.apify.com/v2/acts/apify~facebook-search-scraper/run-sync-get-dataset-items",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(req, timeout=45) as resp:
+                items = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return None
+        if not isinstance(items, list):
+            return None
+        normalized_query = " ".join(query.casefold().split())
+        source_id = provider.video_id
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            cand_url = str(item.get("url") or "").strip()
+            cand_text = " ".join(str(item.get("text") or "").casefold().split())
+            cand_provider = provider_for_url(cand_url)
+            if (
+                cand_provider is not None
+                and cand_provider.platform == VideoPlatform.FACEBOOK
+                and cand_provider.video_id != source_id
+                and normalized_query in cand_text
+            ):
+                return cand_provider.normalized_url
+        return None
+
+    @staticmethod
     def _find_ffmpeg() -> str | None:
         if getattr(sys, "frozen", False):
             base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
@@ -454,6 +603,57 @@ class DownloadService:
             return configured
         tools = DownloadService._find_static_ffmpeg()
         return tools[1] if tools else None
+
+    @staticmethod
+    def _read_download_metadata(
+        info_path: Path, provider: VideoDownloadProvider | None
+    ) -> dict[str, object]:
+        if not info_path.is_file():
+            return {
+                "platform": provider.platform.value if provider else None,
+                "canonical_url": provider.normalized_url if provider else None,
+                "external_video_id": provider.video_id if provider else None,
+            }
+        try:
+            payload = json.loads(info_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return {
+                "platform": provider.platform.value if provider else None,
+                "canonical_url": provider.normalized_url if provider else None,
+                "external_video_id": provider.video_id if provider else None,
+            }
+        width, height = payload.get("width"), payload.get("height")
+        resolution = f"{width}x{height}" if width and height else None
+        return {
+            "platform": provider.platform.value if provider else payload.get("extractor_key"),
+            "canonical_url": provider.normalized_url if provider else payload.get("webpage_url"),
+            "external_video_id": provider.video_id if provider else payload.get("id"),
+            "author_name": payload.get("channel") or payload.get("uploader"),
+            "duration_seconds": payload.get("duration"),
+            "resolution": resolution,
+        }
+
+    def _set_video_metadata(
+        self, project_id: str, video_id: str, metadata: dict[str, object]
+    ) -> None:
+        with self.database.connection:
+            self.database.connection.execute(
+                """UPDATE videos
+                   SET platform=COALESCE(?, platform),
+                       canonical_url=COALESCE(?, canonical_url),
+                       external_video_id=COALESCE(?, external_video_id),
+                       author_name=COALESCE(?, author_name),
+                       duration_seconds=COALESCE(?, duration_seconds),
+                       resolution=COALESCE(?, resolution),
+                       updated_at=?
+                   WHERE id=? AND project_id=?""",
+                (
+                    metadata.get("platform"), metadata.get("canonical_url"),
+                    metadata.get("external_video_id"), metadata.get("author_name"),
+                    metadata.get("duration_seconds"), metadata.get("resolution"),
+                    datetime.now(UTC).isoformat(timespec="seconds"), video_id, project_id,
+                ),
+            )
 
     def _set_status(
         self, project_id: str, video_id: str, status: str, video_path: str | None = None, thumb_path: str | None = None

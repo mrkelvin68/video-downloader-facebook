@@ -17,8 +17,11 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QStackedWidget,
+    QStyle,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
     QFileDialog,
@@ -146,10 +149,21 @@ class MainWindow(QMainWindow):
             pending = 0
         speed = sum(self._queue_speeds.get(job_id, 0.0) for job_id in self.queue_workers)
         self.queue_page.set_stats(len(self.queue_workers), pending, speed)
+        self._update_tray_tooltip()
 
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self,
+        database: Database,
+        *,
+        auto_resume: bool = False,
+        enable_tray: bool = False,
+    ) -> None:
         super().__init__()
         self.database = database
+        self.auto_resume = auto_resume
+        self.enable_tray = enable_tray
+        self._force_exit = False
+        self.tray_icon: QSystemTrayIcon | None = None
         self.projects = ProjectService(database)
         self.videos = VideoService(database)
         self.download_queue = DownloadQueueService(database)
@@ -178,6 +192,13 @@ class MainWindow(QMainWindow):
         self.pending_project_delete: tuple[str, bool] | None = None
         self.pending_queue_delete: tuple[list[str], str] | None = None
         self.download_queue.recover_interrupted()
+        self._init_tray_icon()
+        if self.auto_resume:
+            interrupted_ids = self.download_queue.job_ids_with_statuses(("interrupted",))
+            if interrupted_ids:
+                self.download_queue.retry(interrupted_ids, force=True)
+            if self.download_queue.count_jobs(("queued",)) > 0:
+                QTimer.singleShot(1000, self._auto_resume_queue)
         self.setWindowTitle("Video Downloader")
         self.resize(1366, 768)
         self.setMinimumSize(960, 640)
@@ -1713,7 +1734,11 @@ class MainWindow(QMainWindow):
             return
         previous_rows: list[dict[str, object]] | None = None
         while True:
-            dialog = ManualVideoImportDialog(self, rows=previous_rows)
+            dialog = ManualVideoImportDialog(
+                self,
+                rows=previous_rows,
+                project_id=self.current_project.uuid,
+            )
             if dialog.exec() != ManualVideoImportDialog.DialogCode.Accepted:
                 return
             self.pending_csv_text = dialog.csv_text
@@ -1721,6 +1746,7 @@ class MainWindow(QMainWindow):
             self.pending_csv_errors = []
             self.confirm_import()
             if self.pending_csv_text is None:
+                dialog.clear_draft()
                 return
             previous_rows = list(dialog.rows)
 
@@ -2069,11 +2095,13 @@ class MainWindow(QMainWindow):
         if not selected:
             return
         try:
-            created = self.download_queue.retry(selected)
+            created = self.download_queue.retry(selected, force=True)
         except (ValueError, sqlite3.Error) as exc:
             QMessageBox.warning(self, "Không thể retry", str(exc))
             return
         self.refresh_queue()
+        if self.current_project is not None:
+            self._refresh_project_videos()
         self.queue_page.queue_status.setText(
             f"Đã đưa {len(created)} job vào hàng đợi. "
             "Bấm Bắt đầu hàng đợi để chạy."
@@ -2215,7 +2243,122 @@ class MainWindow(QMainWindow):
             f"Đã xóa {deleted} {description}. Tệp video không bị xóa."
         )
 
+    def _init_tray_icon(self) -> None:
+        if not self.enable_tray or not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        icon = self.windowIcon()
+        if icon.isNull():
+            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
+        self.tray_icon = QSystemTrayIcon(icon, self)
+        self.tray_icon.setToolTip("Video Downloader")
+        menu = QMenu(self)
+        show_action = menu.addAction("Mở giao diện")
+        show_action.triggered.connect(self._restore_from_tray)
+        menu.addSeparator()
+        self._tray_queue_action = menu.addAction("Bắt đầu tải hàng đợi")
+        self._tray_queue_action.triggered.connect(self._toggle_queue_from_tray)
+        menu.addSeparator()
+        quit_action = menu.addAction("Thoát ứng dụng")
+        quit_action.triggered.connect(self._exit_application)
+        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.activated.connect(self._on_tray_activated)
+        self.tray_icon.show()
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self._restore_from_tray()
+
+    def _restore_from_tray(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _toggle_queue_from_tray(self) -> None:
+        if self.queue_running:
+            self.pause_queue_after_current()
+        else:
+            self.start_queue()
+        self._update_tray_tooltip()
+
+    def _update_tray_tooltip(self) -> None:
+        if not self.tray_icon:
+            return
+        active_count = len(self.queue_workers)
+        try:
+            waiting_count = self.download_queue.count_jobs(("queued",))
+        except sqlite3.Error:
+            waiting_count = 0
+        if active_count > 0:
+            tip = f"Video Downloader - Đang tải {active_count} video ({waiting_count} đang chờ)"
+            if hasattr(self, "_tray_queue_action"):
+                self._tray_queue_action.setText("Tạm dừng tải hàng đợi")
+        else:
+            tip = "Video Downloader - Đang chờ"
+            if hasattr(self, "_tray_queue_action"):
+                self._tray_queue_action.setText("Bắt đầu tải hàng đợi")
+        self.tray_icon.setToolTip(tip)
+
+    def _auto_resume_queue(self) -> None:
+        try:
+            if not self.queue_running and self.download_queue.count_jobs(("queued",)) > 0:
+                self.start_queue()
+        except sqlite3.Error:
+            pass
+
+    def _exit_application(self) -> None:
+        if self.queue_workers:
+            reply = QMessageBox.question(
+                self,
+                "Xác nhận thoát",
+                f"Đang có {len(self.queue_workers)} video đang tải. Bạn có chắc chắn muốn dừng và thoát ứng dụng?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        self._force_exit = True
+        self.close()
+        QApplication.quit()
+
     def closeEvent(self, event) -> None:
+        if self._force_exit or not self.enable_tray:
+            self.viral_reels_scheduler.stop()
+            if self._facebook_publish_worker is not None and self._facebook_publish_worker.isRunning():
+                QMessageBox.information(
+                    self,
+                    "Đang đăng Facebook",
+                    "Video đang được upload. Hãy chờ worker kết thúc để giữ trạng thái an toàn.",
+                )
+                event.ignore()
+                return
+            if not self._force_exit and self.queue_workers:
+                QMessageBox.information(
+                    self,
+                    "Đang tải",
+                    "Đợi các video hiện tại hoàn tất trước khi đóng ứng dụng.",
+                )
+                event.ignore()
+                return
+            if self.tray_icon:
+                self.tray_icon.hide()
+            super().closeEvent(event)
+            return
+
+        if self.tray_icon and QSystemTrayIcon.isSystemTrayAvailable():
+            event.ignore()
+            self.hide()
+            if self.queue_workers:
+                self.tray_icon.showMessage(
+                    "Video Downloader",
+                    f"Ứng dụng đang tiếp tục tải {len(self.queue_workers)} video dưới khay hệ thống.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    2500,
+                )
+            return
+
         self.viral_reels_scheduler.stop()
         if self._facebook_publish_worker is not None and self._facebook_publish_worker.isRunning():
             QMessageBox.information(
@@ -2248,13 +2391,14 @@ def main() -> int:
         )
         return 0
     application = QApplication(sys.argv)
+    application.setQuitOnLastWindowClosed(False)
     application.setOrganizationName("VideoDownloader")
     application.setApplicationName("VideoDownloaderFacebook")
     style_path = Path(__file__).with_name("styles.qss")
     application.setStyleSheet(style_path.read_text(encoding="utf-8"))
     database = Database(DB_PATH)
     try:
-        window = MainWindow(database)
+        window = MainWindow(database, auto_resume=True, enable_tray=True)
         window.show()
         return application.exec()
     finally:

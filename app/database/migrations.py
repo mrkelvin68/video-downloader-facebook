@@ -8,6 +8,8 @@ def _create_videos_table(connection: sqlite3.Connection) -> None:
             video_code TEXT NOT NULL, title TEXT NOT NULL, source_url TEXT NOT NULL,
             normalized_url TEXT NOT NULL, download_status TEXT NOT NULL DEFAULT 'pending',
             local_video_path TEXT, thumbnail_path TEXT,
+            platform TEXT, canonical_url TEXT, external_video_id TEXT,
+            author_name TEXT, duration_seconds REAL, resolution TEXT,
             facebook_uploaded INTEGER NOT NULL DEFAULT 0
                 CHECK(facebook_uploaded IN (0, 1)),
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -496,6 +498,18 @@ def migrate(connection: sqlite3.Connection) -> None:
                 """ALTER TABLE videos ADD COLUMN facebook_uploaded INTEGER
                    NOT NULL DEFAULT 0 CHECK(facebook_uploaded IN (0, 1))"""
             )
+        for column, definition in (
+            ("platform", "TEXT"),
+            ("canonical_url", "TEXT"),
+            ("external_video_id", "TEXT"),
+            ("author_name", "TEXT"),
+            ("duration_seconds", "REAL"),
+            ("resolution", "TEXT"),
+        ):
+            if column not in video_columns:
+                connection.execute(
+                    f"ALTER TABLE videos ADD COLUMN {column} {definition}"
+                )
         _create_download_jobs_table(connection)
         _create_matrices_tables(connection)
         _create_discovered_pages_table(connection)
