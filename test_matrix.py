@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, qInstallMessageHandler
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLineEdit, QPushButton
@@ -901,3 +901,22 @@ class MatrixUiTests(unittest.TestCase):
             self.assertEqual(self.window.matrix_page.model.rowCount(), 70)
         cards = self.window.project_page.findChildren(QPushButton, "secondary")
         self.assertTrue(any("Ma trận" in card.text() for card in cards))
+
+    def test_matrix_grid_does_not_emit_font_or_single_cell_span_warnings(self):
+        messages = []
+        previous_handler = qInstallMessageHandler(
+            lambda _mode, _context, message: messages.append(message)
+        )
+        try:
+            project = next(
+                project for project in self.projects.list_projects()
+                if project.uuid == self.project_id
+            )
+            self.window.show_matrices(project)
+            self.window.show()
+            self.application.processEvents()
+            self.assertEqual(self.window.matrix_page.table.columnSpan(1, 1), 3)
+        finally:
+            qInstallMessageHandler(previous_handler)
+        self.assertFalse(any("Point size <= 0" in message for message in messages))
+        self.assertFalse(any("single cell span" in message for message in messages))

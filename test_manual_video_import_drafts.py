@@ -5,9 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox, QPlainTextEdit, QPushButton
+from PySide6.QtWidgets import QApplication, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton
 
 from app.database.connection import Database
 from app.services.download_queue_service import DownloadQueueService
@@ -76,6 +76,84 @@ class ManualVideoImportDraftTests(unittest.TestCase):
         self.assertEqual(dialog.table.item(0, dialog.TITLE_COLUMN).text(), "Video 2")
         self.assertEqual(dialog.table.item(0, dialog.URL_COLUMN).text(), "https://youtu.be/jNQXAC9IVRw")
         dialog.reject()
+
+    def test_tab_from_final_url_adds_one_row_and_begins_title_editing(self):
+        dialog = self.dialog()
+        dialog.show()
+        dialog.table.setCurrentCell(0, dialog.URL_COLUMN)
+        dialog.table.editItem(dialog.table.item(0, dialog.URL_COLUMN))
+        self.app.processEvents()
+        editor = dialog.table.findChild(QLineEdit)
+        self.assertIsNotNone(editor)
+        editor.setText("https://youtu.be/jNQXAC9IVRw")
+
+        QTest.keyClick(editor, Qt.Key.Key_Tab)
+        self.app.processEvents()
+
+        self.assertEqual(dialog.table.rowCount(), 2)
+        self.assertEqual(dialog.table.currentRow(), 1)
+        self.assertEqual(dialog.table.currentColumn(), dialog.TITLE_COLUMN)
+        self.assertEqual(dialog.table.item(0, dialog.URL_COLUMN).text(), "https://youtu.be/jNQXAC9IVRw")
+        dialog.reject()
+
+    def test_tab_navigation_other_than_final_url_does_not_add_a_row(self):
+        dialog = self.dialog()
+        dialog.add_row()
+        dialog.show()
+        for row, column, key, modifier in (
+            (0, dialog.URL_COLUMN, Qt.Key.Key_Tab, Qt.KeyboardModifier.NoModifier),
+            (1, dialog.URL_COLUMN, Qt.Key.Key_Tab, Qt.KeyboardModifier.ShiftModifier),
+        ):
+            dialog.table.setCurrentCell(row, column)
+            dialog.table.editItem(dialog.table.item(row, column))
+            self.app.processEvents()
+            editor = dialog.table.findChild(QLineEdit)
+            self.assertIsNotNone(editor)
+            QTest.keyClick(editor, key, modifier)
+            self.app.processEvents()
+        self.assertEqual(dialog.table.rowCount(), 2)
+        dialog.reject()
+
+    def test_double_click_below_final_row_adds_once_but_existing_cell_does_not(self):
+        dialog = self.dialog()
+        dialog.show()
+        self.app.processEvents()
+        viewport = dialog.table.viewport()
+        QTest.mouseDClick(
+            viewport, Qt.MouseButton.LeftButton,
+            pos=QPoint(8, viewport.height() - 4),
+        )
+        self.app.processEvents()
+        self.assertEqual(dialog.table.rowCount(), 2)
+
+        existing_cell = dialog.table.visualItemRect(
+            dialog.table.item(0, dialog.TITLE_COLUMN)
+        ).center()
+        QTest.mouseDClick(viewport, Qt.MouseButton.LeftButton, pos=existing_cell)
+        self.app.processEvents()
+        self.assertEqual(dialog.table.rowCount(), 2)
+        dialog.reject()
+
+    def test_add_row_button_and_keyboard_created_rows_persist(self):
+        dialog = self.dialog()
+        dialog.add_row_button.click()
+        dialog.table.setCurrentCell(1, dialog.URL_COLUMN)
+        dialog.table.editItem(dialog.table.item(1, dialog.URL_COLUMN))
+        self.app.processEvents()
+        editor = dialog.table.findChild(QLineEdit)
+        self.assertIsNotNone(editor)
+        editor.setText("https://www.facebook.com/reel/111")
+        QTest.keyClick(editor, Qt.Key.Key_Tab)
+        self.app.processEvents()
+        self.assertEqual(dialog.table.rowCount(), 3)
+        dialog.table.item(2, dialog.TITLE_COLUMN).setText("Keyboard row")
+        dialog.save_draft()
+        dialog.reject()
+
+        restored = self.reopen()
+        self.assertEqual(restored.table.rowCount(), 3)
+        self.assertEqual(restored.table.item(2, restored.TITLE_COLUMN).text(), "Keyboard row")
+        restored.reject()
 
     def test_single_and_multi_url_clipboard_paste_preserve_existing_titles(self):
         dialog = self.dialog()

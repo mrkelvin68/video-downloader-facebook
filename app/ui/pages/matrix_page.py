@@ -876,16 +876,21 @@ class MatrixPage(QWidget):
                 self.table.setColumnWidth(column, (78, 52, 112)[field])
         for row in range(self.model.rowCount()):
             if self.model.row_is_day_header(row):
-                self.table.setSpan(row, 0, 1, self.model.columnCount())
+                self._set_span_if_merged(row, 0, 1, self.model.columnCount())
                 self.table.setRowHeight(row, 27)
             elif self.model.rows[row][0] == "pages":
-                self.table.setSpan(row, 0, 1, 1)
                 for page_index in range(len(pages)):
-                    self.table.setSpan(row, 1 + page_index * 3, 1, 3)
+                    self._set_span_if_merged(row, 1 + page_index * 3, 1, 3)
                 self.table.setRowHeight(row, 26)
             elif self.model.rows[row][0] == "fields":
                 self.table.setRowHeight(row, 24)
         self._update_status_button()
+
+    def _set_span_if_merged(
+        self, row: int, column: int, row_span: int, column_span: int
+    ) -> None:
+        if row_span > 1 or column_span > 1:
+            self.table.setSpan(row, column, row_span, column_span)
 
     def _tab_changed(self, index: int) -> None:
         if not self._updating_tabs and index >= 0:

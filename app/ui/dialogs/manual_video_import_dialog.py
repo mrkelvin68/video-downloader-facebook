@@ -5,9 +5,10 @@ import io
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QIODevice, QSaveFile, QSignalBlocker, QStandardPaths, QTimer, Qt
+from PySide6.QtCore import QEvent, QIODevice, QSaveFile, QSignalBlocker, QStandardPaths, QTimer, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QAbstractItemDelegate,
     QApplication,
     QDialog,
     QHBoxLayout,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -22,6 +24,32 @@ from PySide6.QtWidgets import (
 
 from app.services.csv_service import parse_video_csv
 from app.services.video_download_provider import provider_for_url
+
+
+class _AppendRowDelegate(QStyledItemDelegate):
+    """Requests a row only after Tab commits the final editable cell."""
+
+    appendRowRequested = Signal()
+
+    def createEditor(self, parent, option, index):
+        editor = super().createEditor(parent, option, index)
+        editor.setProperty("manualImportRow", index.row())
+        editor.setProperty("manualImportColumn", index.column())
+        return editor
+
+    def eventFilter(self, editor, event):
+        if (
+            event.type() == QEvent.Type.KeyPress
+            and event.key() == Qt.Key.Key_Tab
+            and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+            and editor.property("manualImportRow") == self.parent().rowCount() - 1
+            and editor.property("manualImportColumn") == ManualVideoImportDialog.URL_COLUMN
+        ):
+            self.commitData.emit(editor)
+            self.closeEditor.emit(editor, QAbstractItemDelegate.EndEditHint.NoHint)
+            QTimer.singleShot(0, self.appendRowRequested.emit)
+            return True
+        return super().eventFilter(editor, event)
 
 
 class ManualVideoImportDialog(QDialog):
@@ -56,6 +84,7 @@ class ManualVideoImportDialog(QDialog):
         self._restoring = True
         self._draft_corrupt = False
         self._save_requested = False
+        self._adding_row = False
         self._autosave = QTimer(self)
         self._autosave.setSingleShot(True)
         self._autosave.setInterval(400)
@@ -72,6 +101,12 @@ class ManualVideoImportDialog(QDialog):
         header.setSectionResizeMode(self.URL_COLUMN, QHeaderView.ResizeMode.Stretch)
         self.table.setAlternatingRowColors(True)
         self.table.itemChanged.connect(self._on_item_changed)
+        self._append_row_delegate = _AppendRowDelegate(self.table)
+        self._append_row_delegate.appendRowRequested.connect(
+            self._append_row_from_interaction
+        )
+        self.table.setItemDelegate(self._append_row_delegate)
+        self.table.viewport().installEventFilter(self)
         layout.addWidget(self.table, 1)
 
         row_actions = QHBoxLayout()
@@ -129,6 +164,26 @@ class ManualVideoImportDialog(QDialog):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._apply_column_widths()
+
+    def eventFilter(self, watched, event) -> bool:
+        if (
+            watched is self.table.viewport()
+            and event.type() == QEvent.Type.MouseButtonDblClick
+            and not self.table.indexAt(event.position().toPoint()).isValid()
+            and self._is_below_final_row(event.position().toPoint().y())
+        ):
+            self._append_row_from_interaction()
+            return True
+        return super().eventFilter(watched, event)
+
+    def _is_below_final_row(self, y_position: int) -> bool:
+        row_count = self.table.rowCount()
+        if row_count == 0:
+            return True
+        last_row = row_count - 1
+        return y_position >= (
+            self.table.rowViewportPosition(last_row) + self.table.rowHeight(last_row)
+        )
 
     def _apply_column_widths(self) -> None:
         viewport_width = self.table.viewport().width()
@@ -239,15 +294,32 @@ class ManualVideoImportDialog(QDialog):
         self.save_draft()
         super().closeEvent(event)
 
-    def add_row(self, *, schedule: bool = True) -> None:
+    def _append_row_from_interaction(self) -> None:
+        if self._adding_row:
+            return
+        self._adding_row = True
+        try:
+            self.add_row(begin_edit=True)
+        finally:
+            self._adding_row = False
+
+    def add_row(self, *, schedule: bool = True, begin_edit: bool = False) -> None:
         row = self.table.rowCount()
         with QSignalBlocker(self.table):
             self.table.insertRow(row)
             self.table.setItem(row, self.TITLE_COLUMN, QTableWidgetItem())
             self.table.setItem(row, self.URL_COLUMN, QTableWidgetItem())
         self.table.setCurrentCell(row, self.TITLE_COLUMN)
+        self.table.scrollToItem(self.table.item(row, self.TITLE_COLUMN))
+        if begin_edit:
+            QTimer.singleShot(0, lambda: self._edit_new_row(row))
         if schedule:
             self._schedule_draft_save()
+
+    def _edit_new_row(self, row: int) -> None:
+        if 0 <= row < self.table.rowCount():
+            self.table.setFocus()
+            self.table.editItem(self.table.item(row, self.TITLE_COLUMN))
 
     @staticmethod
     def _looks_like_url(value: str) -> bool:
