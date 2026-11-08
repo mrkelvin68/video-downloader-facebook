@@ -347,6 +347,49 @@ class MatrixServiceTests(unittest.TestCase):
             "pending",
         )
 
+    def test_regeneration_preserves_pending_assignment_and_caption(self):
+        self.import_videos(3)
+        matrix_id = self.create_matrix(
+            pages=["Page"], slots=["05:00", "10:00"], day_count=1
+        )
+        entry = self.service.list_entries(matrix_id, self.project_id)[1]
+        video = self.database.list_videos(self.project_id)[2]
+        self.service.update_entry(
+            matrix_id, self.project_id, entry["entry_id"], video["id"], "Draft caption"
+        )
+
+        self.service.regenerate(matrix_id, self.project_id)
+
+        retained = next(
+            row for row in self.service.list_entries(matrix_id, self.project_id)
+            if row["entry_id"] == entry["entry_id"]
+        )
+        self.assertEqual(retained["video_id"], video["id"])
+        self.assertEqual(retained["caption"], "Draft caption")
+
+    def test_configuration_preserves_unchanged_slot_assignment(self):
+        self.import_videos(3)
+        matrix_id = self.create_matrix(
+            pages=["Page"], slots=["05:00"], day_count=1
+        )
+        entry = self.service.list_entries(matrix_id, self.project_id)[0]
+        video = self.database.list_videos(self.project_id)[2]
+        self.service.update_entry(
+            matrix_id, self.project_id, entry["entry_id"], video["id"], "Keep this"
+        )
+
+        self.service.update_configuration(
+            matrix_id, self.project_id, "Schedule", ["Page"], ["05:00", "10:00"],
+            "2026-10-25", 1, NO_REPEAT,
+        )
+
+        retained = next(
+            row for row in self.service.list_entries(matrix_id, self.project_id)
+            if row["entry_id"] == entry["entry_id"]
+        )
+        self.assertEqual(retained["video_id"], video["id"])
+        self.assertEqual(retained["caption"], "Keep this")
+
     def test_manual_edit_invalidates_undo_to_prevent_lost_changes(self):
         self.import_videos(2)
         matrix_id = self.create_matrix(
@@ -500,6 +543,34 @@ class MatrixServiceTests(unittest.TestCase):
         self.assertEqual(len(self.database.list_videos(self.project_id)), video_count)
         self.assertTrue(video_path.is_file())
         self.assertFalse(self.service.list_matrices(self.project_id))
+
+    def test_delete_matrix_is_blocked_by_an_active_publishing_job(self):
+        self.import_videos(1)
+        matrix_id = self.create_matrix(
+            pages=["Page"], slots=["05:00"], day_count=1
+        )
+        entry = self.service.list_entries(matrix_id, self.project_id)[0]
+        now = "2026-10-25T00:00:00+00:00"
+        self.database.connection.execute(
+            """INSERT INTO facebook_pages
+               (project_id, page_id, page_name, created_at, updated_at)
+               VALUES (?, 'facebook-page', 'Page', ?, ?)""",
+            (self.project_id, now, now),
+        )
+        self.database.connection.execute(
+            """INSERT INTO facebook_publishing_jobs
+               (id, project_id, video_id, page_id, local_file_path, status,
+                created_at, updated_at)
+               VALUES ('active-job', ?, ?, 'facebook-page', 'clip.mp4', 'PENDING', ?, ?)""",
+            (self.project_id, entry["video_id"], now, now),
+        )
+        self.database.connection.commit()
+
+        with self.assertRaisesRegex(ValueError, "job xu\u1ea5t b\u1ea3n"):
+            self.service.delete_matrix(matrix_id, self.project_id)
+        self.assertEqual(
+            self.service.get_matrix(matrix_id, self.project_id)["matrix_id"], matrix_id
+        )
 
     def test_matrix_csv_is_excel_compatible_and_contains_all_fields(self):
         self.import_videos(1)

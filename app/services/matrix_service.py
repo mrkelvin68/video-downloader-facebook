@@ -183,6 +183,22 @@ class MatrixService:
 
     def delete_matrix(self, matrix_id: str, project_id: str) -> None:
         with self.connection:
+            active_job = self.connection.execute(
+                """SELECT 1
+                   FROM matrix_entries e
+                   JOIN facebook_publishing_jobs j
+                     ON j.project_id=e.project_id AND j.video_id=e.video_id
+                   WHERE e.matrix_id=? AND e.project_id=?
+                     AND j.status IN
+                         ('PENDING', 'SCHEDULED', 'PREPARING', 'UPLOADING',
+                          'PROCESSING', 'PUBLISHING', 'PAUSED')
+                   LIMIT 1""",
+                (matrix_id, project_id),
+            ).fetchone()
+            if active_job is not None:
+                raise ValueError(
+                    "Không thể xóa ma trận có job xuất bản đang hoạt động."
+                )
             cursor = self.connection.execute(
                 "DELETE FROM matrices WHERE matrix_id=? AND project_id=?",
                 (matrix_id, project_id),
@@ -468,52 +484,69 @@ class MatrixService:
                WHERE matrix_id=? AND is_active=1 ORDER BY position""",
             (matrix_id,),
         ).fetchall()
-        posted_rows = self.connection.execute(
-            "SELECT * FROM matrix_entries WHERE matrix_id=? AND publish_status='posted'",
+        existing_rows = self.connection.execute(
+            "SELECT * FROM matrix_entries WHERE matrix_id=?",
             (matrix_id,),
         ).fetchall()
-        posted = {
-            (
-                row["page_id"], row["scheduled_date"], row["scheduled_time"]
-            ): dict(row)
-            for row in posted_rows
-        }
-        posted_page_days: dict[tuple[str, str], set[str]] = {}
-        posted_videos: set[str] = set()
-        for row in posted_rows:
-            posted_page_days.setdefault(
-                (row["page_id"], row["scheduled_date"]), set()
+        first_date = date.fromisoformat(matrix["start_date"])
+        last_date = first_date + timedelta(days=matrix["day_count"] - 1)
+        active_page_ids = {page["page_id"] for page in pages}
+        active_times = {slot["scheduled_time"] for slot in slots}
+        existing = {
+            (row["page_id"], row["scheduled_date"], row["scheduled_time"]): row
+            for row in existing_rows
+            if (
+                row["page_id"] in active_page_ids
+                and row["scheduled_time"] in active_times
+                and first_date <= date.fromisoformat(row["scheduled_date"]) <= last_date
             )
-            if row["video_id"]:
-                posted_page_days[(row["page_id"], row["scheduled_date"])].add(
-                    row["video_id"]
-                )
-                posted_videos.add(row["video_id"])
-
+        }
         candidates = self._ordered_videos(project_id)
         candidate_by_id = {
             video["id"]: video for video in candidates
         }
         self.connection.execute(
-            """DELETE FROM matrix_entries WHERE matrix_id=?
-               AND publish_status!='posted'""",
-            (matrix_id,),
+            """DELETE FROM matrix_entries
+               WHERE matrix_id=? AND publish_status!='posted'
+                 AND (
+                     NOT EXISTS (
+                         SELECT 1 FROM matrix_pages p
+                         WHERE p.page_id=matrix_entries.page_id
+                           AND p.matrix_id=matrix_entries.matrix_id
+                           AND p.is_active=1
+                     )
+                     OR NOT EXISTS (
+                         SELECT 1 FROM matrix_slots s
+                         WHERE s.matrix_id=matrix_entries.matrix_id
+                           AND s.scheduled_time=matrix_entries.scheduled_time
+                           AND s.is_active=1
+                     )
+                     OR scheduled_date < ? OR scheduled_date > ?
+                 )""",
+            (matrix_id, first_date.isoformat(), last_date.isoformat()),
         )
         cursor = 0
-        video_ids_used: set[str] = set(posted_videos)
+        video_ids_used: set[str] = {
+            row["video_id"] for row in existing.values() if row["video_id"]
+        }
         for day_offset in range(matrix["day_count"]):
             scheduled_date = (
-                date.fromisoformat(matrix["start_date"]) + timedelta(days=day_offset)
+                first_date + timedelta(days=day_offset)
             ).isoformat()
             used_per_page = {
-                (page_id, scheduled_date): set(video_ids)
-                for (page_id, entry_date), video_ids in posted_page_days.items()
-                if entry_date == scheduled_date
+                (page["page_id"], scheduled_date): {
+                    row["video_id"]
+                    for key, row in existing.items()
+                    if key[0] == page["page_id"]
+                    and key[1] == scheduled_date
+                    and row["video_id"]
+                }
+                for page in pages
             }
             for slot in slots:
                 for page in pages:
                     key = (page["page_id"], scheduled_date, slot["scheduled_time"])
-                    if key in posted:
+                    if key in existing:
                         continue
                     candidate_index = self._next_video_index(
                         candidates,
