@@ -7,7 +7,13 @@ from unittest.mock import patch
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox, QPlainTextEdit, QPushButton
+from PySide6.QtWidgets import (
+    QApplication,
+    QLineEdit,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+)
 
 from app.database.connection import Database
 from app.services.download_queue_service import DownloadQueueService
@@ -54,6 +60,7 @@ class ManualVideoImportDraftTests(unittest.TestCase):
         button_texts = [btn.text() for btn in dialog.findChildren(QPushButton)]
         self.assertNotIn("Thêm URL vào danh sách", button_texts)
         self.assertIn("＋ Thêm dòng", button_texts)
+        self.assertNotIn("Duplicate", button_texts)
         self.assertIn("Xóa dòng", button_texts)
         self.assertIn("Hủy", button_texts)
         self.assertIn("Lưu", button_texts)
@@ -72,9 +79,112 @@ class ManualVideoImportDraftTests(unittest.TestCase):
 
         dialog.table.selectRow(0)
         dialog.delete_rows()
-        self.assertEqual(dialog.table.rowCount(), 1)
+        self.assertEqual(dialog.table.rowCount(), 2)
         self.assertEqual(dialog.table.item(0, dialog.TITLE_COLUMN).text(), "Video 2")
         self.assertEqual(dialog.table.item(0, dialog.URL_COLUMN).text(), "https://youtu.be/jNQXAC9IVRw")
+        self.assertEqual(dialog.table.item(1, dialog.TITLE_COLUMN).text(), "")
+        dialog.reject()
+
+    def test_editing_last_row_appends_one_empty_row(self):
+        dialog = self.dialog()
+        dialog.table.item(0, dialog.TITLE_COLUMN).setText("Dòng gốc")
+        self.assertEqual(dialog.table.rowCount(), 2)
+        self.assertEqual(dialog.table.item(1, dialog.TITLE_COLUMN).text(), "")
+        self.assertEqual(dialog.table.item(1, dialog.URL_COLUMN).text(), "")
+        dialog.table.item(1, dialog.URL_COLUMN).setText("https://youtu.be/jNQXAC9IVRw")
+        self.assertEqual(dialog.table.rowCount(), 3)
+        self.assertEqual(dialog.table.item(2, dialog.TITLE_COLUMN).text(), "")
+        self.assertEqual(dialog.table.item(2, dialog.URL_COLUMN).text(), "")
+        dialog.reject()
+
+    def test_url_first_and_clearing_last_row_keeps_one_empty_row(self):
+        dialog = self.dialog()
+        dialog.table.item(0, dialog.URL_COLUMN).setText("https://example.com/a")
+        self.assertEqual(dialog.table.rowCount(), 2)
+        dialog.table.item(1, dialog.TITLE_COLUMN).setText("Tạm thời")
+        self.assertEqual(dialog.table.rowCount(), 3)
+
+        dialog.table.item(1, dialog.TITLE_COLUMN).setText("")
+
+        self.assertEqual(dialog.table.rowCount(), 2)
+        self.assertEqual(dialog.table.item(0, dialog.URL_COLUMN).text(), "https://example.com/a")
+        self.assertEqual(dialog.table.item(1, dialog.TITLE_COLUMN).text(), "")
+        self.assertEqual(dialog.table.item(1, dialog.URL_COLUMN).text(), "")
+        dialog.reject()
+
+    def test_double_click_edits_without_copying_or_appending_rows(self):
+        dialog = self.dialog()
+        dialog.table.item(0, dialog.TITLE_COLUMN).setText("Video A")
+        dialog.table.item(0, dialog.URL_COLUMN).setText("https://example.com/a")
+        dialog.show()
+        self.app.processEvents()
+
+        for row in (1, 0, 1):
+            item = dialog.table.item(row, dialog.TITLE_COLUMN)
+            position = dialog.table.visualItemRect(item).center()
+            QTest.mouseClick(
+                dialog.table.viewport(),
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                position,
+            )
+            QTest.mouseDClick(
+                dialog.table.viewport(),
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                position,
+            )
+            self.app.processEvents()
+            self.assertIsInstance(self.app.focusWidget(), QLineEdit)
+            self.assertEqual(dialog.table.rowCount(), 2)
+            self.assertEqual(dialog.table.item(0, dialog.TITLE_COLUMN).text(), "Video A")
+            self.assertEqual(dialog.table.item(0, dialog.URL_COLUMN).text(), "https://example.com/a")
+            self.assertEqual(dialog.table.item(1, dialog.TITLE_COLUMN).text(), "")
+            QTest.keyClick(self.app.focusWidget(), Qt.Key.Key_Escape)
+
+        dialog.reject()
+
+    def test_keyboard_navigation_keeps_one_empty_trailing_row(self):
+        dialog = self.dialog()
+        dialog.show()
+        self.app.processEvents()
+        dialog.table.setCurrentCell(0, dialog.TITLE_COLUMN)
+        dialog.table.editItem(dialog.table.item(0, dialog.TITLE_COLUMN))
+        QTest.keyClicks(self.app.focusWidget(), "Video A")
+        QTest.keyClick(self.app.focusWidget(), Qt.Key.Key_Tab)
+        self.app.processEvents()
+
+        self.assertEqual(dialog.table.item(0, dialog.TITLE_COLUMN).text(), "Video A")
+        self.assertEqual(dialog.table.rowCount(), 2)
+        self.assertEqual(dialog.table.currentRow(), 0)
+        self.assertEqual(dialog.table.currentColumn(), dialog.URL_COLUMN)
+
+        QTest.keyClicks(self.app.focusWidget(), "https://example.com/a")
+        QTest.keyClick(self.app.focusWidget(), Qt.Key.Key_Return)
+        self.app.processEvents()
+
+        self.assertEqual(dialog.table.item(0, dialog.URL_COLUMN).text(), "https://example.com/a")
+        self.assertEqual(dialog.table.currentRow(), 1)
+        self.assertEqual(dialog.table.currentColumn(), dialog.URL_COLUMN)
+        self.assertEqual(dialog.table.rowCount(), 2)
+        QTest.keyClick(dialog.table, Qt.Key.Key_Backtab)
+        self.assertEqual(dialog.table.currentRow(), 1)
+        self.assertEqual(dialog.table.currentColumn(), dialog.TITLE_COLUMN)
+        dialog.reject()
+
+    def test_pasting_one_hundred_rows_has_one_empty_trailing_row(self):
+        dialog = self.dialog()
+        pasted = dialog.paste_from_clipboard(
+            "\n".join(
+                f"Video {number}\thttps://example.com/{number}"
+                for number in range(100)
+            )
+        )
+        self.assertEqual(pasted, 100)
+        self.assertEqual(dialog.table.rowCount(), 101)
+        self.assertEqual(dialog.table.item(99, dialog.TITLE_COLUMN).text(), "Video 99")
+        self.assertEqual(dialog.table.item(100, dialog.TITLE_COLUMN).text(), "")
+        self.assertEqual(dialog.table.item(100, dialog.URL_COLUMN).text(), "")
         dialog.reject()
 
     def test_single_and_multi_url_clipboard_paste_preserve_existing_titles(self):
@@ -96,7 +206,7 @@ class ManualVideoImportDraftTests(unittest.TestCase):
         )
         pasted_multi = dialog.paste_from_clipboard(multi_urls)
         self.assertEqual(pasted_multi, 3)
-        self.assertEqual(dialog.table.rowCount(), 4)
+        self.assertEqual(dialog.table.rowCount(), 5)
         self.assertEqual(dialog.table.item(1, dialog.TITLE_COLUMN).text(), "Dòng 2")
         self.assertEqual(dialog.table.item(1, dialog.URL_COLUMN).text(), "https://www.facebook.com/reel/123456")
         self.assertEqual(dialog.table.item(2, dialog.URL_COLUMN).text(), "https://www.instagram.com/reel/ABC123/")
@@ -114,7 +224,7 @@ class ManualVideoImportDraftTests(unittest.TestCase):
         QApplication.clipboard().setText(tsv)
         dialog.table.setCurrentCell(0, dialog.TITLE_COLUMN)
         dialog.paste_from_clipboard()
-        self.assertEqual(dialog.table.rowCount(), 3)
+        self.assertEqual(dialog.table.rowCount(), 4)
         self.assertEqual(
             [
                 (
@@ -174,7 +284,7 @@ class ManualVideoImportDraftTests(unittest.TestCase):
         restored = self.reopen()
         self.assertTrue(path.is_file())
         self.assertEqual(restored.table.columnCount(), 2)
-        self.assertEqual(restored.table.rowCount(), 2)
+        self.assertEqual(restored.table.rowCount(), 3)
         self.assertEqual(restored.table.item(0, restored.TITLE_COLUMN).text(), "Legacy FB")
         self.assertEqual(restored.table.item(0, restored.URL_COLUMN).text(), "https://www.facebook.com/reel/111")
         self.assertEqual(restored.table.item(1, restored.TITLE_COLUMN).text(), "Legacy YT")
@@ -191,7 +301,7 @@ class ManualVideoImportDraftTests(unittest.TestCase):
         dialog.save_draft()
 
         restored = self.reopen()
-        self.assertEqual(restored.table.rowCount(), 1)
+        self.assertEqual(restored.table.rowCount(), 2)
         self.assertEqual(restored.table.item(0, restored.TITLE_COLUMN).text(), "Giữ lại")
         other = self.reopen("project-b")
         self.assertEqual(other.table.rowCount(), 1)

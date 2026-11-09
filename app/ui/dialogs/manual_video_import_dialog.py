@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QLineEdit,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -22,6 +24,20 @@ from PySide6.QtWidgets import (
 
 from app.services.csv_service import parse_video_csv
 from app.services.video_download_provider import provider_for_url
+
+
+class _ExcelTableDelegate(QStyledItemDelegate):
+    def __init__(self, on_return, parent) -> None:
+        super().__init__(parent)
+        self._on_return = on_return
+
+    def createEditor(self, parent, option, index):
+        editor = super().createEditor(parent, option, index)
+        if isinstance(editor, QLineEdit):
+            editor.returnPressed.connect(
+                lambda row=index.row(), column=index.column(): self._on_return(row, column)
+            )
+        return editor
 
 
 class ManualVideoImportDialog(QDialog):
@@ -71,6 +87,13 @@ class ManualVideoImportDialog(QDialog):
         header.setSectionResizeMode(self.TITLE_COLUMN, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(self.URL_COLUMN, QHeaderView.ResizeMode.Stretch)
         self.table.setAlternatingRowColors(True)
+        self.table.setEditTriggers(
+            QTableWidget.EditTrigger.DoubleClicked
+            | QTableWidget.EditTrigger.EditKeyPressed
+            | QTableWidget.EditTrigger.AnyKeyPressed
+        )
+        self.table.setItemDelegate(_ExcelTableDelegate(self._move_to_next_row, self.table))
+        self.table.itemDoubleClicked.connect(self._edit_item)
         self.table.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self.table, 1)
 
@@ -106,8 +129,7 @@ class ManualVideoImportDialog(QDialog):
         source_rows = draft_rows if draft_rows is not None else rows
         if source_rows:
             for row in source_rows:
-                self.add_row(schedule=False)
-                current = self.table.rowCount() - 1
+                current = self._append_empty_row()
                 self.table.item(current, self.TITLE_COLUMN).setText(
                     str(row.get("ten_video") or row.get("title") or "")
                 )
@@ -115,7 +137,8 @@ class ManualVideoImportDialog(QDialog):
                     str(row.get("url") or "")
                 )
         else:
-            self.add_row(schedule=False)
+            self._append_empty_row()
+        self._normalize_trailing_empty_rows()
         self._apply_column_widths()
         self._restoring = False
         if draft_rows is not None:
@@ -224,7 +247,20 @@ class ManualVideoImportDialog(QDialog):
             pass
 
     def _on_item_changed(self, _item: QTableWidgetItem) -> None:
+        if self._restoring:
+            return
+        self._normalize_trailing_empty_rows()
         self._schedule_draft_save()
+
+    def _edit_item(self, item: QTableWidgetItem) -> None:
+        self.table.editItem(item)
+
+    def _move_to_next_row(self, row: int, column: int) -> None:
+        QTimer.singleShot(0, lambda: self._select_next_row(row, column))
+
+    def _select_next_row(self, row: int, column: int) -> None:
+        self._normalize_trailing_empty_rows()
+        self.table.setCurrentCell(min(row + 1, self.table.rowCount() - 1), column)
 
     def _toggle_maximized(self) -> None:
         self.showNormal() if self.isMaximized() else self.showMaximized()
@@ -240,14 +276,42 @@ class ManualVideoImportDialog(QDialog):
         super().closeEvent(event)
 
     def add_row(self, *, schedule: bool = True) -> None:
+        self._normalize_trailing_empty_rows()
+        row = self.table.rowCount() - 1
+        self.table.setCurrentCell(row, self.TITLE_COLUMN)
+        if schedule:
+            self._schedule_draft_save()
+
+    def _append_empty_row(self) -> int:
         row = self.table.rowCount()
         with QSignalBlocker(self.table):
             self.table.insertRow(row)
             self.table.setItem(row, self.TITLE_COLUMN, QTableWidgetItem())
             self.table.setItem(row, self.URL_COLUMN, QTableWidgetItem())
-        self.table.setCurrentCell(row, self.TITLE_COLUMN)
-        if schedule:
-            self._schedule_draft_save()
+
+        return row
+
+    def _row_is_empty(self, row: int) -> bool:
+        return not any(
+            self._cell_text(row, column).strip()
+            for column in (self.TITLE_COLUMN, self.URL_COLUMN)
+        )
+
+    def _normalize_trailing_empty_rows(self) -> None:
+        last_data_row = next(
+            (
+                row
+                for row in range(self.table.rowCount() - 1, -1, -1)
+                if not self._row_is_empty(row)
+            ),
+            -1,
+        )
+        required_rows = last_data_row + 2
+        with QSignalBlocker(self.table):
+            while self.table.rowCount() > required_rows:
+                self.table.removeRow(self.table.rowCount() - 1)
+            while self.table.rowCount() < required_rows:
+                self._append_empty_row()
 
     @staticmethod
     def _looks_like_url(value: str) -> bool:
@@ -331,6 +395,7 @@ class ManualVideoImportDialog(QDialog):
             else start_column
         )
         self.table.setCurrentCell(last_row, last_column)
+        self._normalize_trailing_empty_rows()
         self._schedule_draft_save()
         return len(rows)
 
@@ -345,6 +410,7 @@ class ManualVideoImportDialog(QDialog):
         for row in rows:
             self.table.removeRow(row)
         if rows:
+            self._normalize_trailing_empty_rows()
             self._schedule_draft_save()
 
     def _has_draft_data(self) -> bool:
