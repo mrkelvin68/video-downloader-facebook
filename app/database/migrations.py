@@ -362,6 +362,11 @@ def _create_facebook_publishing_tables(connection: sqlite3.Connection) -> None:
             description TEXT NOT NULL DEFAULT '',
             scheduled_at TEXT,
             timezone TEXT NOT NULL DEFAULT 'UTC',
+            publish_mode TEXT NOT NULL DEFAULT 'IMMEDIATE' CHECK(publish_mode IN ('IMMEDIATE','SCHEDULED')),
+            schedule_provider TEXT NOT NULL DEFAULT 'LOCAL' CHECK(schedule_provider IN ('LOCAL','META')),
+            schedule_state TEXT,
+            remote_schedule_id TEXT,
+            schedule_metadata TEXT NOT NULL DEFAULT '{}',
             status TEXT NOT NULL CHECK(status IN (
                 'PENDING','SCHEDULED','PREPARING','UPLOADING','PROCESSING',
                 'PUBLISHING','PUBLISHED','FAILED','PAUSED','CANCELLED')),
@@ -400,6 +405,11 @@ def _create_facebook_publishing_tables(connection: sqlite3.Connection) -> None:
         ("last_status_check_at", "TEXT"),
         ("reconciliation_state", "TEXT"),
         ("retry_of_job_id", "TEXT"),
+        ("publish_mode", "TEXT NOT NULL DEFAULT 'IMMEDIATE'"),
+        ("schedule_provider", "TEXT NOT NULL DEFAULT 'LOCAL'"),
+        ("schedule_state", "TEXT"),
+        ("remote_schedule_id", "TEXT"),
+        ("schedule_metadata", "TEXT NOT NULL DEFAULT '{}'"),
     ):
         if name not in job_columns:
             connection.execute(f"ALTER TABLE facebook_publishing_jobs ADD COLUMN {name} {definition}")
@@ -409,6 +419,17 @@ def _create_facebook_publishing_tables(connection: sqlite3.Connection) -> None:
            ON facebook_publishing_jobs(project_id, video_id, page_id)
            WHERE status NOT IN ('FAILED','CANCELLED')
              AND COALESCE(reconciliation_state, '') <> 'UNRESOLVED'"""
+    )
+    connection.execute(
+        """UPDATE facebook_publishing_jobs
+           SET publish_mode='SCHEDULED', schedule_provider='LOCAL',
+               schedule_state='LOCAL_WAITING'
+           WHERE scheduled_at IS NOT NULL AND status='SCHEDULED'
+             AND (schedule_state IS NULL OR schedule_state='')"""
+    )
+    connection.execute(
+        """CREATE INDEX IF NOT EXISTS ix_facebook_publish_schedule_provider
+           ON facebook_publishing_jobs(project_id, schedule_provider, status, scheduled_at)"""
     )
     connection.execute(
         """

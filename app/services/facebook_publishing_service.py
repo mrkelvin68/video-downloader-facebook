@@ -23,6 +23,12 @@ PUBLISH_STATUSES = (
     "PUBLISHING", "PUBLISHED", "FAILED", "PAUSED", "CANCELLED",
 )
 JOB_DISPLAY_STATUSES = PUBLISH_STATUSES + ("UNRESOLVED",)
+SCHEDULE_PROVIDERS = ("LOCAL", "META")
+SCHEDULE_STATES = (
+    "LOCAL_SAVED", "LOCAL_WAITING", "META_SUBMITTING", "META_CONFIRMED",
+    "UPLOADING", "PROCESSING", "PUBLISHING", "PUBLISHED", "FAILED",
+    "UNRESOLVED", "CANCELLED",
+)
 TRANSIENT_ERRORS = (TimeoutError, ConnectionError)
 
 
@@ -299,6 +305,8 @@ class FacebookPublishingService:
 
     def enqueue(self, project_id: str, video_id: str, page_id: str, *, title: str | None = None,
                 description: str = "", scheduled_at: str | None = None, timezone: str = "UTC",
+                publish_mode: str | None = None, schedule_provider: str = "LOCAL",
+                schedule_metadata: dict[str, Any] | None = None,
                 file_path: str | Path | None = None,
                 confirmed_identity: dict[str, Any] | None = None) -> str:
         video = self.database.connection.execute(
@@ -318,17 +326,31 @@ class FacebookPublishingService:
             "SELECT 1 FROM facebook_pages WHERE project_id=? AND page_id=?", (project_id, page_id)
         ).fetchone() is None:
             raise FacebookPublishingError("Fanpage chưa được kết nối với dự án.")
-        status = "SCHEDULED" if scheduled_at else "PENDING"
+        mode = publish_mode or ("SCHEDULED" if scheduled_at else "IMMEDIATE")
+        if mode not in {"IMMEDIATE", "SCHEDULED"}:
+            raise ValueError("Chế độ xuất bản không hợp lệ.")
+        provider = schedule_provider.upper()
+        if provider not in SCHEDULE_PROVIDERS:
+            raise ValueError("Nhà cung cấp lịch đăng không hợp lệ.")
+        if mode == "SCHEDULED" and not scheduled_at:
+            raise ValueError("Lịch đăng cần thời điểm xuất bản.")
+        if mode == "IMMEDIATE" and scheduled_at:
+            raise ValueError("Đăng ngay không được có thời điểm lên lịch.")
+        status = "SCHEDULED" if mode == "SCHEDULED" else "PENDING"
+        schedule_state = "LOCAL_WAITING" if mode == "SCHEDULED" and provider == "LOCAL" else (
+            "META_SUBMITTING" if mode == "SCHEDULED" else None
+        )
         job_id = str(uuid.uuid4())
         now = _now()
         try:
             with self.database.connection:
                 self.database.connection.execute(
                     """INSERT INTO facebook_publishing_jobs
-                       (id,project_id,video_id,page_id,local_file_path,title,description,scheduled_at,timezone,status,created_at,updated_at,local_file_identity)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       (id,project_id,video_id,page_id,local_file_path,title,description,scheduled_at,timezone,publish_mode,schedule_provider,schedule_state,schedule_metadata,status,created_at,updated_at,local_file_identity)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (job_id, project_id, video_id, page_id, str(selected_path),
-                     title if title is not None else video["title"], description, scheduled_at, timezone, status, now, now,
+                     title if title is not None else video["title"], description, scheduled_at, timezone, mode, provider,
+                     schedule_state, json.dumps(schedule_metadata or {}, ensure_ascii=False, sort_keys=True), status, now, now,
                      json.dumps(identity, ensure_ascii=False, sort_keys=True)),
                 )
         except Exception as exc:
@@ -337,7 +359,10 @@ class FacebookPublishingService:
 
     def enqueue_from_draft(self, project_id: str, video_id: str, page_id: str, *,
                            file_path: str | Path | None = None,
-                           confirmed_identity: dict[str, Any] | None = None) -> str:
+                           confirmed_identity: dict[str, Any] | None = None,
+                           scheduled_at: str | None = None, timezone: str = "UTC",
+                           schedule_provider: str = "LOCAL",
+                           schedule_metadata: dict[str, Any] | None = None) -> str:
         draft = self.database.connection.execute(
             "SELECT * FROM facebook_drafts WHERE project_id=? AND video_id=?",
             (project_id, video_id),
@@ -353,9 +378,45 @@ class FacebookPublishingService:
         return self.enqueue(
             project_id, video_id, page_id, title=draft["facebook_title"],
             description=description,
+            scheduled_at=scheduled_at, timezone=timezone,
+            schedule_provider=schedule_provider, schedule_metadata=schedule_metadata,
             file_path=file_path,
             confirmed_identity=confirmed_identity,
         )
+
+    def schedule_from_draft(self, project_id: str, video_id: str, page_id: str, *,
+                            scheduled_for: datetime, timezone: str = "Asia/Ho_Chi_Minh",
+                            file_path: str | Path | None = None,
+                            confirmed_identity: dict[str, Any] | None = None,
+                            schedule_metadata: dict[str, Any] | None = None) -> str:
+        """Create one persisted local schedule from an already prepared draft."""
+        scheduled_at = self._normalized_future_schedule(scheduled_for)
+        return self.enqueue_from_draft(
+            project_id, video_id, page_id, file_path=file_path,
+            confirmed_identity=confirmed_identity, scheduled_at=scheduled_at,
+            timezone=timezone, schedule_provider="LOCAL",
+            schedule_metadata=schedule_metadata,
+        )
+
+    def reschedule(self, job_id: str, *, scheduled_for: datetime,
+                   timezone: str = "Asia/Ho_Chi_Minh") -> dict[str, Any]:
+        scheduled_at = self._normalized_future_schedule(scheduled_for)
+        job = self.get_job(job_id)
+        if job is None:
+            raise FacebookPublishingError("Không tìm thấy job xuất bản.")
+        if job["status"] not in {"SCHEDULED", "PAUSED"}:
+            raise FacebookPublishingError("Chỉ có thể đổi lịch job chưa thực thi.")
+        if job.get("schedule_provider") != "LOCAL":
+            raise FacebookPublishingError("Lịch Meta cần được cập nhật qua Meta trước khi lưu.")
+        with self.database.connection:
+            self.database.connection.execute(
+                """UPDATE facebook_publishing_jobs
+                   SET scheduled_at=?, timezone=?, publish_mode='SCHEDULED',
+                       schedule_state='LOCAL_WAITING', status='SCHEDULED', updated_at=?
+                   WHERE id=?""",
+                (scheduled_at, timezone, _now(), job_id),
+            )
+        return self.get_job(job_id) or {}
 
     def list_jobs(self, project_id: str) -> list[dict[str, Any]]:
         jobs = [dict(row) for row in self.database.connection.execute(
@@ -404,9 +465,13 @@ class FacebookPublishingService:
         job = self.get_job(job_id)
         if job is None:
             raise FacebookPublishingError("Không tìm thấy job xuất bản.")
-        if job["status"] != "PENDING":
-            raise FacebookPublishingError("Chỉ có thể hủy job đang chờ đăng.")
-        self._set_status(job_id, "CANCELLED")
+        if job["status"] not in {"PENDING", "SCHEDULED", "PAUSED"}:
+            raise FacebookPublishingError("Chỉ có thể hủy job chưa thực thi.")
+        with self.database.connection:
+            self.database.connection.execute(
+                "UPDATE facebook_publishing_jobs SET status='CANCELLED', schedule_state='CANCELLED', updated_at=? WHERE id=?",
+                (_now(), job_id),
+            )
 
     def delete_job_history(self, job_id: str) -> None:
         job = self.get_job(job_id)
@@ -555,9 +620,19 @@ class FacebookPublishingService:
         moment = (now or datetime.now(UTC)).astimezone(UTC).isoformat(timespec="seconds")
         return [dict(row) for row in self.database.connection.execute(
             """SELECT * FROM facebook_publishing_jobs
-               WHERE project_id=? AND status='SCHEDULED' AND scheduled_at<=?
+               WHERE project_id=? AND status='SCHEDULED' AND schedule_provider='LOCAL'
+                 AND schedule_state='LOCAL_WAITING' AND scheduled_at<=?
                ORDER BY scheduled_at, created_at""", (project_id, moment)
         )]
+
+    @staticmethod
+    def _normalized_future_schedule(scheduled_for: datetime) -> str:
+        if scheduled_for.tzinfo is None or scheduled_for.utcoffset() is None:
+            raise ValueError("Thời điểm lên lịch phải có múi giờ.")
+        value = scheduled_for.astimezone(UTC)
+        if value <= datetime.now(UTC):
+            raise ValueError("Thời điểm lên lịch phải ở tương lai.")
+        return value.isoformat(timespec="seconds")
 
     def _set_status(self, job_id: str, status: str) -> None:
         with self.database.connection:
