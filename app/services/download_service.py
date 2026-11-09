@@ -220,21 +220,23 @@ class DownloadService:
                     source_url,
                 ])
 
-                try:
+                def run_ytdlp(candidate_command: list[str]):
                     if progress_callback is None:
                         if cancel_event is not None and cancel_event.is_set():
                             raise DownloadCancelled("Đã hủy tải theo yêu cầu.")
-                        result = self.runner(
-                            command,
+                        return self.runner(
+                            candidate_command,
                             capture_output=True,
                             text=True,
                             timeout=1800,
                             check=False,
                         )
-                    else:
-                        result = self._run_with_progress(
-                            command, progress_callback, cancel_event
-                        )
+                    return self._run_with_progress(
+                        candidate_command, progress_callback, cancel_event
+                    )
+
+                try:
+                    result = run_ytdlp(command)
                 except FileNotFoundError as exc:
                     raise DownloadError(
                         "Không tìm thấy Python/yt-dlp. Chạy lại py install.py",
@@ -246,33 +248,42 @@ class DownloadService:
                         category="timeout",
                         retryable=True,
                     ) from exc
-                if result.returncode != 0 and "cannot parse data" in (
-                    result.stderr or result.stdout or ""
-                ).casefold():
+                initial_reason = result.stderr or result.stdout or ""
+                authentication_failure = (
+                    result.returncode != 0
+                    and provider is not None
+                    and provider.platform == VideoPlatform.FACEBOOK
+                    and self._requires_facebook_authentication(initial_reason)
+                )
+                attempted_browsers: list[str] = []
+                if authentication_failure and not cookies_file:
+                    for browser in self._find_browser_cookie_sources():
+                        attempted_browsers.append(browser.split(":", 1)[0])
+                        browser_command = [
+                            *command[:-1], "--cookies-from-browser", browser, command[-1]
+                        ]
+                        result = run_ytdlp(browser_command)
+                        if result.returncode == 0:
+                            break
+                if result.returncode != 0 and authentication_failure:
                     fallback_url = self._resolve_facebook_mirror_url(
                         video=video, provider=provider
                     )
                     if fallback_url:
                         fallback_command = [*command[:-1], fallback_url]
-                        if progress_callback is None:
-                            result = self.runner(
-                                fallback_command,
-                                capture_output=True,
-                                text=True,
-                                timeout=1800,
-                                check=False,
-                            )
-                        else:
-                            result = self._run_with_progress(
-                                fallback_command, progress_callback, cancel_event
-                            )
+                        result = run_ytdlp(fallback_command)
                 if result.returncode != 0:
                     reason = (result.stderr or result.stdout or "Không rõ nguyên nhân").strip()
-                    if "cannot parse data" in reason.casefold():
+                    if authentication_failure:
+                        browser_note = (
+                            f" Đã thử phiên đăng nhập: {', '.join(attempted_browsers)}."
+                            if attempted_browsers else ""
+                        )
                         raise DownloadError(
                             "Video yêu cầu đăng nhập Facebook (ví dụ: nội dung tài trợ/affiliate hoặc giới hạn độ tuổi) "
-                            "hoặc không khả dụng ở chế độ khách. Hãy đặt file cookies.txt tại "
-                            f"~/.video-downloader-facebook/cookies.txt để tải ({reason[-300:]})",
+                            "hoặc không khả dụng ở chế độ khách. Hãy đăng nhập Facebook trên Chrome/Edge rồi thử lại, "
+                            "hoặc đặt file cookies.txt tại "
+                            f"~/.video-downloader-facebook/cookies.txt để tải.{browser_note} ({reason[-300:]})",
                             category="unavailable",
                             retryable=False,
                         )
@@ -501,6 +512,32 @@ class DownloadService:
             if candidate.is_file():
                 return str(candidate.resolve())
         return None
+
+    @staticmethod
+    def _find_browser_cookie_sources() -> list[str]:
+        configured = os.environ.get("YTDLP_COOKIES_FROM_BROWSER", "").strip()
+        if configured:
+            return [configured]
+        candidates = (
+            ("chrome", Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "User Data"),
+            ("edge", Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Edge" / "User Data"),
+            ("firefox", Path(os.environ.get("APPDATA", "")) / "Mozilla" / "Firefox" / "Profiles"),
+        )
+        return [browser for browser, profile in candidates if profile.is_dir()]
+
+    @staticmethod
+    def _requires_facebook_authentication(output: str) -> bool:
+        normalized = output.casefold()
+        return any(
+            marker in normalized
+            for marker in (
+                "cannot parse data",
+                "login required",
+                "log in to confirm",
+                "sign in to confirm",
+                "cookies are needed",
+            )
+        )
 
     @staticmethod
     def _resolve_facebook_mirror_url(

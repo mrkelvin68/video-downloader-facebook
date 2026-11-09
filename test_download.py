@@ -150,7 +150,9 @@ class DownloadTests(unittest.TestCase):
             stdout="",
         )
         service = DownloadService(self.db, runner=runner)
-        with patch.object(service, "_resolve_facebook_mirror_url", return_value=None):
+        with patch.object(service, "_find_browser_cookie_sources", return_value=[]), patch.object(
+            service, "_resolve_facebook_mirror_url", return_value=None
+        ):
             with self.assertRaises(DownloadError) as error:
                 service.download(self.project, self.video["id"])
         self.assertEqual(error.exception.category, "unavailable")
@@ -181,14 +183,44 @@ class DownloadTests(unittest.TestCase):
 
         service = DownloadService(self.db, runner=runner)
         with patch.object(
-            service,
-            "_resolve_facebook_mirror_url",
+            service, "_find_browser_cookie_sources", return_value=[]
+        ), patch.object(
+            service, "_resolve_facebook_mirror_url",
             return_value="https://www.facebook.com/reel/1970655827226751",
         ):
             out, _ = service.download(self.project, self.video["id"])
         self.assertTrue(out.is_file())
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[1][-1], "https://www.facebook.com/reel/1970655827226751")
+
+    def test_facebook_auth_failure_retries_with_browser_cookies(self):
+        calls = []
+
+        def runner(command, **kwargs):
+            if "-show_streams" in command:
+                return SimpleNamespace(
+                    returncode=0, stderr="",
+                    stdout='{"streams":[{"codec_type":"video"}],"format":{"duration":"1.0"}}',
+                )
+            calls.append(list(command))
+            if len(calls) == 1:
+                return SimpleNamespace(
+                    returncode=1,
+                    stderr="ERROR: [facebook] 28755749490762508: Cannot parse data",
+                    stdout="",
+                )
+            template = command[command.index("-o") + 1]
+            Path(template.replace("%(ext)s", "mp4")).write_bytes(b"mock mp4")
+            return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+        service = DownloadService(self.db, runner=runner)
+        with patch.object(service, "_find_browser_cookie_sources", return_value=["chrome"]):
+            output, _ = service.download(self.project, self.video["id"])
+
+        self.assertTrue(output.is_file())
+        self.assertEqual(len(calls), 2)
+        cookie_option = calls[1].index("--cookies-from-browser")
+        self.assertEqual(calls[1][cookie_option + 1], "chrome")
 
     def test_cookies_file_is_passed_to_ytdlp_when_present(self):
         cookies_path = self.root / "cookies.txt"
