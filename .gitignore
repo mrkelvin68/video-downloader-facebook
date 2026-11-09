@@ -8,6 +8,7 @@ __pycache__/
 *.db
 *.db-*
 *.log
+cookies.txt
 logs/
 *.mp4
 *.mkv
