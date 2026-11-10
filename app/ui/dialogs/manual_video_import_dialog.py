@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from PySide6.QtCore import QIODevice, QSaveFile, QSignalBlocker, QStandardPaths, QTimer, Qt
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QLineEdit,
+    QPlainTextEdit,
     QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
@@ -55,6 +56,7 @@ class ManualVideoImportDialog(QDialog):
         *,
         project_id: str | None = None,
         draft_directory: str | Path | None = None,
+        validation_errors: list[str] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Nhập danh sách video")
@@ -141,6 +143,9 @@ class ManualVideoImportDialog(QDialog):
         self._normalize_trailing_empty_rows()
         self._apply_column_widths()
         self._restoring = False
+        if validation_errors:
+            self._highlight_error_rows(validation_errors)
+            QTimer.singleShot(0, lambda: self._show_import_errors(validation_errors))
         if draft_rows is not None:
             self.draft_status_label.setText("Bản nháp: Đã khôi phục")
             self._show_draft_restored_notice()
@@ -162,6 +167,29 @@ class ManualVideoImportDialog(QDialog):
 
     def _show_draft_restored_notice(self) -> None:
         QMessageBox.information(self, "Bản nháp", "Đã khôi phục bản nháp chưa lưu.")
+
+    def _highlight_error_rows(self, errors: list[str]) -> None:
+        import re
+
+        rows = {int(value) - 1 for error in errors for value in re.findall(r"Dòng nhập: (\d+)", error)}
+        color = QColor("#ffe1e1")
+        for row in rows:
+            if 0 <= row < self.table.rowCount():
+                for column in range(self.COLUMN_COUNT):
+                    self._ensure_cell_item(row, column).setBackground(color)
+
+    def _show_import_errors(self, errors: list[str]) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Lỗi import video")
+        dialog.resize(700, 430)
+        layout = QVBoxLayout(dialog)
+        details = QPlainTextEdit("\n\n".join(errors), dialog)
+        details.setReadOnly(True)
+        layout.addWidget(details)
+        close_button = QPushButton("Đóng", dialog)
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button)
+        dialog.exec()
 
     def restore_draft(self) -> list[dict[str, str]] | None:
         if not self._draft_path.is_file():
@@ -250,6 +278,9 @@ class ManualVideoImportDialog(QDialog):
         if self._restoring:
             return
         self._normalize_trailing_empty_rows()
+        with QSignalBlocker(self.table):
+            for column in range(self.COLUMN_COUNT):
+                self._ensure_cell_item(_item.row(), column).setBackground(QColor("transparent"))
         self._schedule_draft_save()
 
     def _edit_item(self, item: QTableWidgetItem) -> None:
@@ -450,7 +481,8 @@ class ManualVideoImportDialog(QDialog):
         csv_text = output.getvalue()
         rows, errors = parse_video_csv(csv_text)
         if errors:
-            QMessageBox.warning(self, "Dữ liệu không hợp lệ", "\n".join(errors[:20]))
+            self._highlight_error_rows(errors)
+            self._show_import_errors(errors)
             return
         if not rows:
             QMessageBox.information(self, "Chưa có dữ liệu", "Hãy thêm ít nhất một dòng Title và URL.")

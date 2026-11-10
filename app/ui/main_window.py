@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
 )
 
-from app.core.exceptions import ImportBlockedError, ImportConfirmationRequired
+from app.core.exceptions import ImportBlockedError, ImportConfirmationRequired, VideoImportValidationError
 from app.core.single_instance import acquire_single_instance
 from app.database.connection import Database
 from app.database.viral_reels_store import ViralReelsStore
@@ -179,6 +179,7 @@ class MainWindow(QMainWindow):
         self.pending_csv_text: str | None = None
         self.pending_csv_rows: list[dict] = []
         self.pending_csv_errors: list[str] = []
+        self.last_import_errors: list[str] = []
         self.queue_workers: dict[str, DownloadWorker] = {}
         self._queue_video_ids: dict[str, str] = {}
         self._queue_speeds: dict[str, float] = {}
@@ -1733,11 +1734,13 @@ class MainWindow(QMainWindow):
         if self.current_project is None:
             return
         previous_rows: list[dict[str, object]] | None = None
+        validation_errors: list[str] | None = None
         while True:
             dialog = ManualVideoImportDialog(
                 self,
                 rows=previous_rows,
                 project_id=self.current_project.uuid,
+                validation_errors=validation_errors,
             )
             if dialog.exec() != ManualVideoImportDialog.DialogCode.Accepted:
                 return
@@ -1749,6 +1752,7 @@ class MainWindow(QMainWindow):
                 dialog.clear_draft()
                 return
             previous_rows = list(dialog.rows)
+            validation_errors = self.last_import_errors
 
     def save_sample_csv(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -1788,6 +1792,7 @@ class MainWindow(QMainWindow):
         ):
             return
         project_id = self.current_project.uuid
+        self.last_import_errors = []
         try:
             imported = self.videos.import_csv(
                 project_id,
@@ -1796,6 +1801,10 @@ class MainWindow(QMainWindow):
             )
         except ImportConfirmationRequired as exc:
             QMessageBox.warning(self, "Cần xác nhận", str(exc))
+            return
+        except VideoImportValidationError as exc:
+            self.last_import_errors = exc.errors
+            QMessageBox.warning(self, "Lỗi import video", str(exc))
             return
         except (ImportBlockedError, ValueError, sqlite3.Error) as exc:
             QMessageBox.warning(self, "Lỗi import", str(exc))

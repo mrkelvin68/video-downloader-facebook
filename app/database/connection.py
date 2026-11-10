@@ -196,25 +196,33 @@ class Database:
             ).fetchone()
             if project is None:
                 raise ValueError("Dự án không tồn tại")
-            start_sequence = self.next_video_sequence(project_id)
-            now = datetime.now(UTC).isoformat(timespec="seconds")
-            prepared = [
-                (
-                    str(uuid.uuid4()),
-                    project_id,
-                    sequence,
-                    f"{project['prefix']}-{sequence}",
-                    row["ten_video"],
-                    row["url"],
-                    row["normalized_url"],
-                    row.get("platform"),
-                    row.get("canonical_url"),
-                    row.get("external_video_id"),
-                    now,
-                    now,
+            used_sequences = {
+                int(row["sequence_number"])
+                for row in self.connection.execute(
+                    "SELECT sequence_number FROM videos WHERE project_id=?", (project_id,)
                 )
-                for sequence, row in enumerate(prepared_rows, start=start_sequence)
-            ]
+            }
+            next_sequence = max(used_sequences, default=0) + 1
+            now = datetime.now(UTC).isoformat(timespec="seconds")
+            prepared = []
+            for row in prepared_rows:
+                requested_sequence = int(row["stt"])
+                if requested_sequence in used_sequences:
+                    while next_sequence in used_sequences:
+                        next_sequence += 1
+                    sequence = next_sequence
+                    next_sequence += 1
+                else:
+                    sequence = requested_sequence
+                used_sequences.add(sequence)
+                prepared.append(
+                    (
+                        str(uuid.uuid4()), project_id, sequence,
+                        f"{project['prefix']}-{sequence}", row["ten_video"], row["url"],
+                        row["normalized_url"], row.get("platform"), row.get("canonical_url"),
+                        row.get("external_video_id"), now, now,
+                    )
+                )
             self.connection.executemany(
                 """INSERT INTO videos
                     (id, project_id, sequence_number, video_code, title, source_url,

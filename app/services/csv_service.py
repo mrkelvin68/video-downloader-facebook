@@ -45,8 +45,7 @@ def parse_video_csv(text: str) -> tuple[list[dict[str, object]], list[str]]:
     has_legacy_sequence = "stt" in positions
     rows: list[dict[str, object]] = []
     errors: list[str] = []
-    sequences: set[int] = set()
-    urls: set[str] = set()
+    urls: dict[str, tuple[int, str]] = {}
     data_count = 0
     previous_line_number = reader.line_num
     while True:
@@ -85,8 +84,6 @@ def parse_video_csv(text: str) -> tuple[list[dict[str, object]], list[str]]:
                     row_errors.append("stt phải là số nguyên dương")
                 elif sequence > 2**63 - 1:
                     row_errors.append("stt vượt giới hạn SQLite")
-                elif sequence in sequences:
-                    row_errors.append("stt trùng")
         if not title:
             row_errors.append("tên video không được để trống")
         valid_url = validate_supported_video_url(url)
@@ -99,13 +96,20 @@ def parse_video_csv(text: str) -> tuple[list[dict[str, object]], list[str]]:
             row_errors.append(f"URL {platform} không hợp lệ")
         normalized_url = normalize_video_url(url) if valid_url else ""
         if valid_url and normalized_url in urls:
-            row_errors.append("URL trùng")
+            first_input_row, _ = urls[normalized_url]
+            input_row = data_count
+            row_errors.append(
+                "Lỗi import video\n"
+                f"Dòng nhập: {input_row}\n"
+                f"URL: {url}\n"
+                f"ID dòng nhập: {input_row}\n"
+                f"Trùng với dòng nhập: {first_input_row}\n"
+                "Nguyên nhân: URL đã xuất hiện trong danh sách nhập."
+            )
         if row_errors:
             errors.append(f"Dòng {line_number}: {'; '.join(row_errors)}")
             continue
-        if has_legacy_sequence:
-            sequences.add(sequence)
-        urls.add(normalized_url)
+        urls[normalized_url] = (data_count, url)
         rows.append(
             {
                 "stt": sequence,
