@@ -74,3 +74,12 @@ class ProjectCard(QFrame):
         bottom.addWidget(matrix)
         bottom.addWidget(delete)
         layout.addLayout(bottom)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        """Open from the card body through the same signal as the open button."""
+        target = self.childAt(event.position().toPoint())
+        if isinstance(target, QPushButton):
+            event.ignore()
+            return
+        self.openRequested.emit(self.project)
+        event.accept()

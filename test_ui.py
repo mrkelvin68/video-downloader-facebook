@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtWidgets import QLabel, QPushButton
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QLabel, QPushButton, QTabWidget
 
 from app.database.connection import Database
 from app.services.project_service import ProjectService
@@ -226,6 +228,67 @@ class ProjectCsvUiTests(unittest.TestCase):
         self.assertIn("Số job tải liên quan: 2", rendered)
         dialog.close()
         card.close()
+
+    def test_project_card_double_click_opens_but_action_buttons_do_not(self):
+        project = ProjectService(self.database).list_projects()[0]
+        card = ProjectCard(project)
+        opened = []
+        card.openRequested.connect(opened.append)
+        card.resize(700, 150)
+        card.show()
+        self.application.processEvents()
+        QTest.mouseDClick(card, Qt.MouseButton.LeftButton, pos=card.rect().topLeft() + QPoint(5, 5))
+        self.assertEqual(opened, [project])
+        for button in card.findChildren(QPushButton):
+            QTest.mouseDClick(button, Qt.MouseButton.LeftButton)
+        self.assertEqual(opened, [project])
+        card.close()
+
+    def test_project_card_double_click_uses_open_project_flow(self):
+        window = MainWindow(self.database, auto_resume=False, enable_tray=False)
+        window.show()
+        self.application.processEvents()
+        card = window.project_page.findChild(ProjectCard)
+        self.assertIsNotNone(card)
+        QTest.mouseDClick(card, Qt.MouseButton.LeftButton, pos=QPoint(5, 5))
+        self.assertEqual(window.pages.currentIndex(), 1)
+        self.assertEqual(window.current_project.uuid, self.project_id)
+
+        window.show_projects()
+        open_button = next(
+            button for button in window.project_page.findChild(ProjectCard).findChildren(QPushButton)
+            if button.text() == "Mở dự án"
+        )
+        QTest.mouseClick(open_button, Qt.MouseButton.LeftButton)
+        self.assertEqual(window.pages.currentIndex(), 1)
+        self.assertEqual(window.current_project.uuid, self.project_id)
+        window.close()
+
+    def test_opening_another_project_refreshes_detail_data(self):
+        second_id = ProjectService(self.database).create(
+            "Dự án UI thứ hai", "ui-two", str(self.root / "videos-two")
+        )
+        window = MainWindow(self.database, auto_resume=False, enable_tray=False)
+        window.show()
+        self.application.processEvents()
+        second_card = next(
+            card for card in window.project_page.findChildren(ProjectCard)
+            if card.project.uuid == second_id
+        )
+        QTest.mouseDClick(second_card, Qt.MouseButton.LeftButton, pos=QPoint(5, 5))
+        self.assertEqual(window.current_project.uuid, second_id)
+        self.assertEqual(window.detail_page.detail_title.text(), "Dự án UI thứ hai")
+        window.close()
+
+    def test_project_detail_starts_on_video_tab_without_project_info_tab(self):
+        from app.ui.pages.project_detail_page import ProjectDetailPage
+
+        detail = ProjectDetailPage()
+        tabs = detail.findChild(QTabWidget, "projectTabs")
+        self.assertIsNotNone(tabs)
+        self.assertEqual([tabs.tabText(index) for index in range(tabs.count())], ["Quản lý video", "Đăng Facebook"])
+        self.assertEqual(tabs.currentIndex(), 0)
+        detail.close()
 
     def test_project_delete_cancel_and_metadata_only_refresh_immediately(self):
         from PySide6.QtWidgets import QMessageBox

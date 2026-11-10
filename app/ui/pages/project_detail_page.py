@@ -171,34 +171,16 @@ class ProjectDetailPage(QWidget):
         download_actions.addWidget(self.queue_status, 1)
         tabs = QTabWidget()
         tabs.setObjectName("projectTabs")
-        project_tab = QWidget()
-        project_layout = QVBoxLayout(project_tab)
-        project_layout.setContentsMargins(0, 14, 0, 0)
-        project_layout.setSpacing(0)
-        config_card = QFrame()
-        config_card.setObjectName("card")
-        config_layout = QVBoxLayout(config_card)
-        config_layout.setContentsMargins(22, 19, 22, 18)
-        config_layout.setSpacing(10)
-        config_layout.addWidget(QLabel("Thông tin cấu hình dự án sẽ được giữ nguyên khi quay lại workspace."))
-        self.project_config = QLabel()
-        self.project_config.setObjectName("detailMeta")
-        self.project_config.setWordWrap(True)
-        config_layout.addWidget(self.project_config)
-        edit_project = QPushButton("Chỉnh sửa cấu hình dự án")
-        edit_project.setObjectName("secondary")
-        edit_project.clicked.connect(self.projectEditRequested.emit)
-        config_layout.addWidget(edit_project, alignment=Qt.AlignmentFlag.AlignLeft)
-        project_layout.addWidget(config_card)
-        project_layout.addStretch()
         publish_tab = QWidget()
         publish_layout = QVBoxLayout(publish_tab)
         publish_layout.setContentsMargins(10, 14, 10, 0)
         publish_layout.setSpacing(12)
         self._build_facebook_editor(publish_layout)
-        tabs.addTab(project_tab, "Thông tin dự án")
+        # Project configuration remains editable through the existing project-list
+        # flow; omit this duplicate tab without changing that backend/edit logic.
         tabs.addTab(import_box, "Quản lý video")
         tabs.addTab(publish_tab, "Đăng Facebook")
+        tabs.setCurrentIndex(0)
         import_layout.addLayout(download_actions)
         layout.addWidget(tabs, 1)
 
@@ -688,9 +670,6 @@ class ProjectDetailPage(QWidget):
         self.detail_title.setText(project.name)
         self.detail_meta.setText(
             f"Prefix video: {project.prefix}    |    Thư mục: {project.output_dir}"
-        )
-        self.project_config.setText(
-            f"Tên dự án: {project.name}\nPrefix video: {project.prefix}\nThư mục đầu ra: {project.output_dir}"
         )
 
     def set_saved_videos(self, videos: list[dict]) -> None:
