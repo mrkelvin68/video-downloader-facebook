@@ -44,6 +44,13 @@ def classify_download_error(message: str) -> tuple[str, bool]:
     normalized = message.casefold()
     if any(
         marker in normalized
+        for marker in ("cannot parse data", "no video formats found")
+    ):
+        # Facebook intermittently returns incomplete extraction data for public
+        # Reels. This is not proof that authentication is required.
+        return "extractor", True
+    if any(
+        marker in normalized
         for marker in (
             "geo restriction",
             "not available in your country",
@@ -95,7 +102,6 @@ def classify_download_error(message: str) -> tuple[str, bool]:
             "removed",
             "deleted",
             "does not exist",
-            "cannot parse data",
         )
     ):
         return "unavailable", False
@@ -196,8 +202,6 @@ class DownloadService:
                     "--no-overwrites", "--write-thumbnail", "--write-info-json", "--convert-thumbnails", "jpg",
                     "-f", "bv*+ba/b", "--merge-output-format", "mp4", "--remux-video", "mp4",
                 ]
-                if cookies_file:
-                    command.extend(["--cookies", cookies_file])
                 if progress_callback is None:
                     command.append("--no-progress")
                 else:
@@ -249,6 +253,16 @@ class DownloadService:
                         retryable=True,
                     ) from exc
                 initial_reason = result.stderr or result.stdout or ""
+                if (
+                    result.returncode != 0
+                    and provider is not None
+                    and provider.platform == VideoPlatform.FACEBOOK
+                    and self._is_facebook_extractor_failure(initial_reason)
+                ):
+                    # A public Reel can intermittently return incomplete page
+                    # data. Retry its public URL once before considering auth.
+                    result = run_ytdlp(command)
+                    initial_reason = result.stderr or result.stdout or ""
                 authentication_failure = (
                     result.returncode != 0
                     and provider is not None
@@ -256,7 +270,12 @@ class DownloadService:
                     and self._requires_facebook_authentication(initial_reason)
                 )
                 attempted_browsers: list[str] = []
-                if authentication_failure and not cookies_file:
+                if authentication_failure and cookies_file:
+                    cookie_command = [
+                        *command[:-1], "--cookies", cookies_file, command[-1]
+                    ]
+                    result = run_ytdlp(cookie_command)
+                if authentication_failure and result.returncode != 0:
                     for browser in self._find_browser_cookie_sources():
                         attempted_browsers.append(browser.split(":", 1)[0])
                         browser_command = [
@@ -516,14 +535,17 @@ class DownloadService:
     @staticmethod
     def _find_browser_cookie_sources() -> list[str]:
         configured = os.environ.get("YTDLP_COOKIES_FROM_BROWSER", "").strip()
-        if configured:
-            return [configured]
-        candidates = (
-            ("chrome", Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "User Data"),
-            ("edge", Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Edge" / "User Data"),
-            ("firefox", Path(os.environ.get("APPDATA", "")) / "Mozilla" / "Firefox" / "Profiles"),
+        # Browser cookies are sensitive. Use them only after the user explicitly
+        # opts in by configuring the browser/profile source.
+        return [configured] if configured else []
+
+    @staticmethod
+    def _is_facebook_extractor_failure(output: str) -> bool:
+        normalized = output.casefold()
+        return any(
+            marker in normalized
+            for marker in ("cannot parse data", "no video formats found")
         )
-        return [browser for browser, profile in candidates if profile.is_dir()]
 
     @staticmethod
     def _requires_facebook_authentication(output: str) -> bool:
@@ -531,7 +553,6 @@ class DownloadService:
         return any(
             marker in normalized
             for marker in (
-                "cannot parse data",
                 "login required",
                 "log in to confirm",
                 "sign in to confirm",
