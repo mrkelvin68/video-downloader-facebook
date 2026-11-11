@@ -42,7 +42,15 @@ class DownloadUIRedesignTests(unittest.TestCase):
 
         card.setText("Job lỗi: timeout")
         self.assertEqual(card.title_label.full_text(), "Job lỗi: timeout")
-        self.assertEqual(card.progress_label.text(), "Lỗi")
+        self.assertEqual(card.progress_label.text(), "Tải thất bại")
+        self.assertEqual(card.stats_label.text(), "Video bị lỗi")
+
+        card.setText("Tải thất bại: Video không thể kết nối")
+        self.assertEqual(card.progress_label.text(), "Tải thất bại")
+
+        card.setText("Hoàn tất: 2 video xong, 1 video lỗi.")
+        self.assertEqual(card.progress_label.text(), "2 xong")
+        self.assertEqual(card.stats_label.text(), "1 lỗi")
 
     def test_toast_cancel_signal(self):
         card = DownloadToastCard()

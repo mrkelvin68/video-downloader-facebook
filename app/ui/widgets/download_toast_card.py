@@ -199,19 +199,29 @@ class DownloadToastCard(QFrame):
             self.update_download_progress(code, 0.0, "Đang kết nối…")
             return
 
-        # Completion
-        if "hoàn tất" in clean.lower():
+        clean_lower = clean.lower()
+
+        # Check for error or failure FIRST
+        if (
+            "thất bại" in clean_lower
+            or "lỗi" in clean_lower
+            or clean.startswith("Job lỗi:")
+        ):
+            m = re.search(r"(\d+)\s+video xong,\s*(\d+)\s+video lỗi", clean)
+            if m:
+                self.set_partial_error(clean, int(m.group(1)), int(m.group(2)))
+            else:
+                self.set_error(clean)
+            return
+
+        # Completion (only pure success reaching here)
+        if "hoàn tất" in clean_lower or "thành công" in clean_lower:
             self.set_completed(clean)
             return
 
         # Paused
-        if "tạm dừng" in clean.lower():
+        if "tạm dừng" in clean_lower:
             self.set_paused(clean)
-            return
-
-        # Error
-        if "lỗi" in clean.lower():
-            self.set_error(clean)
             return
 
         # Idle or general status
@@ -221,11 +231,43 @@ class DownloadToastCard(QFrame):
         """Compatibility method matching QLabel.text."""
         return self._raw_text
 
+    def _set_bar_state(self, state: str) -> None:
+        """Configure progress bar and label aesthetics for different states."""
+        if state == "error":
+            self.progress_bar.setStyleSheet(
+                "#toastProgressBar { background:#16263d; border:0; border-radius:2.5px; }"
+                "#toastProgressBar::chunk { background:#ef4444; border-radius:2.5px; }"
+            )
+            self.progress_label.setStyleSheet("color: #f87171; font-weight: 600;")
+            self.stats_label.setStyleSheet("color: #fca5a5;")
+        elif state == "success":
+            self.progress_bar.setStyleSheet(
+                "#toastProgressBar { background:#16263d; border:0; border-radius:2.5px; }"
+                "#toastProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #10b981, stop:1 #059669); border-radius:2.5px; }"
+            )
+            self.progress_label.setStyleSheet("color: #34d399; font-weight: 600;")
+            self.stats_label.setStyleSheet("color: #6ee7b7;")
+        elif state == "warning":
+            self.progress_bar.setStyleSheet(
+                "#toastProgressBar { background:#16263d; border:0; border-radius:2.5px; }"
+                "#toastProgressBar::chunk { background:#f59e0b; border-radius:2.5px; }"
+            )
+            self.progress_label.setStyleSheet("color: #fbbf24; font-weight: 600;")
+            self.stats_label.setStyleSheet("color: #fcd34d;")
+        else:  # normal / downloading / idle
+            self.progress_bar.setStyleSheet(
+                "#toastProgressBar { background:#16263d; border:0; border-radius:2.5px; }"
+                "#toastProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #06b6d4, stop:1 #3b82f6); border-radius:2.5px; }"
+            )
+            self.progress_label.setStyleSheet("color: #94a3b8; font-weight: normal;")
+            self.stats_label.setStyleSheet("color: #94a3b8;")
+
     def update_download_progress(
         self, code: str, percent: float, stats: str = ""
     ) -> None:
         """Update with live download telemetry."""
         self._is_active = True
+        self._set_bar_state("normal")
         self.title_label.set_full_text(f"Đang tải: {code}")
         self.spinner.start()
         self.cancel_button.show()
@@ -237,6 +279,7 @@ class DownloadToastCard(QFrame):
 
     def set_idle(self, message: str = "Hàng đợi đang dừng") -> None:
         self._is_active = False
+        self._set_bar_state("normal")
         self.title_label.set_full_text(message)
         self.spinner.stop()
         self.cancel_button.hide()
@@ -246,6 +289,7 @@ class DownloadToastCard(QFrame):
 
     def set_paused(self, message: str = "Hàng đợi đang tạm dừng.") -> None:
         self._is_active = False
+        self._set_bar_state("normal")
         self.title_label.set_full_text(message)
         self.spinner.stop()
         self.cancel_button.hide()
@@ -254,6 +298,7 @@ class DownloadToastCard(QFrame):
 
     def set_completed(self, message: str = "Hàng đợi đã hoàn tất.") -> None:
         self._is_active = False
+        self._set_bar_state("success")
         self.title_label.set_full_text(message)
         self.spinner.stop()
         self.cancel_button.hide()
@@ -263,8 +308,22 @@ class DownloadToastCard(QFrame):
 
     def set_error(self, message: str) -> None:
         self._is_active = False
+        self._set_bar_state("error")
         self.title_label.set_full_text(message)
         self.spinner.stop()
         self.cancel_button.hide()
-        self.progress_label.setText("Lỗi")
-        self.stats_label.setText("Kiểm tra nhật ký")
+        self.progress_bar.setValue(100)
+        self.progress_label.setText("Tải thất bại")
+        self.stats_label.setText("Video bị lỗi")
+
+    def set_partial_error(
+        self, message: str, success_count: int, error_count: int
+    ) -> None:
+        self._is_active = False
+        self._set_bar_state("warning")
+        self.title_label.set_full_text(message)
+        self.spinner.stop()
+        self.cancel_button.hide()
+        self.progress_bar.setValue(100)
+        self.progress_label.setText(f"{success_count} xong")
+        self.stats_label.setText(f"{error_count} lỗi")
