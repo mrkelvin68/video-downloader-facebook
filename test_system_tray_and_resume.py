@@ -10,6 +10,7 @@ from app.database.connection import Database
 from app.services.download_queue_service import DownloadQueueService
 from app.services.project_service import ProjectService
 from app.services.video_service import VideoService
+from app.ui import main_window
 from app.ui.main_window import MainWindow
 
 
@@ -32,26 +33,29 @@ class SystemTrayAndAutoResumeTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_system_tray_hide_on_close_and_restore(self):
-        window = MainWindow(self.database, auto_resume=False, enable_tray=True)
-        window.show()
-        self.assertTrue(window.isVisible())
+        with patch.object(
+            main_window.QSystemTrayIcon, "isSystemTrayAvailable", return_value=True
+        ):
+            window = MainWindow(self.database, auto_resume=False, enable_tray=True)
+            window.show()
+            self.assertTrue(window.isVisible())
 
-        # Simulate user closing the window
-        event = QCloseEvent()
-        window.closeEvent(event)
-        self.assertTrue(event.isAccepted() is False or not window.isVisible())
-        self.assertFalse(window.isVisible())
+            # Simulate user closing the window.
+            event = QCloseEvent()
+            window.closeEvent(event)
+            self.assertFalse(event.isAccepted())
+            self.assertFalse(window.isVisible())
 
-        # Restore from tray
-        window._restore_from_tray()
-        self.assertTrue(window.isVisible())
+            # Restore from tray.
+            window._restore_from_tray()
+            self.assertTrue(window.isVisible())
 
-        # Force exit
-        window._force_exit = True
-        close_event = QCloseEvent()
-        window.closeEvent(close_event)
-        self.assertTrue(close_event.isAccepted())
-        window.close()
+            # Force exit.
+            window._force_exit = True
+            close_event = QCloseEvent()
+            window.closeEvent(close_event)
+            self.assertTrue(close_event.isAccepted())
+            window.close()
 
     def test_auto_resume_retries_interrupted_jobs_and_triggers_queue(self):
         VideoService(self.database).import_csv(
@@ -75,6 +79,25 @@ class SystemTrayAndAutoResumeTests(unittest.TestCase):
             window._auto_resume_queue()
             mock_start.assert_called_once()
             window.close()
+
+    def test_main_exits_when_the_main_window_closes(self):
+        application = MagicMock()
+        application.exec.return_value = 0
+        database = MagicMock()
+        window = MagicMock()
+
+        with (
+            patch.object(main_window, "acquire_single_instance", return_value=True),
+            patch.object(main_window, "QApplication", return_value=application),
+            patch.object(main_window, "Database", return_value=database),
+            patch.object(main_window, "MainWindow", return_value=window) as main_window_cls,
+        ):
+            self.assertEqual(main_window.main(), 0)
+
+        application.setQuitOnLastWindowClosed.assert_called_once_with(True)
+        main_window_cls.assert_called_once_with(database, auto_resume=True, enable_tray=False)
+        window.show.assert_called_once_with()
+        database.close.assert_called_once_with()
 
 
 if __name__ == "__main__":

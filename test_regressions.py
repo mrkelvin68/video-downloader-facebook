@@ -105,7 +105,7 @@ class CsvRegressionTests(unittest.TestCase):
         )
         self.assertIn("stt vượt giới hạn số nguyên", number_errors[0])
 
-    def test_duplicate_sequence_and_url_are_rejected(self):
+    def test_only_duplicate_url_is_rejected(self):
         text = csv_with(
             [
                 ("1", "Video 1", "https://www.facebook.com/a"),
@@ -115,7 +115,8 @@ class CsvRegressionTests(unittest.TestCase):
         )
         rows, errors = parse_video_csv(text)
         self.assertEqual(rows, [])
-        self.assertEqual(len(errors), 2)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("Trùng với dòng nhập: 1", errors[0])
 
     def test_twenty_and_one_thousand_rows_parse(self):
         for size in (20, 1000):

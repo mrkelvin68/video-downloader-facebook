@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import hashlib
 import subprocess
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from app.database.connection import Database
+from app.services.logging_service import log_api_call, log_publishing, redactor
 
 PUBLISH_STATUSES = (
     "PENDING", "SCHEDULED", "PREPARING", "UPLOADING", "PROCESSING",
@@ -45,6 +47,7 @@ class MetaGraphPublishingClient:
         if not page_access_token.strip():
             raise ValueError("Meta Page Access Token is required")
         self.token = page_access_token.strip()
+        redactor.add(self.token)
         self.base_url = f"https://graph.facebook.com/{api_version}"
         self.upload_base_url = f"https://graph-video.facebook.com/{api_version}"
         self.timeout = timeout
@@ -55,6 +58,7 @@ class MetaGraphPublishingClient:
                      checkpoint_callback: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
         path = Path(file_path)
         file_size = path.stat().st_size
+        log_publishing(f"Facebook upload START: page_id={page_id}, file={path.name}, size={file_size}")
         start = self._post_json(page_id, {"upload_phase": "start", "file_size": str(file_size)})
         session_id = str(start.get("upload_session_id") or "")
         remote_video_id = str(start.get("video_id") or start.get("id") or "")
@@ -85,6 +89,7 @@ class MetaGraphPublishingClient:
                     raise FacebookPublishingError("Meta trả về offset upload không hợp lệ.")
                 next_offset = confirmed
                 end_offset = int(transfer.get("end_offset") or confirmed)
+                log_publishing(f"Facebook upload TRANSFER: session_id={session_id}, offset={next_offset}/{file_size}")
                 self._checkpoint(checkpoint_callback, session_id, remote_video_id, returned_start, end_offset, "TRANSFER")
                 if progress_callback:
                     progress_callback(next_offset * 100.0 / file_size)
@@ -98,6 +103,7 @@ class MetaGraphPublishingClient:
         final_video_id = str(finish.get("video_id") or finish.get("id") or remote_video_id or "")
         if not final_video_id:
             raise FacebookPublishingPending("Meta đã hoàn tất upload nhưng chưa trả về video ID.")
+        log_publishing(f"Facebook upload FINISH: session_id={session_id}, video_id={final_video_id}")
         self._checkpoint(checkpoint_callback, session_id, final_video_id, file_size, file_size, "FINISH")
         return {"upload_id": final_video_id, "remote_video_id": final_video_id, "upload_session_id": session_id, **finish}
 
@@ -171,13 +177,23 @@ class MetaGraphPublishingClient:
         return self._request(request)
 
     def _request(self, request: Request) -> dict[str, Any]:
+        start_time = time.perf_counter()
         endpoint = urlsplit(request.full_url).path
         method = getattr(request, "method", None) or ("POST" if request.data is not None else "GET")
         try:
             with urlopen(request, timeout=self.timeout) as response:
+                duration_ms = (time.perf_counter() - start_time) * 1000
                 payload = json.loads(response.read().decode("utf-8"))
                 self.diagnostics.append({"method": method, "endpoint": endpoint, "http_status": response.status, "result": "PASS"})
+                log_api_call(
+                    provider="meta_publishing",
+                    method=method,
+                    endpoint=endpoint,
+                    status=response.status,
+                    duration_ms=duration_ms,
+                )
         except HTTPError as exc:
+            duration_ms = (time.perf_counter() - start_time) * 1000
             try:
                 details = json.loads(exc.read().decode("utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -189,11 +205,30 @@ class MetaGraphPublishingClient:
             message = error.get("message", "Meta Graph API request failed")
             if code:
                 message = f"Meta API error code {code}{f'/{subcode}' if subcode else ''}: {message}"
+            log_api_call(
+                provider="meta_publishing",
+                method=method,
+                endpoint=endpoint,
+                status=exc.code,
+                duration_ms=duration_ms,
+                error_message=str(message),
+                exc=exc,
+            )
             raise FacebookPublishingError(str(message)) from exc
         except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+            duration_ms = (time.perf_counter() - start_time) * 1000
             self.diagnostics.append({"method": method, "endpoint": endpoint, "error_type": type(exc).__name__, "result": "FAILED"})
+            log_api_call(
+                provider="meta_publishing",
+                method=method,
+                endpoint=endpoint,
+                duration_ms=duration_ms,
+                error_message=f"Network error ({type(exc).__name__})",
+                exc=exc,
+            )
             raise FacebookPublishingError(f"Meta Graph API network request failed ({type(exc).__name__}) at {endpoint}.") from exc
         if "error" in payload:
+            duration_ms = (time.perf_counter() - start_time) * 1000
             error = payload["error"]
             code = str(error.get("code") or "")
             subcode = str(error.get("error_subcode") or "")
@@ -201,6 +236,14 @@ class MetaGraphPublishingClient:
             message = str(error.get("message", "Meta Graph API error"))
             if code:
                 message = f"Meta API error code {code}{f'/{subcode}' if subcode else ''}: {message}"
+            log_api_call(
+                provider="meta_publishing",
+                method=method,
+                endpoint=endpoint,
+                status=200,
+                duration_ms=duration_ms,
+                error_message=message,
+            )
             raise FacebookPublishingError(message)
         return payload
 

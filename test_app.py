@@ -300,6 +300,22 @@ class DatabaseTransactionTests(unittest.TestCase):
         )
         self.assertEqual(self.store.list_videos(other_id), [])
 
+    def test_video_url_is_unique_across_projects(self):
+        other_id = self.store.create(
+            "Dự án khác", "other", str(self.root / "other-videos")
+        )
+        url = "https://www.facebook.com/reel/1692215309278913"
+        self.store.import_csv(
+            self.project_id, f"stt,ten_video,url\n1,Video gốc,{url}"
+        )
+
+        with self.assertRaisesRegex(ValueError, "Dự án đã lưu: Dự án"):
+            self.store.import_csv(
+                other_id, f"stt,ten_video,url\n1,Video trùng,{url}"
+            )
+
+        self.assertEqual(self.store.list_videos(other_id), [])
+
     def test_replacement_refuses_downloaded_or_linked_videos(self):
         self.store.import_csv(self.project_id, self.csv_rows([(1, "CSV A")]))
         self.store.connection.execute(

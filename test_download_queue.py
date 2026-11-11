@@ -39,9 +39,13 @@ class DownloadQueueServiceTests(unittest.TestCase):
             f"{number},Video {number},https://www.facebook.com/reel/{number}\n"
             for number in range(1, 21)
         )
+        other_text = "stt,ten_video,url\n" + "".join(
+            f"{number},Other Video {number},https://www.facebook.com/reel/{100 + number}\n"
+            for number in range(1, 21)
+        )
         videos = VideoService(self.db)
         videos.import_csv(self.project_id, text)
-        videos.import_csv(self.other_project_id, text)
+        videos.import_csv(self.other_project_id, other_text)
         self.video_ids = [
             row["id"] for row in self.db.list_videos(self.project_id)
         ]

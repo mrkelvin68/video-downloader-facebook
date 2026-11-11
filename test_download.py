@@ -45,8 +45,9 @@ class DownloadTests(unittest.TestCase):
             ("The operation timed out", "timeout", True),
             ("Login required", "authentication", False),
             ("This video is not available", "unavailable", False),
-            ("ERROR: [facebook] 28755749490762508: Cannot parse data", "unavailable", False),
+            ("ERROR: [facebook] 28755749490762508: Cannot parse data", "extractor", True),
             ("HTTP Error 404: Not Found", "unavailable", False),
+            ("ERROR: unable to download video data: HTTP Error 403: Forbidden", "forbidden", False),
             ("HTTP Error 503: Service Unavailable", "network", True),
             ("Unsupported URL", "unsupported", False),
             ("ffmpeg not found", "ffmpeg", False),
@@ -143,7 +144,7 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(self.db.list_videos(self.project)[0]["download_status"], "failed")
         self.assertFalse((self.root / "project" / "episode-1").exists())
 
-    def test_cannot_parse_data_explains_facebook_login_cookie_requirement(self):
+    def test_cannot_parse_data_is_retryable_extractor_failure(self):
         runner = lambda *a, **k: SimpleNamespace(
             returncode=1,
             stderr="ERROR: [facebook] 28755749490762508: Cannot parse data",
@@ -153,11 +154,10 @@ class DownloadTests(unittest.TestCase):
         with patch.object(service, "_resolve_facebook_mirror_url", return_value=None):
             with self.assertRaises(DownloadError) as error:
                 service.download(self.project, self.video["id"])
-        self.assertEqual(error.exception.category, "unavailable")
-        self.assertFalse(error.exception.retryable)
-        self.assertIn("cookies.txt", str(error.exception))
+        self.assertEqual(error.exception.category, "extractor")
+        self.assertTrue(error.exception.retryable)
 
-    def test_cannot_parse_data_falls_back_to_facebook_mirror_reel_when_found(self):
+    def test_cannot_parse_data_retries_the_original_facebook_reel(self):
         calls = []
 
         def runner(command, **kwargs):
@@ -180,25 +180,103 @@ class DownloadTests(unittest.TestCase):
             return SimpleNamespace(returncode=0, stderr="", stdout="")
 
         service = DownloadService(self.db, runner=runner)
-        with patch.object(
-            service,
-            "_resolve_facebook_mirror_url",
-            return_value="https://www.facebook.com/reel/1970655827226751",
-        ):
-            out, _ = service.download(self.project, self.video["id"])
+        out, _ = service.download(self.project, self.video["id"])
         self.assertTrue(out.is_file())
         self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[1][-1], "https://www.facebook.com/reel/1970655827226751")
+        self.assertEqual(calls[1][-1], "https://facebook.com/watch/?v=1234")
 
-    def test_cookies_file_is_passed_to_ytdlp_when_present(self):
+    def test_facebook_auth_failure_retries_with_explicitly_configured_browser_cookies(self):
+        calls = []
+
+        def runner(command, **kwargs):
+            if "-show_streams" in command:
+                return SimpleNamespace(
+                    returncode=0, stderr="",
+                    stdout='{"streams":[{"codec_type":"video"}],"format":{"duration":"1.0"}}',
+                )
+            calls.append(list(command))
+            if len(calls) == 1:
+                return SimpleNamespace(
+                    returncode=1,
+                    stderr="ERROR: [facebook] 28755749490762508: Login required",
+                    stdout="",
+                )
+            template = command[command.index("-o") + 1]
+            Path(template.replace("%(ext)s", "mp4")).write_bytes(b"mock mp4")
+            return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+        service = DownloadService(self.db, runner=runner)
+        with patch.object(service, "_find_cookies_file", return_value=None), patch.object(
+            service, "_find_browser_cookie_sources", return_value=["chrome"]
+        ):
+            output, _ = service.download(self.project, self.video["id"])
+
+        self.assertTrue(output.is_file())
+        self.assertEqual(len(calls), 2)
+        cookie_option = calls[1].index("--cookies-from-browser")
+        self.assertEqual(calls[1][cookie_option + 1], "chrome")
+
+    def test_cookies_file_is_not_sent_for_public_download(self):
         cookies_path = self.root / "cookies.txt"
         cookies_path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
         service = DownloadService(self.db, runner=self._runner)
         with patch.object(service, "_find_cookies_file", return_value=str(cookies_path)):
             service.download(self.project, self.video["id"])
-        self.assertIn("--cookies", self._download_command)
-        cookies_index = self._download_command.index("--cookies")
-        self.assertEqual(self._download_command[cookies_index + 1], str(cookies_path))
+        self.assertNotIn("--cookies", self._download_command)
+
+    def test_youtube_does_not_auto_discover_repository_cookie_file(self):
+        with patch.dict("os.environ", {"YTDLP_YOUTUBE_COOKIES_FILE": "", "YTDLP_COOKIES_FILE": ""}, clear=False):
+            configured = DownloadService._find_cookies_file(platform="youtube")
+            self.assertNotEqual(configured, str((Path.cwd() / "cookies.txt").resolve()))
+
+    def test_youtube_download_enables_available_javascript_runtime(self):
+        service = DownloadService(self.db, runner=self._runner)
+        self.db.connection.execute(
+            "UPDATE videos SET source_url=? WHERE id=?",
+            ("https://www.youtube.com/watch?v=NhWe4z6TiyI&list=PLUzgAhnfdKQU", self.video["id"]),
+        )
+        self.db.connection.commit()
+        with patch.object(service, "_find_javascript_runtime", return_value="C:/node.exe"):
+            service.download(self.project, self.video["id"])
+        runtime_index = self._download_command.index("--js-runtimes")
+        self.assertEqual(self._download_command[runtime_index + 1], "node:C:/node.exe")
+        remote_index = self._download_command.index("--remote-components")
+        self.assertEqual(self._download_command[remote_index + 1], "ejs:github")
+        self.assertIn("--no-playlist", self._download_command)
+        self.assertEqual(self._download_command[-1], "https://www.youtube.com/watch?v=NhWe4z6TiyI")
+
+    def test_youtube_auth_error_is_not_reported_as_facebook_auth(self):
+        self.db.connection.execute(
+            "UPDATE videos SET source_url=? WHERE id=?",
+            ("https://www.youtube.com/watch?v=NhWe4z6TiyI", self.video["id"]),
+        )
+        self.db.connection.commit()
+        runner = lambda *args, **kwargs: SimpleNamespace(
+            returncode=1,
+            stderr="ERROR: [youtube] Sign in to confirm you're not a bot",
+            stdout="",
+        )
+        with self.assertRaises(DownloadError) as raised:
+            DownloadService(self.db, runner=runner).download(self.project, self.video["id"])
+        self.assertEqual(raised.exception.category, "authentication")
+        self.assertIn("YouTube", str(raised.exception))
+        self.assertNotIn("Facebook", str(raised.exception))
+
+    def test_youtube_http_403_is_distinct_from_authentication(self):
+        self.db.connection.execute(
+            "UPDATE videos SET source_url=? WHERE id=?",
+            ("https://www.youtube.com/watch?v=NhWe4z6TiyI", self.video["id"]),
+        )
+        self.db.connection.commit()
+        runner = lambda *args, **kwargs: SimpleNamespace(
+            returncode=1,
+            stderr="ERROR: unable to download video data: HTTP Error 403: Forbidden",
+            stdout="",
+        )
+        with self.assertRaises(DownloadError) as raised:
+            DownloadService(self.db, runner=runner).download(self.project, self.video["id"])
+        self.assertEqual(raised.exception.category, "forbidden")
+        self.assertNotEqual(raised.exception.category, "authentication")
 
     def test_ffprobe_failure_marks_failed(self):
         def runner(command, **kwargs):

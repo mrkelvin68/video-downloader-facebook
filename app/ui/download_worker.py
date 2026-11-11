@@ -13,6 +13,7 @@ from app.services.download_service import (
     DownloadError,
     DownloadService,
 )
+from app.services.logging_service import log_app, log_download, log_error
 
 
 class DownloadWorker(QThread):
@@ -29,6 +30,7 @@ class DownloadWorker(QThread):
         self.cancel_event.set()
 
     def run(self) -> None:
+        log_app(f"DownloadWorker started: job_id={self.job_id}")
         database = None
         claimed = False
         error_message = ""
@@ -87,9 +89,11 @@ class DownloadWorker(QThread):
                     if self.cancel_event.is_set():
                         raise DownloadCancelled("Đã hủy tải theo yêu cầu.")
             jobs.finish(self.job_id, status="completed")
+            log_app(f"DownloadWorker finished successfully: job_id={self.job_id}")
             self.jobFinished.emit(self.job_id, True, "")
         except DownloadCancelled as exc:
             error_message = str(exc)
+            log_app(f"DownloadWorker cancelled: job_id={self.job_id}")
             if database is not None and claimed:
                 try:
                     DownloadQueueService(database).finish(
@@ -102,6 +106,7 @@ class DownloadWorker(QThread):
             self.jobFinished.emit(self.job_id, False, error_message)
         except Exception as exc:
             error_message = str(exc)
+            log_error(f"DownloadWorker failed: job_id={self.job_id}, error={exc}", exc=exc)
             if database is not None and claimed:
                 try:
                     DownloadQueueService(database).finish(

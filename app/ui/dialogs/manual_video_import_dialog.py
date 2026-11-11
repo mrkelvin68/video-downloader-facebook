@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from PySide6.QtCore import QIODevice, QSaveFile, QSignalBlocker, QStandardPaths, QTimer, Qt
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -15,6 +15,9 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QLineEdit,
+    QPlainTextEdit,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -22,6 +25,20 @@ from PySide6.QtWidgets import (
 
 from app.services.csv_service import parse_video_csv
 from app.services.video_download_provider import provider_for_url
+
+
+class _ExcelTableDelegate(QStyledItemDelegate):
+    def __init__(self, on_return, parent) -> None:
+        super().__init__(parent)
+        self._on_return = on_return
+
+    def createEditor(self, parent, option, index):
+        editor = super().createEditor(parent, option, index)
+        if isinstance(editor, QLineEdit):
+            editor.returnPressed.connect(
+                lambda row=index.row(), column=index.column(): self._on_return(row, column)
+            )
+        return editor
 
 
 class ManualVideoImportDialog(QDialog):
@@ -39,6 +56,7 @@ class ManualVideoImportDialog(QDialog):
         *,
         project_id: str | None = None,
         draft_directory: str | Path | None = None,
+        validation_errors: list[str] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Nhập danh sách video")
@@ -71,6 +89,13 @@ class ManualVideoImportDialog(QDialog):
         header.setSectionResizeMode(self.TITLE_COLUMN, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(self.URL_COLUMN, QHeaderView.ResizeMode.Stretch)
         self.table.setAlternatingRowColors(True)
+        self.table.setEditTriggers(
+            QTableWidget.EditTrigger.DoubleClicked
+            | QTableWidget.EditTrigger.EditKeyPressed
+            | QTableWidget.EditTrigger.AnyKeyPressed
+        )
+        self.table.setItemDelegate(_ExcelTableDelegate(self._move_to_next_row, self.table))
+        self.table.itemDoubleClicked.connect(self._edit_item)
         self.table.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self.table, 1)
 
@@ -106,8 +131,7 @@ class ManualVideoImportDialog(QDialog):
         source_rows = draft_rows if draft_rows is not None else rows
         if source_rows:
             for row in source_rows:
-                self.add_row(schedule=False)
-                current = self.table.rowCount() - 1
+                current = self._append_empty_row()
                 self.table.item(current, self.TITLE_COLUMN).setText(
                     str(row.get("ten_video") or row.get("title") or "")
                 )
@@ -115,9 +139,13 @@ class ManualVideoImportDialog(QDialog):
                     str(row.get("url") or "")
                 )
         else:
-            self.add_row(schedule=False)
+            self._append_empty_row()
+        self._normalize_trailing_empty_rows()
         self._apply_column_widths()
         self._restoring = False
+        if validation_errors:
+            self._highlight_error_rows(validation_errors)
+            QTimer.singleShot(0, lambda: self._show_import_errors(validation_errors))
         if draft_rows is not None:
             self.draft_status_label.setText("Bản nháp: Đã khôi phục")
             self._show_draft_restored_notice()
@@ -139,6 +167,29 @@ class ManualVideoImportDialog(QDialog):
 
     def _show_draft_restored_notice(self) -> None:
         QMessageBox.information(self, "Bản nháp", "Đã khôi phục bản nháp chưa lưu.")
+
+    def _highlight_error_rows(self, errors: list[str]) -> None:
+        import re
+
+        rows = {int(value) - 1 for error in errors for value in re.findall(r"Dòng nhập: (\d+)", error)}
+        color = QColor("#ffe1e1")
+        for row in rows:
+            if 0 <= row < self.table.rowCount():
+                for column in range(self.COLUMN_COUNT):
+                    self._ensure_cell_item(row, column).setBackground(color)
+
+    def _show_import_errors(self, errors: list[str]) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Lỗi import video")
+        dialog.resize(700, 430)
+        layout = QVBoxLayout(dialog)
+        details = QPlainTextEdit("\n\n".join(errors), dialog)
+        details.setReadOnly(True)
+        layout.addWidget(details)
+        close_button = QPushButton("Đóng", dialog)
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button)
+        dialog.exec()
 
     def restore_draft(self) -> list[dict[str, str]] | None:
         if not self._draft_path.is_file():
@@ -224,7 +275,23 @@ class ManualVideoImportDialog(QDialog):
             pass
 
     def _on_item_changed(self, _item: QTableWidgetItem) -> None:
+        if self._restoring:
+            return
+        self._normalize_trailing_empty_rows()
+        with QSignalBlocker(self.table):
+            for column in range(self.COLUMN_COUNT):
+                self._ensure_cell_item(_item.row(), column).setBackground(QColor("transparent"))
         self._schedule_draft_save()
+
+    def _edit_item(self, item: QTableWidgetItem) -> None:
+        self.table.editItem(item)
+
+    def _move_to_next_row(self, row: int, column: int) -> None:
+        QTimer.singleShot(0, lambda: self._select_next_row(row, column))
+
+    def _select_next_row(self, row: int, column: int) -> None:
+        self._normalize_trailing_empty_rows()
+        self.table.setCurrentCell(min(row + 1, self.table.rowCount() - 1), column)
 
     def _toggle_maximized(self) -> None:
         self.showNormal() if self.isMaximized() else self.showMaximized()
@@ -240,14 +307,42 @@ class ManualVideoImportDialog(QDialog):
         super().closeEvent(event)
 
     def add_row(self, *, schedule: bool = True) -> None:
+        self._normalize_trailing_empty_rows()
+        row = self.table.rowCount() - 1
+        self.table.setCurrentCell(row, self.TITLE_COLUMN)
+        if schedule:
+            self._schedule_draft_save()
+
+    def _append_empty_row(self) -> int:
         row = self.table.rowCount()
         with QSignalBlocker(self.table):
             self.table.insertRow(row)
             self.table.setItem(row, self.TITLE_COLUMN, QTableWidgetItem())
             self.table.setItem(row, self.URL_COLUMN, QTableWidgetItem())
-        self.table.setCurrentCell(row, self.TITLE_COLUMN)
-        if schedule:
-            self._schedule_draft_save()
+
+        return row
+
+    def _row_is_empty(self, row: int) -> bool:
+        return not any(
+            self._cell_text(row, column).strip()
+            for column in (self.TITLE_COLUMN, self.URL_COLUMN)
+        )
+
+    def _normalize_trailing_empty_rows(self) -> None:
+        last_data_row = next(
+            (
+                row
+                for row in range(self.table.rowCount() - 1, -1, -1)
+                if not self._row_is_empty(row)
+            ),
+            -1,
+        )
+        required_rows = last_data_row + 2
+        with QSignalBlocker(self.table):
+            while self.table.rowCount() > required_rows:
+                self.table.removeRow(self.table.rowCount() - 1)
+            while self.table.rowCount() < required_rows:
+                self._append_empty_row()
 
     @staticmethod
     def _looks_like_url(value: str) -> bool:
@@ -331,6 +426,7 @@ class ManualVideoImportDialog(QDialog):
             else start_column
         )
         self.table.setCurrentCell(last_row, last_column)
+        self._normalize_trailing_empty_rows()
         self._schedule_draft_save()
         return len(rows)
 
@@ -345,6 +441,7 @@ class ManualVideoImportDialog(QDialog):
         for row in rows:
             self.table.removeRow(row)
         if rows:
+            self._normalize_trailing_empty_rows()
             self._schedule_draft_save()
 
     def _has_draft_data(self) -> bool:
@@ -384,7 +481,8 @@ class ManualVideoImportDialog(QDialog):
         csv_text = output.getvalue()
         rows, errors = parse_video_csv(csv_text)
         if errors:
-            QMessageBox.warning(self, "Dữ liệu không hợp lệ", "\n".join(errors[:20]))
+            self._highlight_error_rows(errors)
+            self._show_import_errors(errors)
             return
         if not rows:
             QMessageBox.information(self, "Chưa có dữ liệu", "Hãy thêm ít nhất một dòng Title và URL.")

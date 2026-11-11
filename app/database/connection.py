@@ -61,6 +61,28 @@ class Database:
             )
         )
 
+    def find_videos_by_normalized_urls(
+        self,
+        normalized_urls: Iterable[str],
+        *,
+        exclude_project_id: str | None = None,
+    ) -> dict[str, sqlite3.Row]:
+        urls = sorted(set(normalized_urls))
+        if not urls:
+            return {}
+        placeholders = ", ".join("?" for _ in urls)
+        query = f"""SELECT v.*, p.name AS project_name
+                    FROM videos v JOIN projects p ON p.uuid=v.project_id
+                    WHERE v.normalized_url IN ({placeholders})"""
+        parameters: list[str] = list(urls)
+        if exclude_project_id is not None:
+            query += " AND v.project_id<>?"
+            parameters.append(exclude_project_id)
+        return {
+            str(row["normalized_url"]): row
+            for row in self.connection.execute(query, parameters)
+        }
+
     def project_has_videos(self, project_id: str) -> bool:
         return (
             self.connection.execute(
@@ -196,25 +218,33 @@ class Database:
             ).fetchone()
             if project is None:
                 raise ValueError("Dự án không tồn tại")
-            start_sequence = self.next_video_sequence(project_id)
-            now = datetime.now(UTC).isoformat(timespec="seconds")
-            prepared = [
-                (
-                    str(uuid.uuid4()),
-                    project_id,
-                    sequence,
-                    f"{project['prefix']}-{sequence}",
-                    row["ten_video"],
-                    row["url"],
-                    row["normalized_url"],
-                    row.get("platform"),
-                    row.get("canonical_url"),
-                    row.get("external_video_id"),
-                    now,
-                    now,
+            used_sequences = {
+                int(row["sequence_number"])
+                for row in self.connection.execute(
+                    "SELECT sequence_number FROM videos WHERE project_id=?", (project_id,)
                 )
-                for sequence, row in enumerate(prepared_rows, start=start_sequence)
-            ]
+            }
+            next_sequence = max(used_sequences, default=0) + 1
+            now = datetime.now(UTC).isoformat(timespec="seconds")
+            prepared = []
+            for row in prepared_rows:
+                requested_sequence = int(row["stt"])
+                if requested_sequence in used_sequences:
+                    while next_sequence in used_sequences:
+                        next_sequence += 1
+                    sequence = next_sequence
+                    next_sequence += 1
+                else:
+                    sequence = requested_sequence
+                used_sequences.add(sequence)
+                prepared.append(
+                    (
+                        str(uuid.uuid4()), project_id, sequence,
+                        f"{project['prefix']}-{sequence}", row["ten_video"], row["url"],
+                        row["normalized_url"], row.get("platform"), row.get("canonical_url"),
+                        row.get("external_video_id"), now, now,
+                    )
+                )
             self.connection.executemany(
                 """INSERT INTO videos
                     (id, project_id, sequence_number, video_code, title, source_url,
@@ -301,6 +331,50 @@ class Database:
             )
             if cursor.rowcount != 1:
                 raise ValueError("Video không tồn tại trong dự án này.")
+
+    def delete_videos(
+        self, project_id: str, video_ids: list[str]
+    ) -> list[sqlite3.Row]:
+        if not video_ids:
+            return []
+        placeholders = ",".join("?" for _ in video_ids)
+        with self.connection:
+            rows = self.connection.execute(
+                f"""SELECT id, video_code, local_video_path, thumbnail_path
+                    FROM videos WHERE project_id=? AND id IN ({placeholders})""",
+                (project_id, *video_ids),
+            ).fetchall()
+            if not rows:
+                return []
+            matched_ids = [row["id"] for row in rows]
+            matched_placeholders = ",".join("?" for _ in matched_ids)
+            self.connection.execute(
+                f"""DELETE FROM download_jobs
+                    WHERE project_id=? AND video_id IN ({matched_placeholders})""",
+                (project_id, *matched_ids),
+            )
+            self.connection.execute(
+                f"""DELETE FROM facebook_publishing_jobs
+                    WHERE project_id=? AND video_id IN ({matched_placeholders})""",
+                (project_id, *matched_ids),
+            )
+            self.connection.execute(
+                f"""DELETE FROM facebook_drafts
+                    WHERE project_id=? AND video_id IN ({matched_placeholders})""",
+                (project_id, *matched_ids),
+            )
+            self.connection.execute(
+                f"""UPDATE matrix_entries
+                    SET video_id=NULL
+                    WHERE project_id=? AND video_id IN ({matched_placeholders})""",
+                (project_id, *matched_ids),
+            )
+            self.connection.execute(
+                f"""DELETE FROM videos
+                    WHERE project_id=? AND id IN ({matched_placeholders})""",
+                (project_id, *matched_ids),
+            )
+            return rows
 
     def close(self) -> None:
         self.connection.close()

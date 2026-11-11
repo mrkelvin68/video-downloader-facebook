@@ -10,6 +10,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from app.services.logging_service import log_api_call, redactor
 from app.services.viral_reels_service import (
     DiscoveryRequest, PageCandidate, PageDiscoveryProvider, ReelMetadata, ReelsProvider,
     ProviderAuthenticationError, ProviderError, normalize_facebook_url, normalize_view_count, stable_reel_id,
@@ -29,6 +30,8 @@ class ApifyFacebookPageSearchProvider(PageDiscoveryProvider):
 
     def __init__(self, token: str, timeout: float = 180.0) -> None:
         self.token = token.strip()
+        if self.token:
+            redactor.add(self.token)
         self.timeout = timeout
         if not self.token:
             raise ProviderAuthenticationError("Apify API token is required")
@@ -39,16 +42,24 @@ class ApifyFacebookPageSearchProvider(PageDiscoveryProvider):
         return {"searchType": "pages", "categories": terms, "resultsLimit": max(1, min(int(maximum), 100))}
 
     def test_connection(self) -> None:
-        request = Request("https://api.apify.com/v2/users/me", headers={"Authorization": "Bearer " + self.token})
+        start_time = time.perf_counter()
+        endpoint = "https://api.apify.com/v2/users/me"
+        request = Request(endpoint, headers={"Authorization": "Bearer " + self.token})
         try:
             with urlopen(request, timeout=self.timeout) as response:
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                log_api_call(provider="apify", method="GET", endpoint="/v2/users/me", status=response.status, duration_ms=duration_ms)
                 if response.status != 200:
                     raise ProviderAuthenticationError("Apify authentication failed")
         except HTTPError as exc:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            log_api_call(provider="apify", method="GET", endpoint="/v2/users/me", status=exc.code, duration_ms=duration_ms, error_message=f"HTTP {exc.code}", exc=exc)
             if exc.code in {401, 403}:
                 raise ProviderAuthenticationError("Apify authentication failed") from exc
             raise ProviderError(f"Apify connection test failed with HTTP {exc.code}") from exc
         except (TimeoutError, URLError) as exc:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            log_api_call(provider="apify", method="GET", endpoint="/v2/users/me", duration_ms=duration_ms, error_message="Network error", exc=exc)
             raise ProviderError("Apify connection test failed: network timeout or error") from exc
 
     def discover_pages(self, request: DiscoveryRequest) -> list[PageCandidate]:
@@ -57,16 +68,23 @@ class ApifyFacebookPageSearchProvider(PageDiscoveryProvider):
             return []
         maximum = max(1, min(request.maximum_pages, 100))
         payload = self.build_payload(keywords, maximum, request.country)
-        url = f"https://api.apify.com/v2/acts/{quote(PAGE_SEARCH_ACTOR_ID, safe='~')}/run-sync-get-dataset-items"
-        req = Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json", "Authorization": "Bearer " + self.token}, method="POST")
+        endpoint = f"https://api.apify.com/v2/acts/{quote(PAGE_SEARCH_ACTOR_ID, safe='~')}/run-sync-get-dataset-items"
+        req = Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json", "Authorization": "Bearer " + self.token}, method="POST")
+        start_time = time.perf_counter()
         try:
             with urlopen(req, timeout=self.timeout) as response:
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                log_api_call(provider="apify", method="POST", endpoint="/v2/acts/page-search/run-sync-get-dataset-items", status=response.status, duration_ms=duration_ms)
                 items = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            log_api_call(provider="apify", method="POST", endpoint="/v2/acts/page-search/run-sync-get-dataset-items", status=exc.code, duration_ms=duration_ms, error_message=f"HTTP {exc.code}", exc=exc)
             if exc.code in {401, 403}:
                 raise ProviderAuthenticationError("Apify authentication failed") from exc
             raise ProviderError(f"Apify page search failed with HTTP {exc.code}") from exc
         except (TimeoutError, URLError, json.JSONDecodeError) as exc:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            log_api_call(provider="apify", method="POST", endpoint="/v2/acts/page-search/run-sync-get-dataset-items", duration_ms=duration_ms, error_message="Network/JSON error", exc=exc)
             raise ProviderError("Apify page search failed: network or response error") from exc
         found: dict[str, PageCandidate] = {}
         for item in items if isinstance(items, list) else []:
@@ -114,6 +132,8 @@ class ApifyFacebookReelsProvider(ReelsProvider):
         self.resume_run_id = (resume_run_id or "").strip() or None
         self.sleep = sleep
         self.last_run_metadata: dict[str, Any] = {}
+        if self.token:
+            redactor.add(self.token)
         if not self.token:
             raise ProviderAuthenticationError("Apify API token is required")
 
@@ -136,40 +156,57 @@ class ApifyFacebookReelsProvider(ReelsProvider):
         elif method == "POST":
             data = b""
         request = Request(url, data=data, headers=headers, method=method)
+        start_time = time.perf_counter()
         try:
             with urlopen(request, timeout=self.timeout) as response:
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                log_api_call(provider="apify", method=method, endpoint=url, status=response.status, duration_ms=duration_ms)
                 raw = response.read().decode("utf-8")
                 return json.loads(raw) if raw else {}
         except HTTPError as exc:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            log_api_call(provider="apify", method=method, endpoint=url, status=exc.code, duration_ms=duration_ms, error_message=f"HTTP {exc.code}: {exc.reason}", exc=exc)
             if exc.code in {401, 403}:
                 raise ProviderAuthenticationError("Apify authentication failed") from exc
             if exc.code == 429:
                 raise ProviderError("Apify rate limit reached") from exc
             raise ProviderError(f"Apify HTTP {exc.code}: {exc.reason}") from exc
         except (TimeoutError, URLError, json.JSONDecodeError) as exc:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            log_api_call(provider="apify", method=method, endpoint=url, duration_ms=duration_ms, error_message="Network/JSON error", exc=exc)
             raise ProviderError(f"Apify network timeout or error: {exc}") from exc
 
     def test_connection(self) -> None:
         """Validate token without starting a paid actor run."""
+        endpoint = "https://api.apify.com/v2/users/me"
         request = Request(
-            "https://api.apify.com/v2/users/me",
+            endpoint,
             headers={"Authorization": "Bearer " + self.token},
         )
+        start_time = time.perf_counter()
         try:
             with urlopen(request, timeout=self.timeout) as response:
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                log_api_call(provider="apify", method="GET", endpoint="/v2/users/me", status=response.status, duration_ms=duration_ms)
                 if response.status != 200:
                     raise ProviderAuthenticationError("Apify authentication failed")
         except ProviderAuthenticationError:
             raise
         except HTTPError as exc:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            log_api_call(provider="apify", method="GET", endpoint="/v2/users/me", status=exc.code, duration_ms=duration_ms, error_message=f"HTTP {exc.code}", exc=exc)
             if exc.code in {401, 403}:
                 raise ProviderAuthenticationError("Apify authentication failed") from exc
             if exc.code == 429:
                 raise ProviderError("Apify rate limit reached") from exc
             raise ProviderError(f"Apify connection test failed with HTTP {exc.code}") from exc
         except (TimeoutError, URLError) as exc:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            log_api_call(provider="apify", method="GET", endpoint="/v2/users/me", duration_ms=duration_ms, error_message="Network error", exc=exc)
             raise ProviderError("Apify connection test failed: network timeout or error") from exc
         except Exception as exc:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            log_api_call(provider="apify", method="GET", endpoint="/v2/users/me", duration_ms=duration_ms, error_message="General error", exc=exc)
             raise ProviderError("Apify connection test failed") from exc
 
     def get_run(self, run_id: str) -> dict[str, Any]:
