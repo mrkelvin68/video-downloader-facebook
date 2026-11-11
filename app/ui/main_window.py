@@ -196,6 +196,8 @@ class MainWindow(QMainWindow):
         self.queue_running = False
         self.pause_after_current = False
         self.queue_error: str | None = None
+        self._queue_run_errors: list[str] = []
+        self._queue_run_succeeded: int = 0
         self.pending_project_delete: tuple[str, bool] | None = None
         self.pending_queue_delete: tuple[list[str], str] | None = None
         self.download_queue.recover_interrupted()
@@ -1960,6 +1962,8 @@ class MainWindow(QMainWindow):
         self.queue_running = True
         self._set_queue_loading(True)
         self.pause_after_current = False
+        self._queue_run_errors.clear()
+        self._queue_run_succeeded = 0
         self.queue_page.queue_status.setText(
             f"Đang chạy hàng đợi ({self.queue_concurrency} luồng song song)."
         )
@@ -2012,7 +2016,15 @@ class MainWindow(QMainWindow):
                     self.queue_running = False
                     self._set_queue_loading(False)
                     self.queue_page.queue_status.setText("Không còn job đang chờ.")
-                    self.detail_page.queue_status.setText("Hàng đợi đã hoàn tất.")
+                    if self._queue_run_errors:
+                        err_count = len(self._queue_run_errors)
+                        if self._queue_run_succeeded == 0:
+                            status = f"Tải thất bại: {self._queue_run_errors[-1]}"
+                        else:
+                            status = f"Hoàn tất: {self._queue_run_succeeded} video xong, {err_count} video lỗi."
+                    else:
+                        status = "Hàng đợi đã hoàn tất."
+                    self.detail_page.queue_status.setText(status)
                     self.refresh_queue()
                 break
             self._launch_queue_worker(job)
@@ -2119,6 +2131,10 @@ class MainWindow(QMainWindow):
         worker.wait()
         self._release_queue_job(job_id)
         self.queue_error = message if not succeeded else None
+        if not succeeded:
+            self._queue_run_errors.append(message)
+        else:
+            self._queue_run_succeeded += 1
         can_continue = True
         if not succeeded:
             try:
