@@ -58,7 +58,16 @@ class VideoService:
         """Reject only canonical URL collisions, preserving all row context."""
         errors: list[str] = []
         first_rows: dict[str, dict[str, object]] = {}
-        for row in rows:
+        prepared_rows: list[dict[str, object]] = []
+        for input_row, r in enumerate(rows, start=1):
+            row_copy = dict(r)
+            if "normalized_url" not in row_copy:
+                row_copy["normalized_url"] = normalize_video_url(str(row_copy.get("url", "")))
+            if "input_row" not in row_copy:
+                row_copy["input_row"] = input_row
+            prepared_rows.append(row_copy)
+
+        for row in prepared_rows:
             canonical_url = str(row["normalized_url"])
             first = first_rows.get(canonical_url)
             if first is not None:
@@ -68,15 +77,30 @@ class VideoService:
             else:
                 first_rows[canonical_url] = row
         saved_by_url = self.database.find_videos_by_normalized_urls(
-            (str(row["normalized_url"]) for row in rows),
+            (str(row["normalized_url"]) for row in prepared_rows),
             exclude_project_id=project_id if not check_saved else None,
         )
-        for row in rows:
+        db_duplicates: list[dict[str, object]] = []
+        for row in prepared_rows:
             saved = saved_by_url.get(str(row["normalized_url"]))
             if saved is not None:
                 errors.append(self._duplicate_saved_error(row, saved))
+                db_duplicates.append(
+                    {
+                        "input_row": int(row["input_row"]),
+                        "url": str(row["url"]),
+                        "normalized_url": str(row["normalized_url"]),
+                        "saved_video_code": str(saved["video_code"]),
+                        "saved_sequence_number": int(saved["sequence_number"]),
+                        "saved_project_name": str(
+                            saved["project_name"]
+                            if "project_name" in saved.keys()
+                            else "Dự án hiện tại"
+                        ),
+                    }
+                )
         if errors:
-            raise VideoImportValidationError(errors)
+            raise VideoImportValidationError(errors, db_duplicates=db_duplicates)
 
     @staticmethod
     def _duplicate_input_error(row: dict[str, object], first_input_row: int) -> str:

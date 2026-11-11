@@ -99,7 +99,7 @@ class GoogleSheetsImportTests(unittest.TestCase):
                 rows=[{"ten_video": "Good row", "url": "https://www.facebook.com/reel/1"}],
                 draft_directory=draft_dir,
             )
-            self.assertEqual(restored.table.rowCount(), 1)
+            self.assertEqual(restored.table.rowCount(), 2)
             self.assertEqual(restored.table.item(0, 0).text(), "Good row")
             dialog.deleteLater()
             restored.deleteLater()

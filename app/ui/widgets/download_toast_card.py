@@ -207,15 +207,24 @@ class DownloadToastCard(QFrame):
             or "lỗi" in clean_lower
             or clean.startswith("Job lỗi:")
         ):
-            m = re.search(r"(\d+)\s+video xong,\s*(\d+)\s+video lỗi", clean)
+            # Check for patterns like "Hoàn tất: 20/21 video (1 lỗi)" or "20 video xong, 1 video lỗi"
+            m_ratio = re.search(r"(\d+)/(\d+)\s+video\s*\(\s*(\d+)\s+(?:video\s+)?lỗi\)", clean, re.IGNORECASE)
+            if m_ratio:
+                self.set_partial_error(clean, int(m_ratio.group(1)), int(m_ratio.group(3)), int(m_ratio.group(2)))
+                return
+            m = re.search(r"(\d+)\s+video xong,\s*(\d+)\s+video lỗi", clean, re.IGNORECASE)
             if m:
                 self.set_partial_error(clean, int(m.group(1)), int(m.group(2)))
             else:
                 self.set_error(clean)
             return
 
-        # Completion (only pure success reaching here)
-        if "hoàn tất" in clean_lower or "thành công" in clean_lower:
+        # Completion (only pure queue/batch success reaching here; never single video)
+        if clean == "Video tải thành công.":
+            # Transient single-video status; do not treat as queue completion
+            return
+
+        if "hoàn tất" in clean_lower or clean.startswith("Đã tải xong toàn bộ"):
             self.set_completed(clean)
             return
 
@@ -317,13 +326,32 @@ class DownloadToastCard(QFrame):
         self.stats_label.setText("Video bị lỗi")
 
     def set_partial_error(
-        self, message: str, success_count: int, error_count: int
+        self,
+        message: str,
+        success_count: int,
+        error_count: int,
+        total_count: int | None = None,
     ) -> None:
         self._is_active = False
         self._set_bar_state("warning")
         self.title_label.set_full_text(message)
         self.spinner.stop()
         self.cancel_button.hide()
-        self.progress_bar.setValue(100)
+        if total_count and total_count > 0:
+            val = max(1, min(100, int(round((success_count / total_count) * 100))))
+        else:
+            val = 100
+        self.progress_bar.setValue(val)
         self.progress_label.setText(f"{success_count} xong")
         self.stats_label.setText(f"{error_count} lỗi")
+
+    def set_summary(self, message: str, completed: int, total: int) -> None:
+        self._is_active = False
+        self._set_bar_state("normal")
+        self.title_label.set_full_text(message)
+        self.spinner.stop()
+        self.cancel_button.hide()
+        pct = max(0, min(100, int(round((completed / total) * 100)))) if total else 0
+        self.progress_bar.setValue(pct)
+        self.progress_label.setText(f"Đã tải: {pct}%")
+        self.stats_label.setText(f"{completed}/{total} video")

@@ -118,6 +118,101 @@ class DownloadUIRedesignTests(unittest.TestCase):
         self.assertIsInstance(table.itemDelegateForColumn(5), VideoStatusBadgeDelegate)
         self.assertIsInstance(table.itemDelegateForColumn(6), VideoProgressDelegate)
 
+    def test_toast_does_not_falsely_complete_on_single_video_success(self):
+        card = DownloadToastCard()
+        card.set_idle("Sẵn sàng")
+        card.setText("Video tải thành công.")
+        # Must not switch to "Hoàn tất 100%" or completed state
+        self.assertNotEqual(card.progress_label.text(), "Hoàn tất 100%")
+        self.assertNotEqual(card.stats_label.text(), "Đã tải xong")
+
+    def test_toast_card_handles_partial_error_ratio(self):
+        card = DownloadToastCard()
+        card.setText("Hoàn tất: 20/21 video (1 video lỗi).")
+        self.assertEqual(card.progress_label.text(), "20 xong")
+        self.assertEqual(card.stats_label.text(), "1 lỗi")
+
+    def test_project_status_update_with_failed_and_completed_videos(self):
+        from unittest.mock import MagicMock
+        from app.models.video import Video
+
+        class MockMainWindow:
+            from app.ui.main_window import MainWindow
+            _update_detail_queue_status_from_videos = MainWindow._update_detail_queue_status_from_videos
+
+        mock_win = MockMainWindow()
+        mock_win.detail_page = MagicMock()
+        mock_win.detail_page.queue_status = DownloadToastCard()
+
+        def make_video(vid, status):
+            return Video(
+                id=vid,
+                project_id="p1",
+                sequence_number=1,
+                video_code=vid,
+                title="title",
+                source_url="https://fb.com/1",
+                normalized_url="https://fb.com/1",
+                download_status=status,
+                local_video_path=None,
+                thumbnail_path=None,
+                facebook_uploaded=False,
+                created_at="now",
+                updated_at="now",
+            )
+
+        # 20 completed videos, 1 failed video
+        videos = [make_video(f"v{i}", "completed") for i in range(20)]
+        videos.append(make_video("v21", "failed"))
+
+        mock_win._update_detail_queue_status_from_videos(videos)
+
+        card = mock_win.detail_page.queue_status
+        self.assertIn("20/21 video", card.title_label.full_text())
+        self.assertIn("1 video lỗi", card.title_label.full_text())
+        self.assertEqual(card.progress_label.text(), "20 xong")
+        self.assertEqual(card.stats_label.text(), "1 lỗi")
+        self.assertNotEqual(card.progress_label.text(), "Hoàn tất 100%")
+        self.assertNotEqual(card.stats_label.text(), "Đã tải xong")
+
+    def test_project_status_update_all_completed(self):
+        from unittest.mock import MagicMock
+        from app.models.video import Video
+
+        class MockMainWindow:
+            from app.ui.main_window import MainWindow
+            _update_detail_queue_status_from_videos = MainWindow._update_detail_queue_status_from_videos
+
+        mock_win = MockMainWindow()
+        mock_win.detail_page = MagicMock()
+        mock_win.detail_page.queue_status = DownloadToastCard()
+
+        def make_video(vid, status):
+            return Video(
+                id=vid,
+                project_id="p1",
+                sequence_number=1,
+                video_code=vid,
+                title="title",
+                source_url="https://fb.com/1",
+                normalized_url="https://fb.com/1",
+                download_status=status,
+                local_video_path=None,
+                thumbnail_path=None,
+                facebook_uploaded=False,
+                created_at="now",
+                updated_at="now",
+            )
+
+        videos = [make_video(f"v{i}", "completed") for i in range(5)]
+        mock_win._update_detail_queue_status_from_videos(videos)
+
+        card = mock_win.detail_page.queue_status
+        self.assertIn("Đã tải xong toàn bộ 5 video", card.title_label.full_text())
+        self.assertEqual(card.progress_label.text(), "Hoàn tất 100%")
+        self.assertEqual(card.stats_label.text(), "Đã tải xong")
+        self.assertEqual(card.progress_bar.value(), 100)
+
 
 if __name__ == "__main__":
     unittest.main()

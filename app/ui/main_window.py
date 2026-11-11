@@ -1725,10 +1725,55 @@ class MainWindow(QMainWindow):
                     row["download_error"] = job["error_message"]
                 decorated.append(row)
             self.detail_page.set_saved_videos(decorated)
+            if not self.queue_running and not self.queue_workers:
+                self._update_detail_queue_status_from_videos(videos)
             return True
         except sqlite3.Error as exc:
             QMessageBox.critical(self, "Lỗi cơ sở dữ liệu", str(exc))
             return False
+
+    def _update_detail_queue_status_from_videos(self, videos: list) -> None:
+        if not hasattr(self.detail_page, "queue_status") or self.detail_page.queue_status is None:
+            return
+        if not videos:
+            self.detail_page.queue_status.set_idle("Chưa có video trong dự án")
+            return
+        total = len(videos)
+        completed = sum(
+            1 for v in videos
+            if getattr(v, "download_status", None) == "completed"
+            or (isinstance(v, dict) and v.get("download_status") == "completed")
+        )
+        failed = sum(
+            1 for v in videos
+            if getattr(v, "download_status", None) == "failed"
+            or (isinstance(v, dict) and v.get("download_status") == "failed")
+        )
+
+        if failed > 0:
+            if completed > 0:
+                self.detail_page.queue_status.set_partial_error(
+                    f"Hoàn tất: {completed}/{total} video ({failed} video lỗi).",
+                    completed,
+                    failed,
+                    total,
+                )
+            else:
+                self.detail_page.queue_status.set_error(
+                    f"Tải thất bại: {failed}/{total} video lỗi."
+                )
+        elif completed == total:
+            self.detail_page.queue_status.set_completed(
+                f"Đã tải xong toàn bộ {total} video."
+            )
+        elif completed > 0:
+            self.detail_page.queue_status.set_summary(
+                f"Đã tải {completed}/{total} video",
+                completed,
+                total,
+            )
+        else:
+            self.detail_page.queue_status.set_idle("Hàng đợi đang dừng")
 
     def add_project(self) -> None:
         self._save_project()
@@ -1833,6 +1878,7 @@ class MainWindow(QMainWindow):
                 rows=previous_rows,
                 project_id=self.current_project.uuid,
                 validation_errors=validation_errors,
+                video_service=self.videos,
             )
             if dialog.exec() != ManualVideoImportDialog.DialogCode.Accepted:
                 return
@@ -2026,6 +2072,8 @@ class MainWindow(QMainWindow):
                         status = "Hàng đợi đã hoàn tất."
                     self.detail_page.queue_status.setText(status)
                     self.refresh_queue()
+                    if self.current_project is not None:
+                        self._refresh_project_videos()
                 break
             self._launch_queue_worker(job)
         self._update_queue_stats()
@@ -2157,10 +2205,13 @@ class MainWindow(QMainWindow):
             return
         if not succeeded:
             status = f"Job lỗi: {message}"
+            self.queue_page.queue_status.setText(status)
+            self.detail_page.queue_status.setText(status)
         else:
             status = "Video tải thành công."
-        self.queue_page.queue_status.setText(status)
-        self.detail_page.queue_status.setText(status)
+            self.queue_page.queue_status.setText(status)
+            if not self.queue_workers:
+                self.detail_page.queue_status.setText(status)
         if self.pause_after_current:
             if not self.queue_workers:
                 self.pause_after_current = False
@@ -2189,6 +2240,7 @@ class MainWindow(QMainWindow):
                 )
         except sqlite3.Error as exc:
             QMessageBox.critical(self, "Lỗi hàng đợi", str(exc))
+        self._queue_run_errors.append("Worker dừng bất thường trước khi hoàn tất.")
         self._release_queue_job(job_id)
         self.refresh_queue()
         self._refresh_project_videos()

@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from PySide6.QtCore import QIODevice, QSaveFile, QSignalBlocker, QStandardPaths, QTimer, Qt
-from PySide6.QtGui import QColor, QKeySequence, QShortcut
+from PySide6.QtGui import QBrush, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from app.core.exceptions import VideoImportValidationError
 from app.services.csv_service import parse_video_csv
 from app.services.video_download_provider import provider_for_url
 
@@ -48,6 +49,7 @@ class ManualVideoImportDialog(QDialog):
     URL_COLUMN = 1
     COLUMN_COUNT = 2
     TITLE_WIDTH_RATIO = 0.45
+    DB_DUPLICATE_BG_COLOR = QColor("#5A2630")
 
     def __init__(
         self,
@@ -57,6 +59,7 @@ class ManualVideoImportDialog(QDialog):
         project_id: str | None = None,
         draft_directory: str | Path | None = None,
         validation_errors: list[str] | None = None,
+        video_service: object | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Nhập danh sách video")
@@ -65,6 +68,8 @@ class ManualVideoImportDialog(QDialog):
         self.csv_text = ""
         self.rows: list[dict[str, object]] = []
         self._project_id = project_id or "default"
+        self._video_service = video_service or getattr(parent, "videos", None)
+        self._db_duplicate_rows: set[int] = set()
         base = Path(draft_directory) if draft_directory else Path(
             QStandardPaths.writableLocation(
                 QStandardPaths.StandardLocation.AppDataLocation
@@ -127,8 +132,8 @@ class ManualVideoImportDialog(QDialog):
         paste_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         paste_shortcut.activated.connect(self.paste_from_clipboard)
 
-        draft_rows = self.restore_draft()
-        source_rows = draft_rows if draft_rows is not None else rows
+        draft_rows = self.restore_draft() if rows is None else None
+        source_rows = rows if rows is not None else draft_rows
         if source_rows:
             for row in source_rows:
                 current = self._append_empty_row()
@@ -168,28 +173,72 @@ class ManualVideoImportDialog(QDialog):
     def _show_draft_restored_notice(self) -> None:
         QMessageBox.information(self, "Bản nháp", "Đã khôi phục bản nháp chưa lưu.")
 
+    def _data_row_mapping(self) -> list[int]:
+        """Returns 0-based table row index for each non-empty data row in CSV order."""
+        mapping: list[int] = []
+        for row in range(self.table.rowCount()):
+            title = self._cell_text(row, self.TITLE_COLUMN).strip()
+            url = self._cell_text(row, self.URL_COLUMN).strip()
+            if title or url:
+                mapping.append(row)
+        return mapping
+
+    def _highlight_db_duplicate_rows(self, rows: set[int]) -> None:
+        """Highlight ONLY database duplicate rows with subtle dark red #5A2630."""
+        self._db_duplicate_rows.update(rows)
+        with QSignalBlocker(self.table):
+            for row in rows:
+                if 0 <= row < self.table.rowCount():
+                    for column in range(self.COLUMN_COUNT):
+                        item = self._ensure_cell_item(row, column)
+                        item.setBackground(self.DB_DUPLICATE_BG_COLOR)
+                        item.setForeground(QColor("#f8fafc"))
+
+    def _clear_row_db_duplicate_highlight(self, row: int) -> None:
+        """Restore cell background to default when a row's URL or title is edited."""
+        if row in self._db_duplicate_rows:
+            self._db_duplicate_rows.discard(row)
+            with QSignalBlocker(self.table):
+                for column in range(self.COLUMN_COUNT):
+                    item = self.table.item(row, column)
+                    if item is not None:
+                        item.setBackground(QBrush())
+                        item.setForeground(QBrush())
+
+    def _sync_db_duplicate_rows(self) -> None:
+        """Sync internal duplicate set after rows are removed/shifted."""
+        self._db_duplicate_rows.clear()
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, self.URL_COLUMN)
+            if item is not None and item.background().color() == self.DB_DUPLICATE_BG_COLOR:
+                self._db_duplicate_rows.add(row)
+
     def _highlight_error_rows(self, errors: list[str]) -> None:
+        """
+        Highlight ONLY database duplicate errors with #5A2630.
+        Does NOT highlight format errors, missing fields, or in-import duplicates.
+        """
         import re
 
-        rows = {int(value) - 1 for error in errors for value in re.findall(r"Dòng nhập: (\d+)", error)}
-        color = QColor("#ffe1e1")
-        for row in rows:
-            if 0 <= row < self.table.rowCount():
-                for column in range(self.COLUMN_COUNT):
-                    self._ensure_cell_item(row, column).setBackground(color)
+        data_map = self._data_row_mapping()
+        db_rows: set[int] = set()
+        for error in errors:
+            if "URL đã tồn tại trong một dự án" in error or "Trùng với video ID:" in error:
+                for val in re.findall(r"Dòng nhập:\s*(\d+)", error):
+                    in_row = int(val)
+                    if 1 <= in_row <= len(data_map):
+                        db_rows.add(data_map[in_row - 1])
+                    elif 0 <= in_row - 1 < self.table.rowCount():
+                        db_rows.add(in_row - 1)
+
+        if db_rows:
+            self._highlight_db_duplicate_rows(db_rows)
+            first_row = min(db_rows)
+            self.table.scrollToItem(self._ensure_cell_item(first_row, self.URL_COLUMN))
+            self.table.setCurrentCell(first_row, self.URL_COLUMN)
 
     def _show_import_errors(self, errors: list[str]) -> None:
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Lỗi import video")
-        dialog.resize(700, 430)
-        layout = QVBoxLayout(dialog)
-        details = QPlainTextEdit("\n\n".join(errors), dialog)
-        details.setReadOnly(True)
-        layout.addWidget(details)
-        close_button = QPushButton("Đóng", dialog)
-        close_button.clicked.connect(dialog.accept)
-        layout.addWidget(close_button)
-        dialog.exec()
+        QMessageBox.warning(self, "Lỗi import video", "\n\n".join(errors))
 
     def restore_draft(self) -> list[dict[str, str]] | None:
         if not self._draft_path.is_file():
@@ -278,9 +327,7 @@ class ManualVideoImportDialog(QDialog):
         if self._restoring:
             return
         self._normalize_trailing_empty_rows()
-        with QSignalBlocker(self.table):
-            for column in range(self.COLUMN_COUNT):
-                self._ensure_cell_item(_item.row(), column).setBackground(QColor("transparent"))
+        self._clear_row_db_duplicate_highlight(_item.row())
         self._schedule_draft_save()
 
     def _edit_item(self, item: QTableWidgetItem) -> None:
@@ -441,6 +488,7 @@ class ManualVideoImportDialog(QDialog):
         for row in rows:
             self.table.removeRow(row)
         if rows:
+            self._sync_db_duplicate_rows()
             self._normalize_trailing_empty_rows()
             self._schedule_draft_save()
 
@@ -471,22 +519,55 @@ class ManualVideoImportDialog(QDialog):
         output = io.StringIO(newline="")
         writer = csv.writer(output)
         writer.writerow(("stt", "title", "url"))
+        row_map: list[int] = []
         for row in range(self.table.rowCount()):
             title = self._cell_text(row, self.TITLE_COLUMN).strip()
             url = self._cell_text(row, self.URL_COLUMN).strip()
             if not title and not url:
                 continue
+            row_map.append(row)
             writer.writerow((row + 1, title, url))
 
         csv_text = output.getvalue()
         rows, errors = parse_video_csv(csv_text)
         if errors:
-            self._highlight_error_rows(errors)
             self._show_import_errors(errors)
             return
         if not rows:
             QMessageBox.information(self, "Chưa có dữ liệu", "Hãy thêm ít nhất một dòng Title và URL.")
             return
+
+        # Check database duplicates if video_service is available
+        if self._video_service and self._project_id:
+            try:
+                self._video_service._validate_unique_urls(
+                    self._project_id, rows, check_saved=True
+                )
+            except VideoImportValidationError as exc:
+                db_dup_rows: set[int] = set()
+                if getattr(exc, "db_duplicates", None):
+                    for item in exc.db_duplicates:
+                        input_row = int(item.get("input_row", 0))
+                        if 1 <= input_row <= len(row_map):
+                            db_dup_rows.add(row_map[input_row - 1])
+                else:
+                    import re
+                    for err in exc.errors:
+                        if "URL đã tồn tại trong một dự án" in err or "Trùng với video ID:" in err:
+                            for m in re.findall(r"Dòng nhập:\s*(\d+)", err):
+                                in_row = int(m)
+                                if 1 <= in_row <= len(row_map):
+                                    db_dup_rows.add(row_map[in_row - 1])
+
+                if db_dup_rows:
+                    self._highlight_db_duplicate_rows(db_dup_rows)
+                    first_row = min(db_dup_rows)
+                    self.table.scrollToItem(self._ensure_cell_item(first_row, self.URL_COLUMN))
+                    self.table.setCurrentCell(first_row, self.URL_COLUMN)
+
+                self._show_import_errors(exc.errors)
+                return
+
         self.csv_text = csv_text
         self.rows = rows
         self._save_requested = True
