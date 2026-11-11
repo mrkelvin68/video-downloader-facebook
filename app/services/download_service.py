@@ -14,9 +14,11 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
+import logging
 
 from app.database.connection import Database
 from app.services.credential_service import get_apify_token
+from app.services.logging_service import log_download, log_error, redactor
 from app.services.video_download_provider import VideoDownloadProvider, VideoPlatform, provider_for_url
 
 
@@ -51,13 +53,12 @@ def classify_download_error(message: str) -> tuple[str, bool]:
         return "extractor", True
     if any(
         marker in normalized
-        for marker in (
-            "geo restriction",
-            "not available in your country",
-            "region restricted",
-            "access denied",
-            "forbidden",
-        )
+        for marker in ("http error 403", "http 403", "error 403")
+    ):
+        return "forbidden", False
+    if any(
+        marker in normalized
+        for marker in ("geo restriction", "not available in your country", "region restricted", "access denied", "forbidden")
     ):
         return "blocked", False
     if any(
@@ -87,7 +88,6 @@ def classify_download_error(message: str) -> tuple[str, bool]:
             "checkpoint",
             "not authorized",
             "http error 401",
-            "http error 403",
         )
     ):
         return "authentication", False
@@ -196,12 +196,21 @@ class DownloadService:
             with tempfile.TemporaryDirectory(prefix=".download-", dir=root) as work:
                 folder = Path(work)
                 ffmpeg_loc = self._find_ffmpeg()
-                cookies_file = self._find_cookies_file()
+                cookies_file = self._find_cookies_file(
+                    platform=provider.platform.value if provider is not None else None
+                )
                 command = [
                     *self._yt_dlp_command(), "--no-playlist", "--playlist-items", "1",
                     "--no-overwrites", "--write-thumbnail", "--write-info-json", "--convert-thumbnails", "jpg",
                     "-f", "bv*+ba/b", "--merge-output-format", "mp4", "--remux-video", "mp4",
                 ]
+                if provider is not None and provider.platform == VideoPlatform.YOUTUBE:
+                    js_runtime = self._find_javascript_runtime()
+                    if js_runtime:
+                        command.extend([
+                            "--js-runtimes", f"node:{js_runtime}",
+                            "--remote-components", "ejs:github",
+                        ])
                 if progress_callback is None:
                     command.append("--no-progress")
                 else:
@@ -223,6 +232,7 @@ class DownloadService:
                     "-o", str(folder / (video["video_code"] + ".%(ext)s")),
                     source_url,
                 ])
+                log_download(f"Starting download: video_code={video['video_code']}, platform={provider.platform.value if provider else 'unknown'}, url={source_url}")
 
                 def run_ytdlp(candidate_command: list[str]):
                     if progress_callback is None:
@@ -266,7 +276,7 @@ class DownloadService:
                 authentication_failure = (
                     result.returncode != 0
                     and provider is not None
-                    and provider.platform == VideoPlatform.FACEBOOK
+                    and provider.platform in {VideoPlatform.FACEBOOK, VideoPlatform.YOUTUBE}
                     and self._requires_facebook_authentication(initial_reason)
                 )
                 attempted_browsers: list[str] = []
@@ -294,6 +304,15 @@ class DownloadService:
                 if result.returncode != 0:
                     reason = (result.stderr or result.stdout or "Không rõ nguyên nhân").strip()
                     if authentication_failure:
+                        if provider is not None and provider.platform == VideoPlatform.YOUTUBE:
+                            raise DownloadError(
+                                "YouTube yêu cầu xác thực hoặc đang chặn yêu cầu từ môi trường này. "
+                                "Hãy đăng nhập hợp lệ/cấu hình cookie YouTube do bạn cho phép, "
+                                "hoặc thử lại sau."
+                                f" ({reason[-300:]})",
+                                category="authentication",
+                                retryable=False,
+                            )
                         browser_note = (
                             f" Đã thử phiên đăng nhập: {', '.join(attempted_browsers)}."
                             if attempted_browsers else ""
@@ -306,7 +325,22 @@ class DownloadService:
                             category="unavailable",
                             retryable=False,
                         )
-                    raise DownloadError("yt-dlp thất bại: " + reason[-600:])
+                    category, retryable = classify_download_error(reason)
+                    if (
+                        provider is not None
+                        and provider.platform == VideoPlatform.YOUTUBE
+                        and category == "forbidden"
+                    ):
+                        raise DownloadError(
+                            "YouTube từ chối tải media (HTTP 403). Hãy kiểm tra phiên/thiết lập hợp lệ hoặc thử lại sau; ứng dụng không vượt qua cơ chế hạn chế truy cập.",
+                            category="forbidden",
+                            retryable=False,
+                        )
+                    raise DownloadError(
+                        "yt-dlp thất bại: " + reason[-600:],
+                        category=category,
+                        retryable=retryable,
+                    )
 
                 video_path = folder / f"{video['video_code']}.mp4"
                 if not video_path.is_file() or video_path.stat().st_size == 0:
@@ -343,8 +377,12 @@ class DownloadService:
                 thumbnail = target / "thumbnail.jpg" if has_thumbnail else None
                 self._set_video_metadata(project_id, video_id, metadata)
                 self._set_status(project_id, video_id, "completed", str(output), str(thumbnail) if thumbnail else None)
+                log_download(f"Download completed successfully: video_code={video['video_code']}, path={output}")
                 return output, thumbnail
         except Exception as download_error:
+            video_code = video["video_code"] if video is not None else "unknown"
+            log_download(f"Download failed: video_code={video_code}, error={download_error}", level=logging.WARNING)
+            log_error(f"Download error on video {video_code}", exc=download_error)
             try:
                 self._set_status(project_id, video_id, "failed")
             except Exception as status_error:
@@ -520,16 +558,29 @@ class DownloadService:
         return [sys.executable, "-m", "yt_dlp"]
 
     @staticmethod
-    def _find_cookies_file() -> str | None:
-        configured = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
+    def _find_cookies_file(*, platform: str | None = None) -> str | None:
+        """Return only an explicitly configured session file for this platform."""
+        configured = (
+            os.environ.get(
+                f"YTDLP_{platform.upper()}_COOKIES_FILE", ""
+            ).strip()
+            if platform
+            else ""
+        )
+        if not configured:
+            try:
+                from PySide6.QtCore import QSettings
+
+                configured = str(
+                    QSettings("VideoDownloader", "VideoDownloaderFacebook").value(
+                        f"{platform}/auth/cookies_file", "", type=str
+                    )
+                    or ""
+                ).strip()
+            except Exception:
+                configured = ""
         if configured and Path(configured).is_file():
-            return str(Path(configured))
-        for candidate in (
-            Path.home() / ".video-downloader-facebook" / "cookies.txt",
-            Path("cookies.txt"),
-        ):
-            if candidate.is_file():
-                return str(candidate.resolve())
+            return str(Path(configured).resolve())
         return None
 
     @staticmethod
@@ -538,6 +589,13 @@ class DownloadService:
         # Browser cookies are sensitive. Use them only after the user explicitly
         # opts in by configuring the browser/profile source.
         return [configured] if configured else []
+
+    @staticmethod
+    def _find_javascript_runtime() -> str | None:
+        configured = os.environ.get("YTDLP_JS_RUNTIME", "").strip()
+        if configured and Path(configured).is_file():
+            return configured
+        return shutil.which("node")
 
     @staticmethod
     def _is_facebook_extractor_failure(output: str) -> bool:

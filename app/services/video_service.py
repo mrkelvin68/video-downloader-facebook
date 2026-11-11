@@ -67,15 +67,14 @@ class VideoService:
                 )
             else:
                 first_rows[canonical_url] = row
-        if check_saved:
-            saved_by_url = {
-                normalize_video_url(str(video["source_url"])): video
-                for video in self.database.list_videos(project_id)
-            }
-            for row in rows:
-                saved = saved_by_url.get(str(row["normalized_url"]))
-                if saved is not None:
-                    errors.append(self._duplicate_saved_error(row, saved))
+        saved_by_url = self.database.find_videos_by_normalized_urls(
+            (str(row["normalized_url"]) for row in rows),
+            exclude_project_id=project_id if not check_saved else None,
+        )
+        for row in rows:
+            saved = saved_by_url.get(str(row["normalized_url"]))
+            if saved is not None:
+                errors.append(self._duplicate_saved_error(row, saved))
         if errors:
             raise VideoImportValidationError(errors)
 
@@ -94,6 +93,7 @@ class VideoService:
     @staticmethod
     def _duplicate_saved_error(row: dict[str, object], saved: object) -> str:
         input_row = int(row["input_row"])
+        project_name = saved["project_name"] if "project_name" in saved.keys() else "Dự án hiện tại"
         return (
             "Lỗi import video\n"
             f"Dòng nhập: {input_row}\n"
@@ -101,7 +101,8 @@ class VideoService:
             f"ID dòng nhập: {input_row}\n"
             f"Trùng với video ID: {saved['video_code']}\n"
             f"STT đã lưu: {saved['sequence_number']}\n"
-            "Nguyên nhân: URL đã tồn tại trong dự án."
+            f"Dự án đã lưu: {project_name}\n"
+            "Nguyên nhân: URL đã tồn tại trong một dự án."
         )
 
     def export_csv(self, project_id: str) -> str:
@@ -144,3 +145,33 @@ class VideoService:
             if field == "video_code":
                 raise ValueError("Mã video đã được sử dụng trong dự án.") from exc
             raise
+
+    def delete_videos(
+        self,
+        project_id: str,
+        video_ids: list[str],
+        *,
+        delete_local_files: bool = False,
+    ) -> int:
+        project = self.database.get_project(project_id)
+        if project is None:
+            raise ValueError("Dự án không tồn tại")
+        if not video_ids:
+            return 0
+        deleted_rows = self.database.delete_videos(project_id, video_ids)
+        if delete_local_files and deleted_rows:
+            import shutil
+            root = Path(project["output_dir"]).resolve()
+            for row in deleted_rows:
+                code = str(row["video_code"] or "")
+                if code:
+                    video_dir = (root / code).resolve()
+                    if video_dir.is_dir() and root in video_dir.parents:
+                        shutil.rmtree(video_dir, ignore_errors=True)
+                for path_key in ("local_video_path", "thumbnail_path"):
+                    raw_path = row[path_key]
+                    if raw_path:
+                        p = Path(raw_path).resolve()
+                        if p.is_file() and root in p.parents:
+                            p.unlink(missing_ok=True)
+        return len(deleted_rows)

@@ -19,6 +19,24 @@ def _create_videos_table(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_global_video_url_triggers(connection: sqlite3.Connection) -> None:
+    """Reject new cross-project URL duplicates without invalidating legacy rows."""
+    for event, suffix in (("INSERT", "insert"), ("UPDATE OF normalized_url", "update")):
+        connection.execute(
+            f"""CREATE TRIGGER IF NOT EXISTS trg_videos_global_normalized_url_{suffix}
+                BEFORE {event} ON videos
+                FOR EACH ROW
+                WHEN EXISTS (
+                    SELECT 1 FROM videos
+                    WHERE normalized_url=NEW.normalized_url
+                      AND project_id<>NEW.project_id
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'Video URL already belongs to another project');
+                END"""
+        )
+
+
 def _create_download_jobs_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         """CREATE TABLE IF NOT EXISTS download_jobs (
@@ -510,6 +528,7 @@ def migrate(connection: sqlite3.Connection) -> None:
                 connection.execute(
                     f"ALTER TABLE videos ADD COLUMN {column} {definition}"
                 )
+        _create_global_video_url_triggers(connection)
         _create_download_jobs_table(connection)
         _create_matrices_tables(connection)
         _create_discovered_pages_table(connection)

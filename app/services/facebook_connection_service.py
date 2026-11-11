@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -12,6 +13,7 @@ from app.services.credential_service import (
     set_meta_token, set_page_token,
 )
 from app.services.facebook_publishing_service import FacebookPublishingError, FacebookPublishingService
+from app.services.logging_service import log_api_call, redactor
 
 REQUIRED_PERMISSIONS = {"pages_show_list", "pages_read_engagement", "pages_manage_posts"}
 
@@ -32,6 +34,8 @@ class FacebookConnectionError(FacebookPublishingError):
 class MetaFacebookConnectionClient:
     def __init__(self, token: str, *, api_version: str = "v26.0", timeout: float = 30.0) -> None:
         self.token = token.strip()
+        if self.token:
+            redactor.add(self.token)
         self.base_url = f"https://graph.facebook.com/{api_version}"
         self.timeout = timeout
         self.diagnostics: list[dict[str, Any]] = []
@@ -100,14 +104,24 @@ class MetaFacebookConnectionClient:
         )
 
     def _get(self, path: str, **params: Any) -> dict[str, Any]:
+        start_time = time.perf_counter()
         query = {**params, "access_token": self.token}
         request = Request(f"{self.base_url}/{path}?{urlencode(query)}", headers={"Accept": "application/json"})
         endpoint = f"/{path}"
         try:
             with urlopen(request, timeout=self.timeout) as response:
+                duration_ms = (time.perf_counter() - start_time) * 1000
                 payload = json.loads(response.read().decode("utf-8"))
                 self.diagnostics.append({"method": "GET", "endpoint": endpoint, "http_status": response.status, "result": "PASS"})
+                log_api_call(
+                    provider="meta_graph",
+                    method="GET",
+                    endpoint=endpoint,
+                    status=response.status,
+                    duration_ms=duration_ms,
+                )
         except HTTPError as exc:
+            duration_ms = (time.perf_counter() - start_time) * 1000
             try:
                 payload = json.loads(exc.read().decode("utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -117,19 +131,46 @@ class MetaFacebookConnectionClient:
             category = "expired" if exc.code == 401 or error_code == "190" else "permission" if exc.code in {403} or error_code in {"10", "200"} else "api"
             error = payload.get("error", {})
             self.diagnostics.append({"method": "GET", "endpoint": endpoint, "http_status": exc.code, "meta_code": error_code, "meta_subcode": str(error.get("error_subcode") or "") or None, "meta_type": error.get("type"), "fbtrace_id": error.get("fbtrace_id"), "result": "FAILED"})
+            log_api_call(
+                provider="meta_graph",
+                method="GET",
+                endpoint=endpoint,
+                status=exc.code,
+                duration_ms=duration_ms,
+                error_message=str(message),
+                exc=exc,
+            )
             friendly = {
                 "expired": "Access Token đã hết hạn hoặc bị thu hồi.",
                 "permission": "Token hợp lệ nhưng không có quyền đăng bài hoặc lấy Fanpage.",
             }.get(category, str(message))
             raise FacebookConnectionError(friendly, category=category, code=error_code, subcode=str(error.get("error_subcode") or "") or None, error_type=error.get("type"), http_status=exc.code, fbtrace_id=error.get("fbtrace_id")) from exc
         except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+            duration_ms = (time.perf_counter() - start_time) * 1000
             self.diagnostics.append({"method": "GET", "endpoint": endpoint, "result": "FAILED", "error": "network"})
+            log_api_call(
+                provider="meta_graph",
+                method="GET",
+                endpoint=endpoint,
+                duration_ms=duration_ms,
+                error_message="Network failure",
+                exc=exc,
+            )
             raise FacebookConnectionError("Không thể kết nối Meta Graph API.", category="network") from exc
         if "error" in payload:
+            duration_ms = (time.perf_counter() - start_time) * 1000
             error = payload["error"]
             error_code = str(error.get("code"))
             category = "expired" if error_code == "190" else "permission" if error_code in {"10", "200"} else "api"
             self.diagnostics.append({"method": "GET", "endpoint": endpoint, "http_status": 200, "meta_code": error_code, "meta_subcode": str(error.get("error_subcode") or "") or None, "meta_type": error.get("type"), "fbtrace_id": error.get("fbtrace_id"), "result": "FAILED"})
+            log_api_call(
+                provider="meta_graph",
+                method="GET",
+                endpoint=endpoint,
+                status=200,
+                duration_ms=duration_ms,
+                error_message=str(error.get("message", "Meta Graph API error")),
+            )
             friendly = {
                 "expired": "Access Token đã hết hạn hoặc bị thu hồi.",
                 "permission": "Token hợp lệ nhưng không có quyền đăng bài hoặc lấy Fanpage.",

@@ -71,6 +71,10 @@ from app.ui.dialogs.matrix_configuration_dialog import (
 )
 from app.ui.dialogs.project_dialog import ProjectDialog
 from app.ui.dialogs.project_delete_dialog import ProjectDeleteDialog
+from app.ui.dialogs.settings_dialog import SettingsDialog
+from app.ui.dialogs.video_delete_dialog import VideoDeleteDialog
+from app.ui.dialogs.youtube_auth_dialog import YouTubeAuthDialog
+from app.services.logging_service import log_app, logging_service
 from app.ui.pages.project_detail_page import ProjectDetailPage
 from app.ui.pages.project_page import ProjectPage
 from app.ui.pages.download_queue_page import DownloadQueuePage
@@ -159,6 +163,8 @@ class MainWindow(QMainWindow):
         enable_tray: bool = False,
     ) -> None:
         super().__init__()
+        logging_service.initialize()
+        log_app("Application window initialized")
         self.database = database
         self.auto_resume = auto_resume
         self.enable_tray = enable_tray
@@ -256,6 +262,7 @@ class MainWindow(QMainWindow):
         self.sidebar.projectsRequested.connect(self.show_projects)
         self.sidebar.queueRequested.connect(self.show_queue)
         self.sidebar.viralReelsRequested.connect(self.show_viral_reels)
+        self.sidebar.settingsRequested.connect(self.show_settings)
         self.viral_reels_page.findPagesRequested.connect(self.find_viral_pages)
         self.viral_reels_page.providerRequested.connect(self.configure_viral_provider)
         self.viral_reels_page.scanReelsRequested.connect(self.scan_viral_reels)
@@ -287,6 +294,9 @@ class MainWindow(QMainWindow):
         self.detail_page.clearSelectionRequested.connect(
             self.detail_page.video_table.clear_selection
         )
+        self.detail_page.deleteVideosRequested.connect(
+            self.delete_selected_videos
+        )
         self.queue_page.backRequested.connect(self.show_projects)
         self.queue_page.startRequested.connect(self.start_queue)
         self.queue_page.set_concurrency(self.queue_concurrency)
@@ -294,6 +304,7 @@ class MainWindow(QMainWindow):
         self.queue_page.pauseRequested.connect(self.pause_queue)
         self.queue_page.resumeRequested.connect(self.start_queue)
         self.queue_page.retryRequested.connect(self.retry_queue_jobs)
+        self.queue_page.errorDetailsRequested.connect(self.show_queue_error_details)
         self.queue_page.cancelRequested.connect(self.cancel_queue_jobs)
         self.queue_page.prioritizeRequested.connect(self.prioritize_queue_jobs)
         self.queue_page.deleteSelectedRequested.connect(
@@ -462,11 +473,89 @@ class MainWindow(QMainWindow):
                 "Các tệp video trên ổ đĩa được giữ nguyên.",
             )
 
+    def delete_selected_videos(self) -> None:
+        if self.current_project is None:
+            return
+        selected_ids = self.detail_page.video_table.selected_video_ids()
+        all_videos = self.videos.list_videos(self.current_project.uuid)
+        total_count = len(all_videos)
+        if total_count == 0:
+            QMessageBox.information(
+                self, "Không có video", "Dự án hiện chưa có video nào để xóa."
+            )
+            return
+
+        dialog = VideoDeleteDialog(
+            project_name=self.current_project.name,
+            selected_count=len(selected_ids),
+            total_count=total_count,
+            parent=self,
+        )
+        if dialog.exec() != VideoDeleteDialog.DialogCode.Accepted:
+            return
+
+        if dialog.is_delete_all():
+            target_ids = [v.id for v in all_videos]
+        else:
+            target_ids = selected_ids
+
+        if not target_ids:
+            QMessageBox.warning(
+                self, "Chưa chọn video", "Không có video nào được chọn để xóa."
+            )
+            return
+
+        delete_local = dialog.is_delete_local_files()
+        if delete_local:
+            answer = QMessageBox.warning(
+                self,
+                "Xác nhận xóa tệp trên máy",
+                f"Thao tác này sẽ xóa vĩnh viễn tệp video và thumbnail của {len(target_ids)} video trên ổ đĩa.\n"
+                "Bạn có chắc chắn muốn tiếp tục?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        # Cancel any active workers for these videos
+        for job_id, worker in list(self.queue_workers.items()):
+            if self._queue_video_ids.get(job_id) in target_ids:
+                worker.cancel()
+
+        try:
+            deleted_count = self.videos.delete_videos(
+                self.current_project.uuid,
+                target_ids,
+                delete_local_files=delete_local,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Lỗi xóa video", f"Không thể xóa video: {exc}")
+            return
+
+        self._refresh_project_videos()
+        self.refresh_queue()
+        self.detail_page.video_table.clear_selection()
+        description = (
+            "khỏi cơ sở dữ liệu và tệp trên ổ đĩa"
+            if delete_local
+            else "khỏi cơ sở dữ liệu (tệp video gốc trên máy được giữ nguyên)"
+        )
+        QMessageBox.information(
+            self,
+            "Xóa video thành công",
+            f"Đã xóa thành công {deleted_count} video {description}.",
+        )
+
     def show_projects(self) -> None:
         self.pending_csv_text = None
         self.pending_csv_rows = []
         self.pending_csv_errors = []
         self.pages.setCurrentIndex(0)
+        self.sidebar.set_active("projects")
+
+    def show_settings(self) -> None:
+        SettingsDialog(self).exec()
         self.sidebar.set_active("projects")
 
     def show_detail(self, project: Project) -> None:
@@ -2116,6 +2205,22 @@ class MainWindow(QMainWindow):
             "Bấm Bắt đầu hàng đợi để chạy."
         )
 
+    def show_queue_error_details(self) -> None:
+        selected = self.queue_page.table.selected_job_ids()
+        if not selected:
+            QMessageBox.information(self, "Chi tiết lỗi", "Hãy chọn một job lỗi trong hàng đợi.")
+            return
+        jobs = {str(job["job_id"]): job for job in self.download_queue.list_jobs()}
+        details = []
+        for job_id in selected:
+            job = jobs.get(job_id)
+            if job and job.get("error_message"):
+                details.append(f"{job['video_code']}: {job['error_message']}")
+        QMessageBox.information(
+            self,
+            "Chi tiết lỗi tải YouTube",
+            "\n\n".join(details) if details else "Job đã chọn chưa có lỗi được lưu.",
+        )
     def cancel_queue_jobs(self) -> None:
         selected = self._selected_queue_job_ids()
         if not selected:
@@ -2400,14 +2505,14 @@ def main() -> int:
         )
         return 0
     application = QApplication(sys.argv)
-    application.setQuitOnLastWindowClosed(False)
+    application.setQuitOnLastWindowClosed(True)
     application.setOrganizationName("VideoDownloader")
     application.setApplicationName("VideoDownloaderFacebook")
     style_path = Path(__file__).with_name("styles.qss")
     application.setStyleSheet(style_path.read_text(encoding="utf-8"))
     database = Database(DB_PATH)
     try:
-        window = MainWindow(database, auto_resume=True, enable_tray=True)
+        window = MainWindow(database, auto_resume=True, enable_tray=False)
         window.show()
         return application.exec()
     finally:
