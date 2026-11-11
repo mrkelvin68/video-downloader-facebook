@@ -20,13 +20,14 @@ QWidget { background:#0d1526; color:#d7e0ef; font-family:"Segoe UI"; font-size:1
 QPushButton { color:#c5d2e5; background:transparent; border:1px solid transparent; border-radius:7px; padding:9px 13px; }
 QPushButton:hover:enabled { background:#17263d; color:#fff; }
 QPushButton:focus { border:1px solid #60a5fa; }
-QPushButton#primary { background:#2563eb; border:1px solid #3b82f6; color:#fff; font-weight:600; }
-QPushButton#primary:hover { background:#1d4ed8; }
-QPushButton#secondary { background:#14223a; border:1px solid #2b4264; color:#c6d7ee; }
-QPushButton#secondary:hover { background:#1b3151; }
-QPushButton#danger { background:#3a202c; border:1px solid #713342; color:#fca5a5; }
-QPushButton#danger:hover:enabled { background:#512634; border-color:#a34357; color:#fff; }
-QPushButton#danger:disabled { background:#241b25; border-color:#49303a; color:#806b75; }
+QPushButton#primary { background:#2563eb; border:1px solid #3b82f6; border-radius:7px; color:#fff; font-weight:650; padding:8px 18px; }
+QPushButton#primary:hover:enabled { background:#1d4ed8; border-color:#60a5fa; }
+QPushButton#primary:pressed { background:#1e40af; }
+QPushButton#secondary { background:#132238; border:1px solid #253956; border-radius:7px; color:#cbd5e1; padding:8px 14px; }
+QPushButton#secondary:hover:enabled { background:#1c304d; border-color:#3b82f6; color:#ffffff; }
+QPushButton#danger { background:#24141e; border:1px solid #4d1d2b; border-radius:7px; color:#f87171; padding:8px 14px; }
+QPushButton#danger:hover:enabled { background:#371926; border-color:#ef4444; color:#ffffff; }
+QPushButton#danger:disabled { background:#191218; border-color:#311b22; color:#5c424a; }
 QPushButton#back { color:#93c5fd; padding-left:0; }
 QScrollArea { background:transparent; }
 QScrollBar:vertical { background:#0d1526; width:9px; margin:4px; }
@@ -98,3 +99,11 @@ QTabWidget#facebookTabs QTabBar::tab:hover { background:#17263d; }
 #matrixListEditor { min-height:75px; }
 #csvPreviewErrors { background:#0c1729; border:1px solid #713342; border-radius:6px; color:#fca5a5; }
 QHeaderView::section { background:#14223a; color:#8ea1bb; border:1px solid #284365; padding:7px; }
+#downloadToastCard { background:#0c192c; border:1px solid #1e3557; border-radius:8px; }
+#toastTitle { color:#f8fafc; font-size:13px; font-weight:600; }
+#toastProgressLabel { color:#94a3b8; font-size:12px; }
+#toastStatsLabel { color:#94a3b8; font-size:12px; }
+#toastProgressBar { background:#16263d; border:0; border-radius:2.5px; }
+#toastProgressBar::chunk { background:qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #06b6d4, stop:1 #3b82f6); border-radius:2.5px; }
+#toastCancelButton { background:#2a151f; border:1px solid #5a1e2b; border-radius:4px; color:#f87171; font-weight:700; font-size:11px; min-width:22px; max-width:22px; min-height:22px; max-height:22px; padding:0; }
+#toastCancelButton:hover { background:#431a28; border-color:#ef4444; color:#ffffff; }

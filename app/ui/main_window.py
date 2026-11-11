@@ -288,6 +288,7 @@ class MainWindow(QMainWindow):
         self.detail_page.runNowRequested.connect(self.run_now)
         self.detail_page.enqueueRequested.connect(self.add_selected_to_queue)
         self.detail_page.queueRequested.connect(self.show_queue)
+        self.detail_page.cancelDownloadRequested.connect(self._cancel_active_downloads)
         self.detail_page.selectAllRequested.connect(
             self.detail_page.video_table.select_all
         )
@@ -1978,6 +1979,14 @@ class MainWindow(QMainWindow):
         )
         self.detail_page.queue_status.setText("Tạm dừng sau video hiện tại.")
 
+    def _cancel_active_downloads(self) -> None:
+        if not self.queue_workers:
+            self.pause_queue()
+            return
+        for worker in list(self.queue_workers.values()):
+            worker.request_cancel()
+        self.pause_queue()
+
     def _start_next_queue_job(self) -> None:
         """Fill every free download slot with the highest-priority queued job."""
         if not self.queue_running:
@@ -2074,6 +2083,9 @@ class MainWindow(QMainWindow):
         status = f"Đang tải {code}: {percent:.1f}% · {rate}{remaining}"
         self.queue_page.queue_status.setText(status)
         self.detail_page.queue_status.setText(status)
+        video_id = self._queue_video_ids.get(job_id)
+        if video_id and hasattr(self.detail_page.video_table, "update_video_progress"):
+            self.detail_page.video_table.update_video_progress(video_id, percent)
         self._update_queue_stats()
 
     def _run_pending_deletions(self) -> bool:
