@@ -80,6 +80,7 @@ from app.ui.pages.project_page import ProjectPage
 from app.ui.pages.download_queue_page import DownloadQueuePage
 from app.ui.pages.matrix_page import MatrixPage
 from app.ui.pages.viral_reels_page import ViralReelsPage
+from app.ui.pages.auto_comment_page import AutoCommentPage
 from app.ui.widgets.sidebar import Sidebar
 from app.ui.download_worker import DownloadWorker
 from app.ui.facebook_worker import FacebookPublishWorker, FacebookRequestWorker
@@ -229,11 +230,13 @@ class MainWindow(QMainWindow):
         self.queue_page = DownloadQueuePage()
         self.matrix_page = MatrixPage()
         self.viral_reels_page = ViralReelsPage()
+        self.auto_comment_page = AutoCommentPage(database)
         self.pages.addWidget(self.project_page)
         self.pages.addWidget(self.detail_page)
         self.pages.addWidget(self.queue_page)
         self.pages.addWidget(self.matrix_page)
         self.pages.addWidget(self.viral_reels_page)
+        self.pages.addWidget(self.auto_comment_page)
         workspace_layout.addWidget(self.pages, 1)
         root_layout.addWidget(workspace, 1)
         self.setCentralWidget(root)
@@ -264,6 +267,7 @@ class MainWindow(QMainWindow):
         self.sidebar.projectsRequested.connect(self.show_projects)
         self.sidebar.queueRequested.connect(self.show_queue)
         self.sidebar.viralReelsRequested.connect(self.show_viral_reels)
+        self.sidebar.autoCommentRequested.connect(self.show_auto_comment)
         self.sidebar.settingsRequested.connect(self.show_settings)
         self.viral_reels_page.findPagesRequested.connect(self.find_viral_pages)
         self.viral_reels_page.providerRequested.connect(self.configure_viral_provider)
@@ -929,6 +933,12 @@ class MainWindow(QMainWindow):
     def show_viral_reels(self) -> None:
         self.pages.setCurrentWidget(self.viral_reels_page)
         self.sidebar.set_active("viral-reels")
+
+    def show_auto_comment(self) -> None:
+        self.auto_comment_page.refresh_pages()
+        self.auto_comment_page.refresh_libraries()
+        self.pages.setCurrentWidget(self.auto_comment_page)
+        self.sidebar.set_active("auto-comment")
 
     @staticmethod
     def _viral_schedule(value: str) -> str:

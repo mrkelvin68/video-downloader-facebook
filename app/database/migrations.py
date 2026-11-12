@@ -452,6 +452,34 @@ def _create_facebook_publishing_tables(connection: sqlite3.Connection) -> None:
         """CREATE INDEX IF NOT EXISTS ix_facebook_drafts_project
            ON facebook_drafts(project_id, updated_at DESC)"""
     )
+
+
+def _create_auto_comment_tables(connection: sqlite3.Connection) -> None:
+    """Local-only data for the Auto Comment planning screen (no credentials)."""
+    connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_libraries (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_library_items (
+        id TEXT PRIMARY KEY, library_id TEXT NOT NULL, source_row_id TEXT,
+        comment_text TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+        sort_order INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        FOREIGN KEY(library_id) REFERENCES auto_comment_libraries(id) ON DELETE CASCADE)""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_library_items_order
+        ON auto_comment_library_items(library_id, sort_order, id)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_campaigns (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, page_id TEXT NOT NULL,
+        post_start_date TEXT NOT NULL, post_end_date TEXT NOT NULL, content_type TEXT NOT NULL,
+        selection_mode TEXT NOT NULL, comments_per_post INTEGER NOT NULL CHECK(comments_per_post IN (1,3)),
+        prevent_duplicates INTEGER NOT NULL DEFAULT 1 CHECK(prevent_duplicates IN (0,1)),
+        status TEXT NOT NULL CHECK(status IN ('DRAFT','PREVIEW_READY','INVALID')),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_preview_items (
+        id TEXT PRIMARY KEY, campaign_id TEXT NOT NULL, post_id TEXT NOT NULL,
+        post_type TEXT NOT NULL, published_at TEXT NOT NULL, comment_text TEXT NOT NULL,
+        selection_order INTEGER NOT NULL, selected INTEGER NOT NULL DEFAULT 1 CHECK(selected IN (0,1)),
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(campaign_id) REFERENCES auto_comment_campaigns(id) ON DELETE CASCADE)""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_preview_campaign
+        ON auto_comment_preview_items(campaign_id, post_id, selection_order)""")
 def migrate(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("BEGIN IMMEDIATE")
@@ -538,6 +566,7 @@ def migrate(connection: sqlite3.Connection) -> None:
         _create_export_history_table(connection)
         _create_provider_configuration_table(connection)
         _create_facebook_publishing_tables(connection)
+        _create_auto_comment_tables(connection)
         connection.commit()
     except BaseException:
         connection.rollback()
