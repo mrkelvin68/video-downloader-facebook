@@ -252,6 +252,25 @@ class ConcurrentQueueTests(unittest.TestCase):
         self.assertIn("Tốc độ tổng", window.queue_page.stats_label.text())
         self.assertIn("Đang tải: 3", window.queue_page.stats_label.text())
 
+    def test_project_video_table_refreshes_during_download(self):
+        job_id = self.enqueue(1)[0]
+        window = self.window(1)
+        project = next(
+            item for item in ProjectService(self.database).list_projects()
+            if item.uuid == self.project_id
+        )
+        window.show_detail(project)
+        window.start_queue()
+        self.queue.claim(job_id)
+        self.queue.update_progress(
+            job_id, progress=50.0, downloaded_bytes=50, total_bytes=100,
+            speed=10.0, eta_seconds=5,
+        )
+        window._queue_progress(job_id, 50.0, 50, 100, 10.0, 5)
+        model = window.detail_page.video_table.video_model
+        self.assertEqual(model.data(model.index(0, 5)), "Đang tải")
+        self.assertEqual(model.data(model.index(0, 6)), "50%")
+
     def test_progress_ui_updates_are_throttled(self):
         jobs = self.enqueue(1)
         window = self.window(1)

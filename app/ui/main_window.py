@@ -2068,6 +2068,9 @@ class MainWindow(QMainWindow):
         self.queue_page.table.queue_model.update_progress(
             job_id, percent, downloaded, total, speed, eta
         )
+        # Keep the project video table in sync with the queue page while a
+        # worker is active; it otherwise only refreshed after the job ended.
+        self._refresh_project_videos()
         code = self._queue_codes.get(job_id, job_id)
         rate = f"{speed / 1024 / 1024:.1f} MB/s" if speed else "—"
         remaining = f" · còn {eta}s" if eta is not None else ""
