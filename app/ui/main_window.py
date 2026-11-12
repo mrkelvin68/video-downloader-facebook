@@ -272,6 +272,7 @@ class MainWindow(QMainWindow):
         self.sidebar.queueRequested.connect(self.show_queue)
         self.sidebar.viralReelsRequested.connect(self.show_viral_reels)
         self.sidebar.autoCommentRequested.connect(self.show_auto_comment)
+        self.auto_comment_page.pageManagementRequested.connect(self.show_page_management)
         self.sidebar.pageManagementRequested.connect(self.show_page_management)
         self.page_management_page.connectRequested.connect(self._page_management_connect)
         self.page_management_page.testRequested.connect(self._page_management_test)
