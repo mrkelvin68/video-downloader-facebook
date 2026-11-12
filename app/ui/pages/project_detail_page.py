@@ -25,6 +25,7 @@ from app.models.project import Project
 from app.ui.widgets.video_table import VideoTable
 from app.ui.widgets.sidebar import button_icon
 from app.ui.widgets.loading_button import LoadingButton
+from app.ui.widgets.action_status import ActionStatusBar
 from app.ui.widgets.download_toast_card import DownloadToastCard
 
 
@@ -230,6 +231,9 @@ class ProjectDetailPage(QWidget):
         self.facebook_disconnect_button = QPushButton("Ngắt kết nối"); self.facebook_disconnect_button.setObjectName("danger"); self.facebook_disconnect_button.clicked.connect(self.facebookDisconnectRequested.emit)
         for button in (self.facebook_test_button, self.facebook_refresh_button, self.facebook_disconnect_button): toolbar.addWidget(button)
         connection_layout.addLayout(toolbar)
+        self.facebook_action_status = ActionStatusBar(connection)
+        self.facebook_action_status.set_status("Đang xử lý Facebook…")
+        connection_layout.addWidget(self.facebook_action_status)
         self.facebook_connection_form = QWidget()
         form = QHBoxLayout(self.facebook_connection_form)
         form.setContentsMargins(0, 0, 0, 0)

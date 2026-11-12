@@ -642,6 +642,10 @@ class MainWindow(QMainWindow):
         worker = FacebookRequestWorker(operation, self)
         self._facebook_workers[kind] = worker
         button.set_loading(True)
+        self.detail_page.facebook_action_status.set_status(
+            "Đang xử lý Facebook…", kind.replace("-", " ").title()
+        )
+        self.detail_page.facebook_action_status.set_loading(True)
 
         def succeeded(value) -> None:
             if self.current_project is not None and self.current_project.uuid == project_id:
@@ -649,11 +653,13 @@ class MainWindow(QMainWindow):
 
         def failed(message: str) -> None:
             if self.current_project is not None and self.current_project.uuid == project_id:
+                self.detail_page.facebook_action_status.set_status("Facebook thất bại", message)
                 QMessageBox.warning(self, "Facebook", message)
 
         def finished() -> None:
             self._facebook_workers.pop(kind, None)
             button.set_loading(False)
+            self.detail_page.facebook_action_status.set_loading(False)
             worker.deleteLater()
 
         worker.succeeded.connect(succeeded)
@@ -770,6 +776,8 @@ class MainWindow(QMainWindow):
         database_path = self.database.path
         self.detail_page.facebook_publish_button.set_loading(True)
         self.detail_page.facebook_status.setText("Đang chuẩn bị đăng video…")
+        self.detail_page.facebook_action_status.set_status("Đang đăng Facebook…", "Đang chuẩn bị video")
+        self.detail_page.facebook_action_status.set_loading(True)
 
         def publish(progress_callback):
             worker_database = Database(database_path)
@@ -782,7 +790,12 @@ class MainWindow(QMainWindow):
 
         worker = FacebookPublishWorker(publish, self)
         self._facebook_publish_worker = worker
-        worker.progressChanged.connect(lambda value: self.detail_page.facebook_status.setText(f"Đang upload: {value:.0f}%"))
+        def publish_progress(value: float) -> None:
+            text = f"Đang upload: {value:.0f}%"
+            self.detail_page.facebook_status.setText(text)
+            self.detail_page.facebook_action_status.set_status("Đang đăng Facebook…", text)
+
+        worker.progressChanged.connect(publish_progress)
         worker.succeeded.connect(lambda result: self._facebook_publish_succeeded(result, project_id))
         worker.failed.connect(lambda message: self._facebook_publish_failed(message, project_id, job_id))
         worker.finished.connect(self._facebook_publish_finished)
@@ -902,6 +915,7 @@ class MainWindow(QMainWindow):
 
     def _facebook_publish_finished(self) -> None:
         self.detail_page.facebook_publish_button.set_loading(False)
+        self.detail_page.facebook_action_status.set_loading(False)
         worker = self._facebook_publish_worker
         self._facebook_publish_worker = None
         if worker is not None:
