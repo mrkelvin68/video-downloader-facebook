@@ -15,9 +15,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 import logging
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 from app.database.connection import Database
-from app.services.credential_service import get_apify_token
 from app.services.logging_service import log_download, log_error, redactor
 from app.services.video_download_provider import VideoDownloadProvider, VideoPlatform, provider_for_url
 
@@ -48,9 +49,8 @@ def classify_download_error(message: str) -> tuple[str, bool]:
         marker in normalized
         for marker in ("cannot parse data", "no video formats found")
     ):
-        # Facebook intermittently returns incomplete extraction data for public
-        # Reels. This is not proof that authentication is required.
-        return "extractor", True
+        # Retrying an identical parser failure cannot recover a changed page.
+        return "FACEBOOK_EXTRACTOR_FAILED", False
     if any(
         marker in normalized
         for marker in ("http error 403", "http 403", "error 403")
@@ -168,6 +168,8 @@ class DownloadService:
 
         provider = provider_for_url(str(video["source_url"]))
         source_url = provider.normalized_url if provider else str(video["source_url"])
+        provider_name = provider.platform.value if provider else "unknown"
+        external_id = provider.video_id if provider else "unknown"
 
         root = Path(project["output_dir"]).resolve()
         root.mkdir(parents=True, exist_ok=True)
@@ -232,7 +234,12 @@ class DownloadService:
                     "-o", str(folder / (video["video_code"] + ".%(ext)s")),
                     source_url,
                 ])
-                log_download(f"Starting download: video_code={video['video_code']}, platform={provider.platform.value if provider else 'unknown'}, url={source_url}")
+                log_download(
+                    "Starting download: "
+                    f"video_code={video['video_code']}, platform={provider_name}, "
+                    f"video_id={external_id}, extractor={provider_name}, "
+                    f"yt_dlp={self._yt_dlp_version()}, strategy=canonical_url, url={source_url}"
+                )
 
                 def run_ytdlp(candidate_command: list[str]):
                     if progress_callback is None:
@@ -263,44 +270,31 @@ class DownloadService:
                         retryable=True,
                     ) from exc
                 initial_reason = result.stderr or result.stdout or ""
-                if (
+                facebook_extractor_failure = (
                     result.returncode != 0
                     and provider is not None
                     and provider.platform == VideoPlatform.FACEBOOK
                     and self._is_facebook_extractor_failure(initial_reason)
+                )
+                if facebook_extractor_failure and self._facebook_redirects_to_login(
+                    f"https://m.facebook.com/watch/?v={external_id}&_rdr"
                 ):
-                    # A public Reel can intermittently return incomplete page
-                    # data. Retry its public URL once before considering auth.
-                    result = run_ytdlp(command)
-                    initial_reason = result.stderr or result.stdout or ""
+                    raise DownloadError(
+                        "Facebook yêu cầu đăng nhập cho URL này; không tự động đọc cookie hoặc thông tin đăng nhập từ trình duyệt.",
+                        category="FACEBOOK_AUTH_REQUIRED",
+                        retryable=False,
+                    )
                 authentication_failure = (
                     result.returncode != 0
                     and provider is not None
                     and provider.platform in {VideoPlatform.FACEBOOK, VideoPlatform.YOUTUBE}
                     and self._requires_facebook_authentication(initial_reason)
                 )
-                attempted_browsers: list[str] = []
                 if authentication_failure and cookies_file:
                     cookie_command = [
                         *command[:-1], "--cookies", cookies_file, command[-1]
                     ]
                     result = run_ytdlp(cookie_command)
-                if authentication_failure and result.returncode != 0:
-                    for browser in self._find_browser_cookie_sources():
-                        attempted_browsers.append(browser.split(":", 1)[0])
-                        browser_command = [
-                            *command[:-1], "--cookies-from-browser", browser, command[-1]
-                        ]
-                        result = run_ytdlp(browser_command)
-                        if result.returncode == 0:
-                            break
-                if result.returncode != 0 and authentication_failure:
-                    fallback_url = self._resolve_facebook_mirror_url(
-                        video=video, provider=provider
-                    )
-                    if fallback_url:
-                        fallback_command = [*command[:-1], fallback_url]
-                        result = run_ytdlp(fallback_command)
                 if result.returncode != 0:
                     reason = (result.stderr or result.stdout or "Không rõ nguyên nhân").strip()
                     if authentication_failure:
@@ -313,19 +307,25 @@ class DownloadService:
                                 category="authentication",
                                 retryable=False,
                             )
-                        browser_note = (
-                            f" Đã thử phiên đăng nhập: {', '.join(attempted_browsers)}."
-                            if attempted_browsers else ""
-                        )
                         raise DownloadError(
                             "Video yêu cầu đăng nhập Facebook (ví dụ: nội dung tài trợ/affiliate hoặc giới hạn độ tuổi) "
-                            "hoặc không khả dụng ở chế độ khách. Hãy đăng nhập Facebook trên Chrome/Edge rồi thử lại, "
-                            "hoặc đặt file cookies.txt tại "
-                            f"~/.video-downloader-facebook/cookies.txt để tải.{browser_note} ({reason[-300:]})",
-                            category="unavailable",
+                            "hoặc không khả dụng ở chế độ khách. Hãy cung cấp file cookies.txt do bạn chủ động xuất "
+                            "tại ~/.video-downloader-facebook/cookies.txt rồi thử lại. "
+                            f"Ứng dụng không tự động đọc cookie trình duyệt. ({reason[-300:]})",
+                            category="FACEBOOK_AUTH_REQUIRED",
                             retryable=False,
                         )
                     category, retryable = classify_download_error(reason)
+                    if provider is not None and provider.platform == VideoPlatform.FACEBOOK:
+                        category = {
+                            "network": "FACEBOOK_NETWORK_ERROR",
+                            "unavailable": "FACEBOOK_VIDEO_UNAVAILABLE",
+                            "FACEBOOK_EXTRACTOR_FAILED": "FACEBOOK_EXTRACTOR_FAILED",
+                            "other": "FACEBOOK_DOWNLOAD_FAILED",
+                            "unsupported": "FACEBOOK_DOWNLOAD_FAILED",
+                            "forbidden": "FACEBOOK_DOWNLOAD_FAILED",
+                            "blocked": "FACEBOOK_DOWNLOAD_FAILED",
+                        }.get(category, category)
                     if (
                         provider is not None
                         and provider.platform == VideoPlatform.YOUTUBE
@@ -381,7 +381,13 @@ class DownloadService:
                 return output, thumbnail
         except Exception as download_error:
             video_code = video["video_code"] if video is not None else "unknown"
-            log_download(f"Download failed: video_code={video_code}, error={download_error}", level=logging.WARNING)
+            log_download(
+                "Download failed: "
+                f"video_code={video_code}, platform={provider_name if 'provider_name' in locals() else 'unknown'}, "
+                f"video_id={external_id if 'external_id' in locals() else 'unknown'}, "
+                f"url={source_url if 'source_url' in locals() else 'unknown'}, result={download_error}",
+                level=logging.WARNING,
+            )
             log_error(f"Download error on video {video_code}", exc=download_error)
             try:
                 self._set_status(project_id, video_id, "failed")
@@ -584,11 +590,12 @@ class DownloadService:
         return None
 
     @staticmethod
-    def _find_browser_cookie_sources() -> list[str]:
-        configured = os.environ.get("YTDLP_COOKIES_FROM_BROWSER", "").strip()
-        # Browser cookies are sensitive. Use them only after the user explicitly
-        # opts in by configuring the browser/profile source.
-        return [configured] if configured else []
+    def _yt_dlp_version() -> str:
+        try:
+            from yt_dlp.version import __version__
+            return __version__
+        except ImportError:
+            return "unknown"
 
     @staticmethod
     def _find_javascript_runtime() -> str | None:
@@ -619,62 +626,16 @@ class DownloadService:
         )
 
     @staticmethod
-    def _resolve_facebook_mirror_url(
-        *, video: object, provider: VideoDownloadProvider | None
-    ) -> str | None:
-        if provider is None or provider.platform != VideoPlatform.FACEBOOK:
-            return None
-        title = str(video["title"] or "").strip() if video else ""
-        if not title:
-            return None
-        query = title.split("|")[-1].strip() if "|" in title else title
-        if len(query) < 8:
-            return None
+    def _facebook_redirects_to_login(url: str) -> bool:
+        """Recognize Facebook's anonymous login wall without using cookies."""
         try:
-            token = get_apify_token().strip()
+            request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urlopen(request, timeout=30) as response:
+                final_url = response.geturl()
         except Exception:
-            return None
-        if not token:
-            return None
-        from urllib.request import Request, urlopen
-
-        payload = {
-            "searchType": "posts",
-            "categories": [query],
-            "resultsLimit": 5,
-        }
-        req = Request(
-            "https://api.apify.com/v2/acts/apify~facebook-search-scraper/run-sync-get-dataset-items",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {token}",
-            },
-            method="POST",
-        )
-        try:
-            with urlopen(req, timeout=45) as resp:
-                items = json.loads(resp.read().decode("utf-8"))
-        except Exception:
-            return None
-        if not isinstance(items, list):
-            return None
-        normalized_query = " ".join(query.casefold().split())
-        source_id = provider.video_id
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            cand_url = str(item.get("url") or "").strip()
-            cand_text = " ".join(str(item.get("text") or "").casefold().split())
-            cand_provider = provider_for_url(cand_url)
-            if (
-                cand_provider is not None
-                and cand_provider.platform == VideoPlatform.FACEBOOK
-                and cand_provider.video_id != source_id
-                and normalized_query in cand_text
-            ):
-                return cand_provider.normalized_url
-        return None
+            return False
+        parts = urlsplit(final_url)
+        return (parts.hostname or "").casefold().endswith("facebook.com") and parts.path.rstrip("/").casefold() == "/login"
 
     @staticmethod
     def _find_ffmpeg() -> str | None:

@@ -81,6 +81,10 @@ class DownloadWorker(QThread):
                 except DownloadError as exc:
                     if not exc.retryable or retry_count >= MAX_RETRIES:
                         raise
+                    log_download(
+                        f"Retrying download: job_id={self.job_id}, category={exc.category}, "
+                        f"attempt={retry_count + 1}/{MAX_RETRIES}, error={exc}"
+                    )
                     retry_count = jobs.record_retry(self.job_id, str(exc))
                     if retry_count is None:
                         raise
