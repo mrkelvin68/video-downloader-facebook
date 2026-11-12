@@ -196,6 +196,8 @@ class MainWindow(QMainWindow):
         self.queue_running = False
         self.pause_after_current = False
         self.queue_error: str | None = None
+        self._queue_run_errors: list[str] = []
+        self._queue_run_succeeded: int = 0
         self.pending_project_delete: tuple[str, bool] | None = None
         self.pending_queue_delete: tuple[list[str], str] | None = None
         self.download_queue.recover_interrupted()
@@ -288,6 +290,7 @@ class MainWindow(QMainWindow):
         self.detail_page.runNowRequested.connect(self.run_now)
         self.detail_page.enqueueRequested.connect(self.add_selected_to_queue)
         self.detail_page.queueRequested.connect(self.show_queue)
+        self.detail_page.cancelDownloadRequested.connect(self._cancel_active_downloads)
         self.detail_page.selectAllRequested.connect(
             self.detail_page.video_table.select_all
         )
@@ -639,6 +642,10 @@ class MainWindow(QMainWindow):
         worker = FacebookRequestWorker(operation, self)
         self._facebook_workers[kind] = worker
         button.set_loading(True)
+        self.detail_page.facebook_action_status.set_status(
+            "Đang xử lý Facebook…", kind.replace("-", " ").title()
+        )
+        self.detail_page.facebook_action_status.set_loading(True)
 
         def succeeded(value) -> None:
             if self.current_project is not None and self.current_project.uuid == project_id:
@@ -646,11 +653,13 @@ class MainWindow(QMainWindow):
 
         def failed(message: str) -> None:
             if self.current_project is not None and self.current_project.uuid == project_id:
+                self.detail_page.facebook_action_status.set_status("Facebook thất bại", message)
                 QMessageBox.warning(self, "Facebook", message)
 
         def finished() -> None:
             self._facebook_workers.pop(kind, None)
             button.set_loading(False)
+            self.detail_page.facebook_action_status.set_loading(False)
             worker.deleteLater()
 
         worker.succeeded.connect(succeeded)
@@ -767,6 +776,8 @@ class MainWindow(QMainWindow):
         database_path = self.database.path
         self.detail_page.facebook_publish_button.set_loading(True)
         self.detail_page.facebook_status.setText("Đang chuẩn bị đăng video…")
+        self.detail_page.facebook_action_status.set_status("Đang đăng Facebook…", "Đang chuẩn bị video")
+        self.detail_page.facebook_action_status.set_loading(True)
 
         def publish(progress_callback):
             worker_database = Database(database_path)
@@ -779,7 +790,12 @@ class MainWindow(QMainWindow):
 
         worker = FacebookPublishWorker(publish, self)
         self._facebook_publish_worker = worker
-        worker.progressChanged.connect(lambda value: self.detail_page.facebook_status.setText(f"Đang upload: {value:.0f}%"))
+        def publish_progress(value: float) -> None:
+            text = f"Đang upload: {value:.0f}%"
+            self.detail_page.facebook_status.setText(text)
+            self.detail_page.facebook_action_status.set_status("Đang đăng Facebook…", text)
+
+        worker.progressChanged.connect(publish_progress)
         worker.succeeded.connect(lambda result: self._facebook_publish_succeeded(result, project_id))
         worker.failed.connect(lambda message: self._facebook_publish_failed(message, project_id, job_id))
         worker.finished.connect(self._facebook_publish_finished)
@@ -899,6 +915,7 @@ class MainWindow(QMainWindow):
 
     def _facebook_publish_finished(self) -> None:
         self.detail_page.facebook_publish_button.set_loading(False)
+        self.detail_page.facebook_action_status.set_loading(False)
         worker = self._facebook_publish_worker
         self._facebook_publish_worker = None
         if worker is not None:
@@ -1959,6 +1976,8 @@ class MainWindow(QMainWindow):
         self.queue_running = True
         self._set_queue_loading(True)
         self.pause_after_current = False
+        self._queue_run_errors.clear()
+        self._queue_run_succeeded = 0
         self.queue_page.queue_status.setText(
             f"Đang chạy hàng đợi ({self.queue_concurrency} luồng song song)."
         )
@@ -1977,6 +1996,14 @@ class MainWindow(QMainWindow):
             "Sẽ tạm dừng sau khi các video đang tải hoàn tất."
         )
         self.detail_page.queue_status.setText("Tạm dừng sau video hiện tại.")
+
+    def _cancel_active_downloads(self) -> None:
+        if not self.queue_workers:
+            self.pause_queue()
+            return
+        for worker in list(self.queue_workers.values()):
+            worker.request_cancel()
+        self.pause_queue()
 
     def _start_next_queue_job(self) -> None:
         """Fill every free download slot with the highest-priority queued job."""
@@ -2003,7 +2030,15 @@ class MainWindow(QMainWindow):
                     self.queue_running = False
                     self._set_queue_loading(False)
                     self.queue_page.queue_status.setText("Không còn job đang chờ.")
-                    self.detail_page.queue_status.setText("Hàng đợi đã hoàn tất.")
+                    if self._queue_run_errors:
+                        err_count = len(self._queue_run_errors)
+                        if self._queue_run_succeeded == 0:
+                            status = f"Tải thất bại: {self._queue_run_errors[-1]}"
+                        else:
+                            status = f"Hoàn tất: {self._queue_run_succeeded} video xong, {err_count} video lỗi."
+                    else:
+                        status = "Hàng đợi đã hoàn tất."
+                    self.detail_page.queue_status.setText(status)
                     self.refresh_queue()
                 break
             self._launch_queue_worker(job)
@@ -2068,12 +2103,18 @@ class MainWindow(QMainWindow):
         self.queue_page.table.queue_model.update_progress(
             job_id, percent, downloaded, total, speed, eta
         )
+        # Keep the project video table in sync with the queue page while a
+        # worker is active; it otherwise only refreshed after the job ended.
+        self._refresh_project_videos()
         code = self._queue_codes.get(job_id, job_id)
         rate = f"{speed / 1024 / 1024:.1f} MB/s" if speed else "—"
         remaining = f" · còn {eta}s" if eta is not None else ""
         status = f"Đang tải {code}: {percent:.1f}% · {rate}{remaining}"
         self.queue_page.queue_status.setText(status)
         self.detail_page.queue_status.setText(status)
+        video_id = self._queue_video_ids.get(job_id)
+        if video_id and hasattr(self.detail_page.video_table, "update_video_progress"):
+            self.detail_page.video_table.update_video_progress(video_id, percent)
         self._update_queue_stats()
 
     def _run_pending_deletions(self) -> bool:
@@ -2107,6 +2148,10 @@ class MainWindow(QMainWindow):
         worker.wait()
         self._release_queue_job(job_id)
         self.queue_error = message if not succeeded else None
+        if not succeeded:
+            self._queue_run_errors.append(message)
+        else:
+            self._queue_run_succeeded += 1
         can_continue = True
         if not succeeded:
             try:

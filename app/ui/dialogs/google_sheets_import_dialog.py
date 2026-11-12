@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from app.services.google_sheets_service import fetch_google_sheet_csv, parse_google_sheet_csv
 from app.ui.pages.viral_reels_page import CancellableWorker
+from app.ui.widgets.action_status import ActionStatusBar
 from app.ui.widgets.loading_button import LoadingButton
 
 
@@ -42,6 +43,9 @@ class GoogleSheetsImportDialog(QDialog):
         self.preview_button = LoadingButton("Preview dữ liệu")
         self.preview_button.clicked.connect(self.preview)
         layout.addWidget(self.preview_button)
+        self.action_status = ActionStatusBar(self)
+        self.action_status.set_status("Đang đọc Google Sheets…")
+        layout.addWidget(self.action_status)
         self.summary = QLabel("Chưa tải dữ liệu.")
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
@@ -68,6 +72,8 @@ class GoogleSheetsImportDialog(QDialog):
             self.summary.setText("Vui lòng nhập Google Sheets URL.")
             return
         self.preview_button.set_loading(True)
+        self.action_status.set_status("Đang đọc Google Sheets…", "Đang kết nối")
+        self.action_status.set_loading(True)
         self.import_button.setEnabled(False)
         self.summary.setText("Đang đọc Google Sheets…")
         worker = CancellableWorker(lambda _cancel, _progress: self._load(url, sheet))
@@ -107,6 +113,7 @@ class GoogleSheetsImportDialog(QDialog):
     def _finished(self) -> None:
         self._worker = None
         self.preview_button.set_loading(False)
+        self.action_status.set_loading(False)
 
     def closeEvent(self, event) -> None:
         if self._worker is not None:

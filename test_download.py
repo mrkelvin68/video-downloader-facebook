@@ -45,7 +45,7 @@ class DownloadTests(unittest.TestCase):
             ("The operation timed out", "timeout", True),
             ("Login required", "authentication", False),
             ("This video is not available", "unavailable", False),
-            ("ERROR: [facebook] 28755749490762508: Cannot parse data", "extractor", True),
+            ("ERROR: [facebook] 28755749490762508: Cannot parse data", "FACEBOOK_EXTRACTOR_FAILED", False),
             ("HTTP Error 404: Not Found", "unavailable", False),
             ("ERROR: unable to download video data: HTTP Error 403: Forbidden", "forbidden", False),
             ("HTTP Error 503: Service Unavailable", "network", True),
@@ -144,20 +144,20 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(self.db.list_videos(self.project)[0]["download_status"], "failed")
         self.assertFalse((self.root / "project" / "episode-1").exists())
 
-    def test_cannot_parse_data_is_retryable_extractor_failure(self):
+    def test_cannot_parse_data_is_permanent_extractor_failure_without_login_redirect(self):
         runner = lambda *a, **k: SimpleNamespace(
             returncode=1,
             stderr="ERROR: [facebook] 28755749490762508: Cannot parse data",
             stdout="",
         )
         service = DownloadService(self.db, runner=runner)
-        with patch.object(service, "_resolve_facebook_mirror_url", return_value=None):
+        with patch.object(service, "_facebook_redirects_to_login", return_value=False):
             with self.assertRaises(DownloadError) as error:
                 service.download(self.project, self.video["id"])
-        self.assertEqual(error.exception.category, "extractor")
-        self.assertTrue(error.exception.retryable)
+        self.assertEqual(error.exception.category, "FACEBOOK_EXTRACTOR_FAILED")
+        self.assertFalse(error.exception.retryable)
 
-    def test_cannot_parse_data_retries_the_original_facebook_reel(self):
+    def test_cannot_parse_data_with_login_redirect_reports_auth_without_retry(self):
         calls = []
 
         def runner(command, **kwargs):
@@ -168,24 +168,21 @@ class DownloadTests(unittest.TestCase):
                     stdout='{"streams":[{"codec_type":"video"}],"format":{"duration":"1.0"}}',
                 )
             calls.append(list(command))
-            if len(calls) == 1:
-                return SimpleNamespace(
-                    returncode=1,
-                    stderr="ERROR: [facebook] 28755749490762508: Cannot parse data",
-                    stdout="",
-                )
-            template = command[command.index("-o") + 1]
-            output = Path(template.replace("%(ext)s", "mp4"))
-            output.write_bytes(b"mock mp4")
-            return SimpleNamespace(returncode=0, stderr="", stdout="")
+            return SimpleNamespace(
+                returncode=1,
+                stderr="ERROR: [facebook] 28755749490762508: Cannot parse data",
+                stdout="",
+            )
 
         service = DownloadService(self.db, runner=runner)
-        out, _ = service.download(self.project, self.video["id"])
-        self.assertTrue(out.is_file())
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[1][-1], "https://facebook.com/watch/?v=1234")
+        with patch.object(service, "_facebook_redirects_to_login", return_value=True):
+            with self.assertRaises(DownloadError) as error:
+                service.download(self.project, self.video["id"])
+        self.assertEqual(error.exception.category, "FACEBOOK_AUTH_REQUIRED")
+        self.assertFalse(error.exception.retryable)
+        self.assertEqual(len(calls), 1)
 
-    def test_facebook_auth_failure_retries_with_explicitly_configured_browser_cookies(self):
+    def test_facebook_auth_failure_does_not_read_browser_cookies(self):
         calls = []
 
         def runner(command, **kwargs):
@@ -195,26 +192,20 @@ class DownloadTests(unittest.TestCase):
                     stdout='{"streams":[{"codec_type":"video"}],"format":{"duration":"1.0"}}',
                 )
             calls.append(list(command))
-            if len(calls) == 1:
-                return SimpleNamespace(
-                    returncode=1,
-                    stderr="ERROR: [facebook] 28755749490762508: Login required",
-                    stdout="",
-                )
-            template = command[command.index("-o") + 1]
-            Path(template.replace("%(ext)s", "mp4")).write_bytes(b"mock mp4")
-            return SimpleNamespace(returncode=0, stderr="", stdout="")
+            return SimpleNamespace(
+                returncode=1,
+                stderr="ERROR: [facebook] 28755749490762508: Login required",
+                stdout="",
+            )
 
         service = DownloadService(self.db, runner=runner)
-        with patch.object(service, "_find_cookies_file", return_value=None), patch.object(
-            service, "_find_browser_cookie_sources", return_value=["chrome"]
-        ):
-            output, _ = service.download(self.project, self.video["id"])
+        with patch.object(service, "_find_cookies_file", return_value=None):
+            with self.assertRaises(DownloadError) as error:
+                service.download(self.project, self.video["id"])
 
-        self.assertTrue(output.is_file())
-        self.assertEqual(len(calls), 2)
-        cookie_option = calls[1].index("--cookies-from-browser")
-        self.assertEqual(calls[1][cookie_option + 1], "chrome")
+        self.assertEqual(error.exception.category, "FACEBOOK_AUTH_REQUIRED")
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("--cookies-from-browser", calls[0])
 
     def test_cookies_file_is_not_sent_for_public_download(self):
         cookies_path = self.root / "cookies.txt"

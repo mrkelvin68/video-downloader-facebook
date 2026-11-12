@@ -82,6 +82,8 @@ class VideoPlatformImportTests(unittest.TestCase):
     def test_recognizes_facebook_reel_and_watch(self):
         for url, expected_id in (
             ("https://www.facebook.com/reel/1195289147628387?tracking=1", "1195289147628387"),
+            ("https://www.facebook.com/reel/898484852594823", "898484852594823"),
+            ("https://www.facebook.com/reel/899539216487237", "899539216487237"),
             ("https://www.facebook.com/watch/?v=647537299265662&utm_source=test", "647537299265662"),
         ):
             with self.subTest(url=url):

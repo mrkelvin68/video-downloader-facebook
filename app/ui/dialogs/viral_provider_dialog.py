@@ -5,6 +5,7 @@ from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QFormLayout,
 from app.services.apify_facebook_provider import ApifyFacebookReelsProvider
 from app.services.credential_service import delete_apify_token, get_apify_token, set_apify_token
 from app.ui.widgets.loading_button import LoadingButton
+from app.ui.widgets.action_status import ActionStatusBar
 
 SETTINGS_ORGANIZATION = "VideoDownloader"
 SETTINGS_APPLICATION = "VideoDownloaderFacebook"
@@ -40,6 +41,9 @@ class ViralProviderDialog(QDialog):
         self.test_button = LoadingButton("Test Connection")
         self.test_button.clicked.connect(self.test_connection)
         layout.addWidget(self.test_button)
+        self.action_status = ActionStatusBar(self)
+        self.action_status.set_status("Đang kiểm tra kết nối provider…")
+        layout.addWidget(self.action_status)
         self._test_worker = None
         delete = QPushButton("Delete saved token")
         delete.clicked.connect(self.delete_token)
@@ -68,6 +72,7 @@ class ViralProviderDialog(QDialog):
         worker = CancellableWorker(lambda _cancel, _progress: self._provider(token).test_connection())
         self._test_worker = worker
         self.test_button.set_loading(True)
+        self.action_status.set_loading(True)
         worker.signals.result.connect(lambda _result: self.status.setText("Connection successful."))
         worker.signals.error.connect(self.status.setText)
         worker.signals.finished.connect(self._test_finished)
@@ -76,6 +81,7 @@ class ViralProviderDialog(QDialog):
     def _test_finished(self):
         self._test_worker = None
         self.test_button.set_loading(False)
+        self.action_status.set_loading(False)
 
     def delete_token(self):
         try:

@@ -25,6 +25,8 @@ from app.models.project import Project
 from app.ui.widgets.video_table import VideoTable
 from app.ui.widgets.sidebar import button_icon
 from app.ui.widgets.loading_button import LoadingButton
+from app.ui.widgets.action_status import ActionStatusBar
+from app.ui.widgets.download_toast_card import DownloadToastCard
 
 
 class ProjectDetailPage(QWidget):
@@ -38,6 +40,7 @@ class ProjectDetailPage(QWidget):
     runNowRequested = Signal()
     enqueueRequested = Signal()
     queueRequested = Signal()
+    cancelDownloadRequested = Signal()
     selectAllRequested = Signal()
     clearSelectionRequested = Signal()
     deleteVideosRequested = Signal()
@@ -159,6 +162,8 @@ class ProjectDetailPage(QWidget):
         self.video_search_field.currentIndexChanged.connect(self._apply_video_search)
         import_layout.addWidget(self.video_table, 1)
         download_actions = QHBoxLayout()
+        download_actions.setContentsMargins(0, 10, 0, 4)
+        download_actions.setSpacing(10)
         self.run_now_button = LoadingButton("▶ Chạy ngay")
         self.run_now_button.setObjectName("primary")
         self.run_now_button.clicked.connect(self.runNowRequested.emit)
@@ -171,13 +176,18 @@ class ProjectDetailPage(QWidget):
         self.delete_videos_bottom_button = QPushButton("Xóa video đã chọn")
         self.delete_videos_bottom_button.setObjectName("danger")
         self.delete_videos_bottom_button.clicked.connect(self.deleteVideosRequested.emit)
-        self.queue_status = QLabel("Hàng đợi đang dừng")
-        self.queue_status.setObjectName("detailMeta")
+        self.queue_status = DownloadToastCard(self)
+        self.queue_status.cancelRequested.connect(self.cancelDownloadRequested.emit)
         download_actions.addWidget(self.run_now_button)
         download_actions.addWidget(self.enqueue_button)
         download_actions.addWidget(self.queue_button)
         download_actions.addWidget(self.delete_videos_bottom_button)
-        download_actions.addWidget(self.queue_status, 1)
+        download_actions.addStretch(1)
+        download_actions.addWidget(
+            self.queue_status,
+            0,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
         tabs = QTabWidget()
         tabs.setObjectName("projectTabs")
         publish_tab = QWidget()
@@ -221,6 +231,9 @@ class ProjectDetailPage(QWidget):
         self.facebook_disconnect_button = QPushButton("Ngắt kết nối"); self.facebook_disconnect_button.setObjectName("danger"); self.facebook_disconnect_button.clicked.connect(self.facebookDisconnectRequested.emit)
         for button in (self.facebook_test_button, self.facebook_refresh_button, self.facebook_disconnect_button): toolbar.addWidget(button)
         connection_layout.addLayout(toolbar)
+        self.facebook_action_status = ActionStatusBar(connection)
+        self.facebook_action_status.set_status("Đang xử lý Facebook…")
+        connection_layout.addWidget(self.facebook_action_status)
         self.facebook_connection_form = QWidget()
         form = QHBoxLayout(self.facebook_connection_form)
         form.setContentsMargins(0, 0, 0, 0)
