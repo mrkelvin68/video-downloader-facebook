@@ -19,6 +19,7 @@ class Sidebar(QFrame):
     queueRequested = Signal()
     viralReelsRequested = Signal()
     autoCommentRequested = Signal()
+    pageManagementRequested = Signal()
     settingsRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -50,6 +51,7 @@ class Sidebar(QFrame):
             ("Hàng đợi tải video", QStyle.StandardPixmap.SP_ArrowDown, False, True),
             ("🔥 Viral Reels Finder", QStyle.StandardPixmap.SP_DialogYesButton, False, True),
             ("Auto Comment", QStyle.StandardPixmap.SP_MessageBoxInformation, False, True),
+            ("Quản lý Fanpage", QStyle.StandardPixmap.SP_DriveNetIcon, False, True),
             ("Live Logs", QStyle.StandardPixmap.SP_FileDialogDetailedView, False, False),
             ("Cài đặt", QStyle.StandardPixmap.SP_FileDialogInfoView, False, True),
         ):
@@ -61,6 +63,9 @@ class Sidebar(QFrame):
             if text == "Auto Comment":
                 self.auto_comment_button = button
                 button.clicked.connect(self.autoCommentRequested.emit)
+            if text == "Quản lý Fanpage":
+                self.page_management_button = button
+                button.clicked.connect(self.pageManagementRequested.emit)
             if not available:
                 button.setToolTip("Chức năng sẽ có ở giai đoạn sau")
             elif text == "Quản lý dự án":
@@ -93,6 +98,7 @@ class Sidebar(QFrame):
         self.queue_button.setProperty("active", section == "queue")
         self.viral_reels_button.setProperty("active", section == "viral-reels")
         self.auto_comment_button.setProperty("active", section == "auto-comment")
-        for button in (self.projects_button, self.queue_button, self.viral_reels_button, self.auto_comment_button):
+        self.page_management_button.setProperty("active", section == "page-management")
+        for button in (self.projects_button, self.queue_button, self.viral_reels_button, self.auto_comment_button, self.page_management_button):
             button.style().unpolish(button)
             button.style().polish(button)

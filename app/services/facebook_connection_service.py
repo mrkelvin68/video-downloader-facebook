@@ -217,6 +217,22 @@ class FacebookConnectionService:
             raise FacebookConnectionError("Chưa lưu thông tin kết nối Facebook.")
         return self.client_factory(token).validate_and_list_pages()
 
+    def sync_pages(self, project_id: str) -> list[dict[str, Any]]:
+        """Refresh locally stored Page metadata using the existing Meta token."""
+        token = get_meta_token()
+        if not token:
+            raise FacebookConnectionError("Chưa lưu thông tin kết nối Facebook.")
+        pages = self.client_factory(token).validate_and_list_pages()
+        current = self.publishing.list_pages(project_id)
+        default_page_id = next((row["page_id"] for row in current if row["is_default"]), None)
+        if default_page_id not in {str(page["id"]) for page in pages}:
+            default_page_id = None
+        self.publishing.save_pages(project_id, pages, default_page_id)
+        for page in pages:
+            if page.get("access_token"):
+                set_page_token(project_id, page["id"], page["access_token"])
+        return pages
+
     def set_default_page(self, project_id: str, page_id: str) -> None:
         pages = self.publishing.list_pages(project_id)
         if page_id not in {row["page_id"] for row in pages}:
@@ -229,3 +245,16 @@ class FacebookConnectionService:
         with self.database.connection:
             self.database.connection.execute("DELETE FROM facebook_pages WHERE project_id=?", (project_id,))
         delete_meta_token()
+
+    def disconnect_page(self, project_id: str, page_id: str) -> None:
+        """Remove one project Page and only its Credential Manager secret."""
+        page = self.database.connection.execute(
+            "SELECT 1 FROM facebook_pages WHERE project_id=? AND page_id=?", (project_id, page_id)
+        ).fetchone()
+        if page is None:
+            raise FacebookConnectionError("Không tìm thấy Fanpage cần ngắt kết nối.")
+        delete_page_token(project_id, page_id)
+        with self.database.connection:
+            self.database.connection.execute(
+                "DELETE FROM facebook_pages WHERE project_id=? AND page_id=?", (project_id, page_id)
+            )
