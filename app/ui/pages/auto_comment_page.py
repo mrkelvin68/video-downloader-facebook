@@ -1,9 +1,8 @@
 from __future__ import annotations
 from datetime import date
 from pathlib import Path
-from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget
 from app.database.connection import Database
 from app.services.auto_comment_comment_service import AutoCommentCommentService
 from app.services.auto_comment_service import AutoCommentService, AutoCommentValidationError, CommentItem, parse_comment_csv, select_comments
@@ -11,30 +10,6 @@ from app.ui.facebook_worker import FacebookRequestWorker
 from app.ui.widgets.loading_button import LoadingButton
 
 TARGET_LABELS={"READY":"Sẵn sàng","TARGET_UNVERIFIED":"Chưa xác minh","TARGET_UNSUPPORTED":"Không hỗ trợ","PERMISSION_DENIED":"Thiếu quyền","TOKEN_MISSING":"Thiếu token","TOKEN_EXPIRED":"Token hết hạn","WRONG_PAGE":"Sai Fanpage","ERROR":"Lỗi"}
-
-class SquareCheckDelegate(QStyledItemDelegate):
-    """One CheckStateRole indicator per row; never creates an editor widget."""
-    def paint(self,painter,option,index):
-        if index.column()!=0 or index.data(Qt.ItemDataRole.CheckStateRole) is None:
-            return super().paint(painter,option,index)
-        view_option=QStyleOptionViewItem(option);self.initStyleOption(view_option,index)
-        view_option.features &= ~QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
-        view_option.checkState=Qt.CheckState.Unchecked
-        option.widget.style().drawControl(QStyle.ControlElement.CE_ItemViewItem,view_option,painter,option.widget)
-        rect=option.rect;size=19;box=rect.adjusted((rect.width()-size)//2,(rect.height()-size)//2,-((rect.width()-size+1)//2),-((rect.height()-size+1)//2))
-        enabled=bool(index.flags()&Qt.ItemFlag.ItemIsEnabled);checked=index.data(Qt.ItemDataRole.CheckStateRole)==Qt.CheckState.Checked
-        painter.save();painter.setRenderHint(QPainter.RenderHint.Antialiasing);painter.setPen(QPen(QColor("#60a5fa") if enabled else QColor("#536273"),1));painter.setBrush(QColor("#2563eb") if checked and enabled else QColor("#111b2b"));painter.drawRect(box)
-        if checked:
-            painter.setPen(QPen(QColor("white") if enabled else QColor("#9ca3af"),2.2,Qt.PenStyle.SolidLine,Qt.PenCapStyle.RoundCap));painter.drawLine(box.left()+4,box.center().y(),box.left()+8,box.bottom()-4);painter.drawLine(box.left()+8,box.bottom()-4,box.right()-3,box.top()+4)
-        painter.restore()
-    def editorEvent(self,event,model,option,index):
-        if not (index.flags()&Qt.ItemFlag.ItemIsEnabled and index.flags()&Qt.ItemFlag.ItemIsUserCheckable):return False
-        toggle=event.type()==QEvent.Type.KeyPress and event.key()==Qt.Key.Key_Space
-        if event.type()==QEvent.Type.MouseButtonRelease and event.button()==Qt.MouseButton.LeftButton:
-            toggle=option.rect.contains(event.pos())
-        if not toggle:return False
-        value=index.data(Qt.ItemDataRole.CheckStateRole)==Qt.CheckState.Checked
-        return model.setData(index,Qt.CheckState.Unchecked if value else Qt.CheckState.Checked,Qt.ItemDataRole.CheckStateRole)
 
 class CheckboxTable(QTableWidget):
     def keyPressEvent(self,event):
@@ -53,7 +28,7 @@ class AutoCommentPage(QWidget):
         self.tabs=QTabWidget();self.tabs.addTab(self._posts(),"Bước 1");self.tabs.addTab(self._library(),"Bước 2");self.tabs.addTab(self._campaign(),"Bước 3");self.tabs.tabBar().hide();self.tabs.currentChanged.connect(self._workflow_step_changed);root.addWidget(self.tabs,1);nav=QHBoxLayout();self.back_button=QPushButton("← Quay lại");self.back_button.clicked.connect(lambda:self._go_to_step(self.tabs.currentIndex()-1));self.next_button=QPushButton("Tiếp theo →",objectName="primary");self.next_button.clicked.connect(self._next_step);nav.addWidget(self.back_button);nav.addStretch();nav.addWidget(self.next_button);root.addLayout(nav);self.refresh_pages();self.refresh_libraries();self._workflow_step_changed(0)
     @staticmethod
     def _table(columns,name,editable=False):
-        table=CheckboxTable(0,len(columns));table.setObjectName(name);table.setHorizontalHeaderLabels(columns);table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows);table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked|QAbstractItemView.EditTrigger.EditKeyPressed if editable else QAbstractItemView.EditTrigger.NoEditTriggers);table.setItemDelegateForColumn(0,SquareCheckDelegate(table));header=table.horizontalHeader();header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive);header.setStretchLastSection(True);return table
+        table=CheckboxTable(0,len(columns));table.setObjectName(name);table.setHorizontalHeaderLabels(columns);table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows);table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked|QAbstractItemView.EditTrigger.EditKeyPressed if editable else QAbstractItemView.EditTrigger.NoEditTriggers);header=table.horizontalHeader();header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive);header.setStretchLastSection(True);return table
     @staticmethod
     def _check_item(checked=True,enabled=True):
         item=QTableWidgetItem();flags=Qt.ItemFlag.ItemIsSelectable|Qt.ItemFlag.ItemIsUserCheckable

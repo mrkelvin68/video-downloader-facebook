@@ -5,7 +5,7 @@ import tempfile
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, QPoint, Qt, Signal
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtTest import QTest
 
@@ -355,7 +355,7 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         self.assertFalse(page.publish_one_button.is_loading)
         self.assertIn("comment-1", page.preview_status.text())
 
-    def test_square_checkbox_selection_model_handles_seven_mixed_rows_and_keyboard(self):
+    def test_native_checkbox_mouse_selection_model_handles_seven_mixed_rows_and_keyboard(self):
         page = AutoCommentPage(self.database)
         page.show(); self.app.processEvents()
         page.posts = [
@@ -366,10 +366,19 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         page.selected_post_ids = set(); page._render_posts()
         self.assertFalse(page.posts_table.item(0, 0).flags() & Qt.ItemFlag.ItemIsEditable)
         self.assertIsNone(page.posts_table.indexWidget(page.posts_table.model().index(0, 0)))
+        for row in range(3):
+            rect = page.posts_table.visualItemRect(page.posts_table.item(row, 0))
+            QTest.mouseClick(page.posts_table.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                             rect.topLeft() + QPoint(10, rect.height() // 2))
+            self.app.processEvents()
+        self.assertEqual(page.selected_post_ids, {post["post_id"] for post in page.posts[:3]})
+        self.assertTrue(all(page.posts_table.item(row, 0).checkState() == Qt.CheckState.Checked for row in range(3)))
         page.select_all_posts.click()
         self.assertEqual(page.selected_post_ids, {post["post_id"] for post in page.posts})
+        self.assertTrue(all(page.posts_table.item(row, 0).checkState() == Qt.CheckState.Checked for row in range(7)))
         page.clear_all_posts.click()
         self.assertEqual(page.selected_post_ids, set())
+        self.assertTrue(all(page.posts_table.item(row, 0).checkState() == Qt.CheckState.Unchecked for row in range(7)))
         page.posts_table.setCurrentCell(3, 0); page.posts_table.setFocus(); QTest.keyClick(page.posts_table, Qt.Key.Key_Space)
         self.assertEqual(page.selected_post_ids, {"reel:4"})
         page.posts_table.item(3, 0).setCheckState(Qt.CheckState.Unchecked)
