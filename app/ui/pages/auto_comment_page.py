@@ -1,8 +1,9 @@
 from __future__ import annotations
 from datetime import date
 from pathlib import Path
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget
 from app.database.connection import Database
 from app.services.auto_comment_comment_service import AutoCommentCommentService
 from app.services.auto_comment_service import AutoCommentService, AutoCommentValidationError, CommentItem, parse_comment_csv, select_comments
@@ -11,27 +12,64 @@ from app.ui.widgets.loading_button import LoadingButton
 
 TARGET_LABELS={"READY":"Sẵn sàng","TARGET_UNVERIFIED":"Chưa xác minh","TARGET_UNSUPPORTED":"Không hỗ trợ","PERMISSION_DENIED":"Thiếu quyền","TOKEN_MISSING":"Thiếu token","TOKEN_EXPIRED":"Token hết hạn","WRONG_PAGE":"Sai Fanpage","ERROR":"Lỗi"}
 
+class SquareCheckDelegate(QStyledItemDelegate):
+    """One CheckStateRole indicator per row; never creates an editor widget."""
+    def paint(self,painter,option,index):
+        if index.column()!=0 or index.data(Qt.ItemDataRole.CheckStateRole) is None:
+            return super().paint(painter,option,index)
+        view_option=QStyleOptionViewItem(option);self.initStyleOption(view_option,index)
+        view_option.features &= ~QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+        view_option.checkState=Qt.CheckState.Unchecked
+        option.widget.style().drawControl(QStyle.ControlElement.CE_ItemViewItem,view_option,painter,option.widget)
+        rect=option.rect;size=19;box=rect.adjusted((rect.width()-size)//2,(rect.height()-size)//2,-((rect.width()-size+1)//2),-((rect.height()-size+1)//2))
+        enabled=bool(index.flags()&Qt.ItemFlag.ItemIsEnabled);checked=index.data(Qt.ItemDataRole.CheckStateRole)==Qt.CheckState.Checked
+        painter.save();painter.setRenderHint(QPainter.RenderHint.Antialiasing);painter.setPen(QPen(QColor("#60a5fa") if enabled else QColor("#536273"),1));painter.setBrush(QColor("#2563eb") if checked and enabled else QColor("#111b2b"));painter.drawRect(box)
+        if checked:
+            painter.setPen(QPen(QColor("white") if enabled else QColor("#9ca3af"),2.2,Qt.PenStyle.SolidLine,Qt.PenCapStyle.RoundCap));painter.drawLine(box.left()+4,box.center().y(),box.left()+8,box.bottom()-4);painter.drawLine(box.left()+8,box.bottom()-4,box.right()-3,box.top()+4)
+        painter.restore()
+    def editorEvent(self,event,model,option,index):
+        if not (index.flags()&Qt.ItemFlag.ItemIsEnabled and index.flags()&Qt.ItemFlag.ItemIsUserCheckable):return False
+        toggle=event.type()==QEvent.Type.KeyPress and event.key()==Qt.Key.Key_Space
+        if event.type()==QEvent.Type.MouseButtonRelease and event.button()==Qt.MouseButton.LeftButton:
+            toggle=option.rect.contains(event.pos())
+        if not toggle:return False
+        value=index.data(Qt.ItemDataRole.CheckStateRole)==Qt.CheckState.Checked
+        return model.setData(index,Qt.CheckState.Unchecked if value else Qt.CheckState.Checked,Qt.ItemDataRole.CheckStateRole)
+
+class CheckboxTable(QTableWidget):
+    def keyPressEvent(self,event):
+        if event.key()==Qt.Key.Key_Space and self.currentColumn()==0:
+            item=self.currentItem()
+            if item is not None and item.flags()&Qt.ItemFlag.ItemIsUserCheckable and item.flags()&Qt.ItemFlag.ItemIsEnabled:
+                item.setCheckState(Qt.CheckState.Unchecked if item.checkState()==Qt.CheckState.Checked else Qt.CheckState.Checked);event.accept();return
+        super().keyPressEvent(event)
+
 class AutoCommentPage(QWidget):
     pageManagementRequested=Signal()
     def __init__(self,database,parent=None):
         super().__init__(parent);self.database=database;self.service=AutoCommentService(database);self.comment_service=AutoCommentCommentService(database);self.library_id=self.campaign_id=None;self.posts=[];self.selected_post_ids=set();self.preview_comments={};self.target_states={};self._posts_worker=self._target_worker=self._publish_worker=None;self._preview_busy=False;self.setAcceptDrops(True)
-        self.setStyleSheet("QTableWidget#autoCommentPostsTable::indicator,QTableWidget#autoCommentCommentsTable::indicator,QTableWidget#autoCommentPreviewTable::indicator{width:19px;height:19px} QTableWidget#autoCommentPostsTable::indicator:unchecked,QTableWidget#autoCommentCommentsTable::indicator:unchecked,QTableWidget#autoCommentPreviewTable::indicator:unchecked{border:1px solid #8b98aa;border-radius:9px;background:#111b2b} QTableWidget#autoCommentPostsTable::indicator:checked,QTableWidget#autoCommentCommentsTable::indicator:checked,QTableWidget#autoCommentPreviewTable::indicator:checked{border:1px solid #60a5fa;background:#2563eb} QLabel#autoCommentProgress{padding:8px 10px;border-radius:6px;background:#17243a;color:#dbeafe} QFrame#autoCommentLoading{background:rgba(10,18,32,210);border:1px solid #2d5f9e;border-radius:6px}")
+        self.setStyleSheet("QTableWidget#autoCommentPostsTable,QTableWidget#autoCommentCommentsTable,QTableWidget#autoCommentPreviewTable{selection-background-color:#1d4ed8;selection-color:white} QLabel#autoCommentProgress{padding:8px 10px;border-radius:6px;background:#17243a;color:#dbeafe} QFrame#autoCommentLoading{background:rgba(10,18,32,210);border:1px solid #2d5f9e;border-radius:6px}")
         root=QVBoxLayout(self);root.setContentsMargins(18,14,18,14);root.setSpacing(7);title=QLabel("Auto Comment",objectName="title");root.addWidget(title);root.addWidget(QLabel("Chuẩn bị, xác minh và xem trước cục bộ. Preview và lưu campaign không đăng comment Facebook."));self.workflow_progress=QLabel(objectName="autoCommentProgress");self.workflow_help=QLabel(wordWrap=True);self.workflow_message=QLabel(wordWrap=True);root.addWidget(self.workflow_progress);root.addWidget(self.workflow_help);root.addWidget(self.workflow_message)
         self.tabs=QTabWidget();self.tabs.addTab(self._posts(),"Bước 1");self.tabs.addTab(self._library(),"Bước 2");self.tabs.addTab(self._campaign(),"Bước 3");self.tabs.tabBar().hide();self.tabs.currentChanged.connect(self._workflow_step_changed);root.addWidget(self.tabs,1);nav=QHBoxLayout();self.back_button=QPushButton("← Quay lại");self.back_button.clicked.connect(lambda:self._go_to_step(self.tabs.currentIndex()-1));self.next_button=QPushButton("Tiếp theo →",objectName="primary");self.next_button.clicked.connect(self._next_step);nav.addWidget(self.back_button);nav.addStretch();nav.addWidget(self.next_button);root.addLayout(nav);self.refresh_pages();self.refresh_libraries();self._workflow_step_changed(0)
     @staticmethod
-    def _table(columns,name):
-        table=QTableWidget(0,len(columns));table.setObjectName(name);table.setHorizontalHeaderLabels(columns);table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows);table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked|QAbstractItemView.EditTrigger.EditKeyPressed);header=table.horizontalHeader();header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive);header.setStretchLastSection(True);return table
+    def _table(columns,name,editable=False):
+        table=CheckboxTable(0,len(columns));table.setObjectName(name);table.setHorizontalHeaderLabels(columns);table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows);table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked|QAbstractItemView.EditTrigger.EditKeyPressed if editable else QAbstractItemView.EditTrigger.NoEditTriggers);table.setItemDelegateForColumn(0,SquareCheckDelegate(table));header=table.horizontalHeader();header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive);header.setStretchLastSection(True);return table
+    @staticmethod
+    def _check_item(checked=True,enabled=True):
+        item=QTableWidgetItem();flags=Qt.ItemFlag.ItemIsSelectable|Qt.ItemFlag.ItemIsUserCheckable
+        if enabled:flags|=Qt.ItemFlag.ItemIsEnabled
+        item.setFlags(flags);item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked);return item
     def _posts(self):
         w=QWidget();l=QVBoxLayout(w);box=QGroupBox("Bước 1 · Chọn Fanpage & bài viết");f=QFormLayout(box);self.page=QComboBox();self.page.currentIndexChanged.connect(self._page_changed);manage=QPushButton("Quản lý Fanpage");manage.clicked.connect(self.pageManagementRequested.emit);pr=QHBoxLayout();pr.addWidget(self.page,1);pr.addWidget(manage);self.start_date,self.end_date=QDateEdit(),QDateEdit()
         for x in (self.start_date,self.end_date):x.setCalendarPopup(True);x.setDisplayFormat("yyyy-MM-dd");x.dateChanged.connect(self._invalidate)
         self.start_date.setDate(date.today().replace(day=1));self.end_date.setDate(date.today());self.content_type=QComboBox();self.content_type.addItems(["Tất cả","Reels","Bài viết thường"]);self.content_type.currentIndexChanged.connect(self._invalidate);self.load_posts_button=LoadingButton("Tải bài viết");self.load_posts_button.setObjectName("primary");self.load_posts_button.clicked.connect(self.load_posts);f.addRow("Fanpage",pr);f.addRow("Từ ngày",self.start_date);f.addRow("Đến ngày",self.end_date);f.addRow("Loại",self.content_type);f.addRow(self.load_posts_button);l.addWidget(box)
-        r=QHBoxLayout();self.select_all_posts=QCheckBox("Chọn tất cả");self.select_all_posts.setTristate(True);self.select_all_posts.stateChanged.connect(self._header_select_posts);verify=QPushButton("Xác minh target đã chọn");verify.clicked.connect(self.verify_selected_targets);self.post_status=QLabel("Chưa tải bài viết.");r.addWidget(self.select_all_posts);r.addWidget(verify);r.addWidget(self.post_status,1);l.addLayout(r);self.posts_table=self._table(["Chọn","Published At","Loại","ID nguồn","Target comment"],"autoCommentPostsTable");self.posts_table.setColumnWidth(0,58);self.posts_table.setColumnWidth(1,150);self.posts_table.setColumnWidth(2,75);self.posts_table.setColumnWidth(3,260);self.posts_table.itemChanged.connect(self._post_changed);l.addWidget(self.posts_table,1);self.loading_container=QFrame(self.posts_table.viewport(),objectName="autoCommentLoading");o=QVBoxLayout(self.loading_container);x=QLabel("Đang đồng bộ dữ liệu…");x.setAlignment(Qt.AlignmentFlag.AlignCenter);o.addWidget(x);self.table_overlay=self.loading_container;self.loading_container.hide();l.addWidget(QLabel("Reel chỉ trở thành target gửi được sau khi xác minh GET-only; không có ID nào được tự suy diễn."));return w
+        r=QHBoxLayout();self.select_all_posts=QPushButton("Chọn tất cả");self.select_all_posts.clicked.connect(lambda:self._all_posts(True));self.clear_all_posts=QPushButton("Bỏ chọn tất cả");self.clear_all_posts.clicked.connect(lambda:self._all_posts(False));verify=QPushButton("Xác minh target đã chọn");verify.clicked.connect(self.verify_selected_targets);self.post_status=QLabel("Chưa tải bài viết.");r.addWidget(self.select_all_posts);r.addWidget(self.clear_all_posts);r.addWidget(verify);r.addWidget(self.post_status,1);l.addLayout(r);self.posts_table=self._table(["Chọn","Published At","Loại","ID nguồn","Target comment"],"autoCommentPostsTable");self.posts_table.setColumnWidth(0,58);self.posts_table.setColumnWidth(1,150);self.posts_table.setColumnWidth(2,75);self.posts_table.setColumnWidth(3,260);self.posts_table.itemChanged.connect(self._post_changed);l.addWidget(self.posts_table,1);self.loading_container=QFrame(self.posts_table.viewport(),objectName="autoCommentLoading");o=QVBoxLayout(self.loading_container);x=QLabel("Đang đồng bộ dữ liệu…");x.setAlignment(Qt.AlignmentFlag.AlignCenter);o.addWidget(x);self.table_overlay=self.loading_container;self.loading_container.hide();l.addWidget(QLabel("Reel chỉ trở thành target gửi được sau khi xác minh GET-only; không có ID nào được tự suy diễn."));return w
     def _library(self):
         w=QWidget();l=QVBoxLayout(w);l.addWidget(QLabel("Bước 2 · Import CSV hoặc chỉnh sửa thư viện cục bộ. Thay đổi chưa lưu vẫn được giữ khi chuyển bước."));r=QHBoxLayout();self.library_picker=QComboBox();self.library_picker.currentIndexChanged.connect(self.open_library);self.library_name=QLineEdit("Thư viện comment");self.search=QLineEdit(placeholderText="Tìm comment…");self.search.textChanged.connect(self._filter)
         for x in (self.library_picker,self.library_name,self.search):r.addWidget(x,1)
         l.addLayout(r);r=QHBoxLayout()
         for text,fn in (("Import CSV",self.import_csv),("Thêm dòng",self.add_row),("Xóa đã chọn",self.delete_rows),("Lưu thư viện",self.save_library),("Xóa import",self.clear_rows)):x=QPushButton(text);x.clicked.connect(fn);r.addWidget(x)
-        self.csv_status=QLabel();r.addWidget(self.csv_status,1);l.addLayout(r);self.comments=self._table(["Bật","ID","Comment"],"autoCommentCommentsTable");self.comments.setColumnWidth(0,58);self.comments.setColumnWidth(1,100);self.comments.itemChanged.connect(self._changed);l.addWidget(self.comments,1);l.addWidget(QLabel("CSV gốc không bị thay đổi. Chỉ comment bật và hợp lệ được đưa vào preview."));return w
+        self.csv_status=QLabel();r.addWidget(self.csv_status,1);l.addLayout(r);self.comments=self._table(["Bật","ID","Comment"],"autoCommentCommentsTable",editable=True);self.comments.setColumnWidth(0,58);self.comments.setColumnWidth(1,100);self.comments.itemChanged.connect(self._changed);l.addWidget(self.comments,1);l.addWidget(QLabel("CSV gốc không bị thay đổi. Chỉ comment bật và hợp lệ được đưa vào preview."));return w
     def _campaign(self):
         w=QWidget();l=QVBoxLayout(w);box=QGroupBox("Bước 3 · Cấu hình & xem trước");f=QFormLayout(box);self.campaign_name=QLineEdit("Auto Comment draft");self.summary=QLabel();self.one=QRadioButton("Random 1 comment mỗi bài");self.three=QRadioButton("Random 3 comment khác nhau mỗi bài");self.one.setChecked(True);self.random_mode=QRadioButton("Ngẫu nhiên");self.sequential_mode=QRadioButton("Tuần tự");self.random_mode.setChecked(True);self.prevent_duplicates=QCheckBox("Không lặp nội dung trong cùng bài");self.prevent_duplicates.setChecked(True);r=QHBoxLayout()
         for x in (self.one,self.three,self.random_mode,self.sequential_mode,self.prevent_duplicates):r.addWidget(x);x.toggled.connect(self._invalidate)
@@ -86,13 +124,10 @@ class AutoCommentPage(QWidget):
     def _render_posts(self):
         self.posts_table.blockSignals(True);self.posts_table.setRowCount(0)
         for p in self.posts:
-            r=self.posts_table.rowCount();self.posts_table.insertRow(r);x=QTableWidgetItem();x.setCheckState(Qt.CheckState.Checked if p["post_id"] in self.selected_post_ids else Qt.CheckState.Unchecked);self.posts_table.setItem(r,0,x);source=p.get("source_post_id") or p.get("reel_id") or p["post_id"]
+            r=self.posts_table.rowCount();self.posts_table.insertRow(r);self.posts_table.setItem(r,0,self._check_item(p["post_id"] in self.selected_post_ids));source=p.get("source_post_id") or p.get("reel_id") or p["post_id"]
             for c,v in enumerate((p.get("published_at",""),p.get("post_type",""),source,self._target_status(p)),1):item=QTableWidgetItem(str(v));item.setData(Qt.ItemDataRole.UserRole,p["post_id"]);self.posts_table.setItem(r,c,item)
         self.posts_table.blockSignals(False);self._update_header_selection();self._summary()
-    def _update_header_selection(self):
-        self.select_all_posts.blockSignals(True);n=len(self.selected_post_ids);self.select_all_posts.setCheckState(Qt.CheckState.Checked if self.posts and n==len(self.posts) else Qt.CheckState.PartiallyChecked if n else Qt.CheckState.Unchecked);self.select_all_posts.blockSignals(False)
-    def _header_select_posts(self,state):
-        if state!=Qt.CheckState.PartiallyChecked:self._all_posts(state==Qt.CheckState.Checked)
+    def _update_header_selection(self):self.select_all_posts.setEnabled(bool(self.posts));self.clear_all_posts.setEnabled(bool(self.selected_post_ids))
     def _post_changed(self,item):
         if item.column()==0:
             pid=self.posts_table.item(item.row(),3).data(Qt.ItemDataRole.UserRole);(self.selected_post_ids.add if item.checkState()==Qt.CheckState.Checked else self.selected_post_ids.discard)(pid);self._update_header_selection();self._invalidate();self._summary()
@@ -115,7 +150,7 @@ class AutoCommentPage(QWidget):
         worker.succeeded.connect(succeeded);worker.failed.connect(failed);worker.finished.connect(finished);worker.start()
     def set_items(self,items):
         self.comments.blockSignals(True);self.comments.setRowCount(0)
-        for it in items:r=self.comments.rowCount();self.comments.insertRow(r);x=QTableWidgetItem();x.setCheckState(Qt.CheckState.Checked if it.enabled else Qt.CheckState.Unchecked);self.comments.setItem(r,0,x);self.comments.setItem(r,1,QTableWidgetItem(it.source_row_id or ""));self.comments.setItem(r,2,QTableWidgetItem(it.comment_text))
+        for it in items:r=self.comments.rowCount();self.comments.insertRow(r);self.comments.setItem(r,0,self._check_item(it.enabled));self.comments.setItem(r,1,QTableWidgetItem(it.source_row_id or ""));self.comments.setItem(r,2,QTableWidgetItem(it.comment_text))
         self.comments.blockSignals(False);self._changed()
     def items(self):return [CommentItem(self.comments.item(r,2).text(),self.comments.item(r,0).checkState()==Qt.CheckState.Checked,self.comments.item(r,1).text() or None,r) for r in range(self.comments.rowCount())]
     def import_csv(self):
@@ -151,7 +186,7 @@ class AutoCommentPage(QWidget):
     def _render_preview(self,posts):
         self.preview.blockSignals(True);self.preview.setRowCount(0)
         for p in posts:
-            r=self.preview.rowCount();self.preview.insertRow(r);x=QTableWidgetItem();x.setCheckState(Qt.CheckState.Checked);self.preview.setItem(r,0,x);status=TARGET_LABELS.get(self.target_states.get(p["post_id"],{}).get("status",""),"PREVIEW")
+            r=self.preview.rowCount();self.preview.insertRow(r);self.preview.setItem(r,0,self._check_item());status=TARGET_LABELS.get(self.target_states.get(p["post_id"],{}).get("status",""),"PREVIEW")
             for c,v in enumerate((p["post_id"],p.get("post_type",""),p.get("published_at",""),str(len(self.preview_comments.get(p["post_id"],[]))),"\n".join(self.preview_comments.get(p["post_id"],[])),status),1):self.preview.setItem(r,c,QTableWidgetItem(v))
         self.preview.blockSignals(False)
     def save_campaign(self):

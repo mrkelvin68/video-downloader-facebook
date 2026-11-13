@@ -7,12 +7,13 @@ from urllib.error import HTTPError, URLError
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtTest import QTest
 
 from app.database.connection import Database
 from app.services.auto_comment_service import (
-    AutoCommentService, AutoCommentValidationError, CommentItem, parse_comment_csv, select_comments,
+    AutoCommentPageAccessError, AutoCommentService, AutoCommentValidationError, CommentItem, parse_comment_csv, select_comments,
 )
-from app.services.auto_comment_comment_service import AutoCommentCommentService
+from app.services.auto_comment_comment_service import AutoCommentCommentService, AutoCommentTargetError
 from app.services.facebook_publishing_service import FacebookPublishingService
 from app.services.project_service import ProjectService
 from app.services.video_service import VideoService
@@ -139,6 +140,10 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         self.assertEqual((reel["source_post_id"], reel["video_id"], reel["comment_target_id"]), ("post-for-reel", "video-2", "post-for-reel"))
         self.assertEqual(len(calls), 5)
         self.assertEqual(calls[1][1]["until"], "2026-01-05")
+        reel_request = next(params for path, params in calls if path == "page-1/video_reels")
+        self.assertIn("video_id", reel_request["fields"])
+        self.assertIn("post_id", reel_request["fields"])
+        self.assertTrue(all(row["owner_page_id"] == "page-1" for row in rows))
 
     def test_live_sync_rejects_page_token_for_another_page(self):
         FacebookPublishingService(self.database).save_pages(self.project_id, [
@@ -290,6 +295,31 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         self.assertEqual(result["status"], "TARGET_UNVERIFIED")
         self.assertIsNone(result["target_id"])
 
+    def test_reel_video_candidate_uses_page_edge_ownership_without_equating_ids(self):
+        self._grant_page_read()
+        def graph_get(path, _params, _token):
+            if path == "page-1": return {"id": "page-1"}
+            if path == "video-9": return {"id": "video-9"}
+            if path == "video-9/comments": return {"data": []}
+            raise AssertionError(path)
+        source = {"post_id": "reel:7", "reel_id": "reel-7", "video_id": "video-9", "owner_page_id": "page-1", "post_type": "Reel"}
+        with patch("app.services.auto_comment_comment_service.get_page_token", return_value="page-token"), patch("app.services.auto_comment_service.get_page_token", return_value="page-token"):
+            result = AutoCommentCommentService(self.database, graph_get=graph_get).resolve_target(self.project_id, "page-1", source)
+        self.assertEqual((result["status"], result["target_id"]), ("READY", "video-9"))
+
+    def test_reel_resolver_continues_after_an_unsupported_candidate(self):
+        self._grant_page_read()
+        def graph_get(path, _params, _token):
+            if path == "page-1": return {"id": "page-1"}
+            if path == "bad-post": raise AutoCommentPageAccessError("Facebook từ chối yêu cầu đọc (Graph API code 100, HTTP 400).")
+            if path == "video-9": return {"id": "video-9"}
+            if path == "video-9/comments": return {"data": []}
+            raise AssertionError(path)
+        source = {"post_id": "reel:7", "source_post_id": "bad-post", "video_id": "video-9", "owner_page_id": "page-1", "post_type": "Reel"}
+        with patch("app.services.auto_comment_comment_service.get_page_token", return_value="page-token"), patch("app.services.auto_comment_service.get_page_token", return_value="page-token"):
+            result = AutoCommentCommentService(self.database, graph_get=graph_get).resolve_target(self.project_id, "page-1", source)
+        self.assertEqual((result["status"], result["target_id"]), ("READY", "video-9"))
+
     def test_single_publish_requires_confirmation_and_never_retries_same_operation(self):
         service = AutoCommentCommentService(self.database, graph_get=lambda path, *_: {"id": path}, graph_post=lambda *_: {"id": "comment-1"})
         with self.assertRaises(AutoCommentValidationError):
@@ -301,6 +331,13 @@ class AutoCommentPhase1Tests(unittest.TestCase):
             service.publish_one(self.project_id, "page-1", "post-1", "post-1", "Xin chào", confirmed=True, operation_id="op-1")
         row = self.database.connection.execute("SELECT status,remote_comment_id FROM auto_comment_submission_attempts WHERE operation_id='op-1'").fetchone()
         self.assertEqual((row["status"], row["remote_comment_id"]), ("SUCCESS", "comment-1"))
+
+    def test_single_publish_records_uncertain_and_rate_limit_without_retry(self):
+        for operation_id, category, expected in (("op-network", "NETWORK_ERROR", "UNCERTAIN"), ("op-rate", "RATE_LIMIT", "FAILED")):
+            service = AutoCommentCommentService(self.database, graph_post=lambda *_args, c=category: (_ for _ in ()).throw(AutoCommentTargetError(c, c)))
+            with patch("app.services.auto_comment_comment_service.get_page_token", return_value="page-token"):
+                result = service.publish_one(self.project_id, "page-1", "post-1", "post-1", "Xin chào", confirmed=True, operation_id=operation_id)
+            self.assertEqual((result["status"], result["error_category"]), (expected, category))
 
     def test_ui_publish_requires_one_ready_target_and_explicit_confirmation(self):
         _ManualFacebookWorker.instances.clear()
@@ -317,6 +354,28 @@ class AutoCommentPhase1Tests(unittest.TestCase):
             worker.succeeded.emit({"status": "SUCCESS", "comment_id": "comment-1", "verification_status": "READ_BACK"}); worker.finished.emit()
         self.assertFalse(page.publish_one_button.is_loading)
         self.assertIn("comment-1", page.preview_status.text())
+
+    def test_square_checkbox_selection_model_handles_seven_mixed_rows_and_keyboard(self):
+        page = AutoCommentPage(self.database)
+        page.show(); self.app.processEvents()
+        page.posts = [
+            {"post_id": f"post-{index}", "source_post_id": f"post-{index}", "post_type": "Post", "published_at": "2026-01-01T00:00:00+00:00", "comment_target_id": f"post-{index}"}
+            if index % 2 else {"post_id": f"reel:{index}", "reel_id": str(index), "post_type": "Reel", "published_at": "2026-01-01T00:00:00+00:00"}
+            for index in range(1, 8)
+        ]
+        page.selected_post_ids = set(); page._render_posts()
+        self.assertFalse(page.posts_table.item(0, 0).flags() & Qt.ItemFlag.ItemIsEditable)
+        self.assertIsNone(page.posts_table.indexWidget(page.posts_table.model().index(0, 0)))
+        page.select_all_posts.click()
+        self.assertEqual(page.selected_post_ids, {post["post_id"] for post in page.posts})
+        page.clear_all_posts.click()
+        self.assertEqual(page.selected_post_ids, set())
+        page.posts_table.setCurrentCell(3, 0); page.posts_table.setFocus(); QTest.keyClick(page.posts_table, Qt.Key.Key_Space)
+        self.assertEqual(page.selected_post_ids, {"reel:4"})
+        page.posts_table.item(3, 0).setCheckState(Qt.CheckState.Unchecked)
+        self.assertEqual(page.selected_post_ids, set())
+        self.assertIn("Target sẵn sàng: 0", page.workflow_progress.text())
+        page.close()
 
 
 

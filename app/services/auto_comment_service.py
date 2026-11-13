@@ -188,7 +188,8 @@ class AutoCommentService:
                 raise AutoCommentPageAccessError("Access Token đã hết hạn hoặc bị thu hồi.") from exc
             if error_code in {"10", "200"} or exc.code == 403:
                 raise AutoCommentPageAccessError("Token hợp lệ nhưng thiếu quyền pages_read_engagement để đọc bài viết.") from exc
-            raise AutoCommentPageAccessError(f"Không thể tải bài viết từ Facebook (HTTP {exc.code}).") from exc
+            detail = f"Graph API code {code}, HTTP {exc.code}" if code else f"HTTP {exc.code}"
+            raise AutoCommentPageAccessError(f"Facebook từ chối yêu cầu đọc ({detail}).") from exc
         except (URLError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise AutoCommentPageAccessError("Không thể kết nối Meta Graph API để tải bài viết.") from exc
         if "error" in payload:
@@ -197,7 +198,8 @@ class AutoCommentService:
                 raise AutoCommentPageAccessError("Access Token đã hết hạn hoặc bị thu hồi.")
             if error_code in {"10", "200"}:
                 raise AutoCommentPageAccessError("Token hợp lệ nhưng thiếu quyền pages_read_engagement để đọc bài viết.")
-            raise AutoCommentPageAccessError("Không thể tải bài viết từ Facebook.")
+            detail = f"Graph API code {code}" if code else "lỗi API không xác định"
+            raise AutoCommentPageAccessError(f"Facebook từ chối yêu cầu đọc ({detail}).")
         return [
             {"post_id": item.get("id"), "published_at": item.get("created_time"),
              "post_type": "Reel" if item.get("type") == "VIDEO" and item.get("status_type") == "added_video" else "Post"}
@@ -225,7 +227,12 @@ class AutoCommentService:
                 rows.extend(self._read_edge(page_id, token, "posts", start_date, end_date))
             if content_type in {"all", "reels"}:
                 rows.extend(self._read_edge(page_id, token, "video_reels", start_date, end_date))
-        return self._normalise_posts(rows, start_date, end_date, content_type)
+        normalized = self._normalise_posts(rows, start_date, end_date, content_type)
+        # This is evidence of Page ownership from the Page edge itself.  It is
+        # not an assertion that a Reel/video ID is a comment target.
+        for record in normalized:
+            record["owner_page_id"] = page_id
+        return normalized
 
     def _verify_page_token(self, page_id: str, token: str) -> None:
         payload = self._graph_get(page_id, {"fields": "id"}, token)
@@ -248,7 +255,9 @@ class AutoCommentService:
             raise AutoCommentPageAccessError(messages.get(status, messages["UNVERIFIED"]))
 
     def _read_edge(self, page_id: str, token: str, edge: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
-        fields = "id,created_time" if edge == "video_reels" else "id,created_time"
+        # A Reel ID is not a Post ID.  Request the distinct identifiers returned
+        # by Graph so the resolver can validate each candidate read-only.
+        fields = "id,video_id,post_id,created_time" if edge == "video_reels" else "id,created_time"
         until = (date.fromisoformat(end_date) + timedelta(days=1)).isoformat()
         params = {"fields": fields, "since": start_date, "until": until, "limit": "100"}
         rows: list[dict[str, Any]] = []
@@ -286,7 +295,7 @@ class AutoCommentService:
             if is_reel:
                 reel_id = str(row.get("reel_id") or row.get("id") or "")
                 source_post_id = str(row.get("source_post_id") or row.get("post_id") or "") or None
-                video_id = str(row.get("video_id") or "") or None
+                video_id = str(row.get("video_id") or (row.get("video") or {}).get("id") or "") or None
                 if not reel_id:
                     continue
                 planner_id = source_post_id or f"reel:{reel_id}"
@@ -321,7 +330,8 @@ class AutoCommentService:
                 raise AutoCommentPageAccessError("Access Token đã hết hạn hoặc bị thu hồi.") from exc
             if code in {"10", "200", "283"} or exc.code == 403:
                 raise AutoCommentPageAccessError("Token hợp lệ nhưng thiếu quyền pages_read_engagement để đọc bài viết.") from exc
-            raise AutoCommentPageAccessError(f"Không thể tải bài viết từ Facebook (HTTP {exc.code}).") from exc
+            detail = f"Graph API code {code}, HTTP {exc.code}" if code else f"HTTP {exc.code}"
+            raise AutoCommentPageAccessError(f"Facebook từ chối yêu cầu đọc ({detail}).") from exc
         except (URLError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise AutoCommentPageAccessError("Không thể kết nối Meta Graph API để tải bài viết.") from exc
         if "error" in payload:
@@ -330,7 +340,8 @@ class AutoCommentService:
                 raise AutoCommentPageAccessError("Access Token đã hết hạn hoặc bị thu hồi.")
             if code in {"10", "200", "283"}:
                 raise AutoCommentPageAccessError("Token hợp lệ nhưng thiếu quyền pages_read_engagement để đọc bài viết.")
-            raise AutoCommentPageAccessError("Không thể tải bài viết từ Facebook.")
+            detail = f"Graph API code {code}" if code else "lỗi API không xác định"
+            raise AutoCommentPageAccessError(f"Facebook từ chối yêu cầu đọc ({detail}).")
         return payload
 
     def save_library(self, name: str, items: list[CommentItem], library_id: str | None = None) -> str:

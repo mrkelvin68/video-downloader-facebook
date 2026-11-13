@@ -67,20 +67,30 @@ class AutoCommentCommentService:
             last_error: AutoCommentTargetError | None = None
             for candidate in candidates:
                 try:
-                    metadata = self._graph_get(candidate, {"fields": "id,from{id}"}, token)
+                    is_post_candidate = candidate in {str(source.get("comment_target_id") or ""), str(source.get("source_post_id") or "")}
+                    metadata = self._graph_get(candidate, {"fields": "id,from{id}" if is_post_candidate else "id"}, token)
                     owner_id = str((metadata.get("from") or {}).get("id") or "")
-                    if owner_id != page_id:
+                    edge_owner_id = str(source.get("owner_page_id") or "")
+                    # Video/Reel metadata does not consistently expose `from`.
+                    # In that case the prior Page-edge response is ownership
+                    # evidence, while the comments GET below still proves the
+                    # candidate endpoint is readable.  Neither step equates IDs.
+                    if owner_id and owner_id != page_id:
                         raise AutoCommentTargetError("TARGET_UNSUPPORTED", "Target không thuộc Fanpage đang chọn.")
+                    if not owner_id and edge_owner_id != page_id:
+                        raise AutoCommentTargetError("TARGET_UNVERIFIED", "Facebook không trả về bằng chứng Fanpage sở hữu target.")
                     # A GET on comments is read-only evidence that the object is
                     # comment-addressable.  It does not create a comment.
                     self._graph_get(f"{candidate}/comments", {"limit": "1", "summary": "true"}, token)
                     result = {"source_id": source_id, "target_id": candidate,
                               "target_type": "REEL" if source.get("post_type") == "Reel" else "POST",
-                              "status": "READY", "evidence": {"owner_id": owner_id, "checked": "comments"}}
+                              "status": "READY", "evidence": {"owner_id": owner_id or edge_owner_id, "checked": "comments"}}
                     self._save_target(project_id, page_id, result, now)
                     return result
                 except AutoCommentTargetError as exc:
                     last_error = exc
+                except AutoCommentPageAccessError as exc:
+                    last_error = AutoCommentTargetError(self._category_for_error(str(exc)), str(exc))
             assert last_error is not None
             raise last_error
         except AutoCommentTargetError as exc:
@@ -115,6 +125,8 @@ class AutoCommentCommentService:
             return "TOKEN_EXPIRED"
         if "không thuộc fanpage" in text:
             return "WRONG_PAGE"
+        if "graph api code 100" in text or "graph api code 12" in text:
+            return "TARGET_UNSUPPORTED"
         if "thiếu quyền" in text or "từ chối" in text:
             return "PERMISSION_DENIED"
         if "kết nối" in text or "mạng" in text:
