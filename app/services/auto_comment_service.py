@@ -415,7 +415,7 @@ class AutoCommentService:
         return dict(campaign), rows
 
     def save_preview(self, values: dict, posts: list[dict], comments_by_post: dict[str, list[str]],
-                     campaign_id: str | None = None) -> str:
+                     campaign_id: str | None = None, approved_post_ids: set[str] | None = None) -> str:
         campaign_id = campaign_id or str(uuid.uuid4())
         now = _now()
         with self.database.connection:
@@ -431,13 +431,52 @@ class AutoCommentService:
                 (campaign_id, values["name"], values["page_id"], values["start_date"], values["end_date"],
                  values["content_type"], values["selection_mode"], values["count"], int(values["prevent_duplicates"]), now, now),
             )
+            published = self.database.connection.execute(
+                "SELECT 1 FROM auto_comment_campaign_executions WHERE campaign_id=? AND execution_status IN ('RUNNING','PUBLISHED','UNCERTAIN')",
+                (campaign_id,),
+            ).fetchone()
+            if published:
+                raise AutoCommentValidationError("Campaign đã chạy hoặc cần đối soát; không thể thay đổi snapshot đã duyệt.")
             self.database.connection.execute("DELETE FROM auto_comment_preview_items WHERE campaign_id=?", (campaign_id,))
             preview_rows = []
             for post in posts:
                 for order, comment in enumerate(comments_by_post.get(post["post_id"], []), start=1):
-                    preview_rows.append((str(uuid.uuid4()), campaign_id, post["post_id"], post["post_type"], post["published_at"], comment, order, now))
+                    preview_rows.append((str(uuid.uuid4()), campaign_id, post["post_id"], post["post_type"], post["published_at"], comment, order, int(approved_post_ids is None or post["post_id"] in approved_post_ids), now))
             self.database.connection.executemany(
                 """INSERT INTO auto_comment_preview_items
-                   (id,campaign_id,post_id,post_type,published_at,comment_text,selection_order,created_at)
-                   VALUES (?,?,?,?,?,?,?,?)""", preview_rows)
+                   (id,campaign_id,post_id,post_type,published_at,comment_text,selection_order,selected,created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""", preview_rows)
         return campaign_id
+
+    def campaign_execution(self, campaign_id: str) -> list[dict]:
+        return [dict(row) for row in self.database.connection.execute(
+            """SELECT p.*, COALESCE(e.execution_status, 'PENDING') AS execution_status,
+                      e.operation_id,e.remote_comment_id,e.message
+               FROM auto_comment_preview_items p
+               LEFT JOIN auto_comment_campaign_executions e ON e.preview_item_id=p.id
+               WHERE p.campaign_id=? AND p.selected=1 ORDER BY p.selection_order,p.post_id""", (campaign_id,)
+        )]
+
+    def begin_execution(self, campaign_id: str, preview_item_id: str, operation_id: str) -> bool:
+        now = _now()
+        with self.database.connection:
+            existing = self.database.connection.execute(
+                "SELECT execution_status FROM auto_comment_campaign_executions WHERE preview_item_id=?", (preview_item_id,)
+            ).fetchone()
+            if existing is not None:
+                return False
+            self.database.connection.execute(
+                """INSERT INTO auto_comment_campaign_executions
+                   (id,campaign_id,preview_item_id,execution_status,operation_id,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?)""", (str(uuid.uuid4()), campaign_id, preview_item_id, 'RUNNING', operation_id, now, now)
+            )
+        return True
+
+    def finish_execution(self, preview_item_id: str, result: dict) -> None:
+        state = {'SUCCESS': 'PUBLISHED', 'UNCERTAIN': 'UNCERTAIN'}.get(result.get('status'), 'FAILED')
+        with self.database.connection:
+            self.database.connection.execute(
+                """UPDATE auto_comment_campaign_executions SET execution_status=?,remote_comment_id=?,message=?,updated_at=?
+                   WHERE preview_item_id=?""",
+                (state, result.get('comment_id'), result.get('message'), _now(), preview_item_id),
+            )

@@ -181,6 +181,19 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         self.assertEqual(campaign["name"], "Draft đã sửa")
         self.assertEqual([row["comment_text"] for row in rows], ["Bình luận mới"])
 
+    def test_campaign_execution_snapshot_is_single_use(self):
+        service = AutoCommentService(self.database)
+        values = {"name": "One reel", "page_id": "page-1", "start_date": "2026-01-01", "end_date": "2026-01-02",
+                  "content_type": "Reels", "selection_mode": "sequential", "count": 1, "prevent_duplicates": True}
+        post = {"post_id": "reel:1", "post_type": "Reel", "published_at": "2026-01-01T00:00:00+00:00"}
+        campaign_id = service.save_preview(values, [post], {"reel:1": ["Bình luận đã duyệt"]}, approved_post_ids={"reel:1"})
+        assignment = service.campaign_execution(campaign_id)[0]
+        self.assertEqual((assignment["comment_text"], assignment["execution_status"]), ("Bình luận đã duyệt", "PENDING"))
+        self.assertTrue(service.begin_execution(campaign_id, assignment["id"], "operation-1"))
+        self.assertFalse(service.begin_execution(campaign_id, assignment["id"], "operation-2"))
+        service.finish_execution(assignment["id"], {"status": "SUCCESS", "comment_id": "comment-1"})
+        self.assertEqual(service.campaign_execution(campaign_id)[0]["execution_status"], "PUBLISHED")
+
     def test_rerunning_migration_preserves_auto_comment_data(self):
         service = AutoCommentService(self.database)
         library_id = service.save_library("Thư viện cũ", [CommentItem("Xin chào Việt Nam")])

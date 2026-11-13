@@ -489,6 +489,16 @@ def _create_auto_comment_tables(connection: sqlite3.Connection) -> None:
         FOREIGN KEY(campaign_id) REFERENCES auto_comment_campaigns(id) ON DELETE CASCADE)""")
     connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_preview_campaign
         ON auto_comment_preview_items(campaign_id, post_id, selection_order)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_campaign_executions (
+        id TEXT PRIMARY KEY, campaign_id TEXT NOT NULL, preview_item_id TEXT NOT NULL UNIQUE,
+        execution_status TEXT NOT NULL CHECK(execution_status IN
+            ('PENDING','RUNNING','PUBLISHED','FAILED','UNCERTAIN','CANCELLED')),
+        operation_id TEXT UNIQUE, remote_comment_id TEXT, message TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        FOREIGN KEY(campaign_id) REFERENCES auto_comment_campaigns(id) ON DELETE CASCADE,
+        FOREIGN KEY(preview_item_id) REFERENCES auto_comment_preview_items(id) ON DELETE CASCADE)""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_execution_campaign
+        ON auto_comment_campaign_executions(campaign_id, execution_status)""")
     # These records are intentionally separate from previews: resolving a target is
     # evidence from a read-only Graph request, while a submission is an auditable
     # one-shot operation.  No credential material is stored here.
