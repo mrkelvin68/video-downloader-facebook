@@ -356,6 +356,8 @@ def _create_facebook_publishing_tables(connection: sqlite3.Connection) -> None:
             page_name TEXT NOT NULL,
             page_url TEXT NOT NULL DEFAULT '',
             permissions_json TEXT NOT NULL DEFAULT '[]',
+            read_access_status TEXT NOT NULL DEFAULT 'UNVERIFIED',
+            read_access_verified_at TEXT,
             is_default INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0, 1)),
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -406,6 +408,13 @@ def _create_facebook_publishing_tables(connection: sqlite3.Connection) -> None:
         """CREATE INDEX IF NOT EXISTS ix_facebook_publish_schedule
            ON facebook_publishing_jobs(project_id, status, scheduled_at)"""
     )
+    page_columns = {row["name"] for row in connection.execute("PRAGMA table_info(facebook_pages)")}
+    for name, definition in (
+        ("read_access_status", "TEXT NOT NULL DEFAULT 'UNVERIFIED'"),
+        ("read_access_verified_at", "TEXT"),
+    ):
+        if name not in page_columns:
+            connection.execute(f"ALTER TABLE facebook_pages ADD COLUMN {name} {definition}")
     job_columns = {row["name"] for row in connection.execute("PRAGMA table_info(facebook_publishing_jobs)")}
     for name, definition in (
         ("upload_session_id", "TEXT"),

@@ -118,9 +118,9 @@ class AutoCommentService:
                FROM facebook_pages ORDER BY page_name COLLATE NOCASE, project_id"""
         )]
 
-    def page_access(self, project_id: str, page_id: str) -> dict[str, bool]:
+    def page_access(self, project_id: str, page_id: str) -> dict[str, Any]:
         row = self.database.connection.execute(
-            "SELECT permissions_json FROM facebook_pages WHERE project_id=? AND page_id=?",
+            "SELECT permissions_json, read_access_status FROM facebook_pages WHERE project_id=? AND page_id=?",
             (project_id, page_id),
         ).fetchone()
         if row is None:
@@ -135,6 +135,7 @@ class AutoCommentService:
             "can_read_posts": REQUIRED_READ_PERMISSION in permissions,
             "can_manage_comments": REQUIRED_COMMENT_PERMISSION in permissions,
             "verified": bool(permissions),
+            "read_status": str(row["read_access_status"] or "UNVERIFIED"),
         }
 
     def _fetch_posts_single_page(
@@ -145,12 +146,9 @@ class AutoCommentService:
         access = self.page_access(project_id, page_id)
         if not access["has_token"]:
             raise AutoCommentPageAccessError("Fanpage chưa có Page Access Token; hãy kết nối hoặc đồng bộ lại Fanpage.")
-        if not access["verified"]:
-            raise AutoCommentPageAccessError("Quyền Fanpage chưa được xác minh; hãy dùng “Kiểm tra Token & quyền”.")
-        if not access["can_read_posts"]:
-            raise AutoCommentPageAccessError("Token hợp lệ nhưng thiếu quyền pages_read_engagement để đọc bài viết.")
+        self._require_verified_read_access(access)
         token = get_page_token(project_id, page_id)
-        loader = request or self._graph_posts
+        loader = request or self._graph_posts_single_page
         rows = loader(page_id, token, start_date, end_date)
         wanted = {"all", "posts", "reels"}
         if content_type not in wanted:
@@ -216,10 +214,7 @@ class AutoCommentService:
         access = self.page_access(project_id, page_id)
         if not access["has_token"]:
             raise AutoCommentPageAccessError("Fanpage chưa có Page Access Token; hãy kết nối hoặc đồng bộ lại Fanpage.")
-        if not access["verified"]:
-            raise AutoCommentPageAccessError("Quyền Fanpage chưa được xác minh; hãy dùng “Kiểm tra Token & quyền”.")
-        if not access["can_read_posts"]:
-            raise AutoCommentPageAccessError("Token hợp lệ nhưng thiếu quyền pages_read_engagement để đọc bài viết.")
+        self._require_verified_read_access(access)
         token = get_page_token(project_id, page_id)
         if request is not None:  # Compatibility seam for existing local callers/tests.
             rows = request(page_id, token, start_date, end_date)
@@ -236,6 +231,21 @@ class AutoCommentService:
         payload = self._graph_get(page_id, {"fields": "id"}, token)
         if str(payload.get("id") or "") != page_id:
             raise AutoCommentPageAccessError("Page Access Token không thuộc Fanpage đang chọn.")
+
+    @staticmethod
+    def _require_verified_read_access(access: dict[str, Any]) -> None:
+        status = access["read_status"]
+        messages = {
+            "TOKEN_MISSING": "Fanpage chưa có Page Access Token; hãy kết nối lại.",
+            "TOKEN_EXPIRED": "Page Access Token đã hết hạn hoặc bị thu hồi.",
+            "WRONG_PAGE": "Page Access Token không thuộc Fanpage đang chọn.",
+            "DENIED": "Token hợp lệ nhưng bị từ chối quyền đọc bài viết.",
+            "NETWORK_ERROR": "Chưa thể xác minh quyền đọc do lỗi mạng; hãy thử lại.",
+            "API_ERROR": "Chưa thể xác minh quyền đọc do lỗi API; hãy thử lại.",
+            "UNVERIFIED": "Quyền Fanpage chưa được xác minh; hãy dùng “Kiểm tra Token & quyền”.",
+        }
+        if status != "GRANTED":
+            raise AutoCommentPageAccessError(messages.get(status, messages["UNVERIFIED"]))
 
     def _read_edge(self, page_id: str, token: str, edge: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
         fields = "id,created_time" if edge == "video_reels" else "id,created_time"

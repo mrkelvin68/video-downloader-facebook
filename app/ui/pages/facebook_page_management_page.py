@@ -63,14 +63,16 @@ class FacebookPageManagementPage(QWidget):
             row = self.table.rowCount(); self.table.insertRow(row); page_id = str(page["page_id"])
             default = QTableWidgetItem("✓" if page["is_default"] else "")
             self.table.setItem(row, 0, default); self.table.setItem(row, 1, QTableWidgetItem(str(page["page_name"]))); self.table.setItem(row, 2, QTableWidgetItem(page_id))
-            verified = (str(project_id), page_id) in self._verified_pages
-            self.table.setItem(row, 3, QTableWidgetItem("Đã xác minh" if verified else "Đã kết nối (chưa xác minh)"))
-            permissions = set(json.loads(page["permissions_json"] or "[]")) if verified else set()
-            self.table.setItem(row, 4, QTableWidgetItem("Có" if "pages_manage_posts" in permissions else "Chưa xác minh"))
+            read_status = str(page["read_access_status"] or "UNVERIFIED")
+            verified = read_status == "GRANTED"
+            connection_label = {"GRANTED": "Đã xác minh", "TOKEN_MISSING": "Thiếu token", "TOKEN_EXPIRED": "Token hết hạn/thu hồi", "WRONG_PAGE": "Sai Fanpage", "DENIED": "Bị từ chối quyền", "NETWORK_ERROR": "Lỗi mạng", "API_ERROR": "Lỗi API"}.get(read_status, "Đã kết nối (chưa xác minh)")
+            self.table.setItem(row, 3, QTableWidgetItem(connection_label))
+            permissions = set(json.loads(page["permissions_json"] or "[]"))
+            self.table.setItem(row, 4, QTableWidgetItem("Có" if verified and "pages_manage_posts" in permissions else "Chưa xác minh"))
             read_ok = "pages_read_engagement" in permissions
             comment_ok = "pages_manage_engagement" in permissions
-            self.table.setItem(row, 5, QTableWidgetItem("Có" if read_ok else "Chưa xác minh"))
-            self.table.setItem(row, 6, QTableWidgetItem("Có" if comment_ok else "Chưa xác minh"))
+            self.table.setItem(row, 5, QTableWidgetItem("Có" if verified else "Chưa xác minh"))
+            self.table.setItem(row, 6, QTableWidgetItem("Có" if verified and comment_ok else "Chưa xác minh"))
             actions = QWidget(); action_layout = QHBoxLayout(actions); action_layout.setContentsMargins(2, 1, 2, 1)
             make_default = QPushButton("Mặc định"); make_default.setEnabled(not bool(page["is_default"])); make_default.clicked.connect(lambda _=False, p=page_id: self.defaultRequested.emit(str(project_id), p))
             disconnect = QPushButton("Ngắt"); disconnect.setObjectName("danger"); disconnect.clicked.connect(lambda _=False, p=page_id, n=str(page["page_name"]): self._disconnect(p, n))

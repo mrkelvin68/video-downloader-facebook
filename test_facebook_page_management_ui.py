@@ -6,7 +6,7 @@ from unittest.mock import patch
 from PySide6.QtWidgets import QApplication
 
 from app.database.connection import Database
-from app.services.facebook_connection_service import FacebookConnectionService
+from app.services.facebook_connection_service import FacebookConnectionError, FacebookConnectionService
 from app.services.facebook_publishing_service import FacebookPublishingService
 from app.services.project_service import ProjectService
 from app.ui.pages.facebook_page_management_page import FacebookPageManagementPage
@@ -22,8 +22,16 @@ class _TestClient:
     def __init__(self, token): self.token = token
     def _get_page_identity(self, page_id, *, raise_errors=False):
         return {"id": page_id, "name": "Verified Page", "url": "", "permissions": ["pages_read_engagement"], "access_token": self.token}
+    def verify_page_read_access(self, page_id):
+        return self._get_page_identity(page_id)
     def validate_and_list_pages(self):
         return [{"id": "page-a", "name": "Verified Page", "permissions": ["pages_read_engagement"], "access_token": self.token}]
+
+
+class _ExpiredClient:
+    def __init__(self, token): self.token = token
+    def verify_page_read_access(self, page_id):
+        raise FacebookConnectionError("expired", category="expired")
 
 
 class FacebookPageManagementTests(unittest.TestCase):
@@ -75,7 +83,19 @@ class FacebookPageManagementTests(unittest.TestCase):
         with patch("app.services.facebook_connection_service.get_page_token", return_value="page-token"):
             service.test_connection(self.project_id)
         page = next(row for row in FacebookPublishingService(self.database).list_pages(self.project_id) if row["page_id"] == "page-a")
-        self.assertIn("pages_read_engagement", page["permissions_json"])
+        self.assertEqual(page["read_access_status"], "GRANTED")
+        ui = FacebookPageManagementPage(self.database)
+        ui.project.setCurrentIndex(ui.project.findData(self.project_id))
+        self.assertEqual(ui.table.item(0, 3).text(), "Đã xác minh")
+        self.assertEqual(ui.table.item(0, 5).text(), "Có")
+
+    def test_token_check_persists_expired_state(self):
+        service = FacebookConnectionService(self.database, _ExpiredClient)
+        with patch("app.services.facebook_connection_service.get_page_token", return_value="page-token"):
+            with self.assertRaises(FacebookConnectionError):
+                service.test_connection(self.project_id)
+        page = next(row for row in FacebookPublishingService(self.database).list_pages(self.project_id) if row["page_id"] == "page-a")
+        self.assertEqual(page["read_access_status"], "TOKEN_EXPIRED")
 
 
 if __name__ == "__main__":

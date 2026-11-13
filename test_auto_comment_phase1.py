@@ -34,6 +34,10 @@ class AutoCommentPhase1Tests(unittest.TestCase):
     def tearDown(self):
         self.database.close(); self.temp.cleanup()
 
+    def _grant_page_read(self) -> None:
+        with self.database.connection:
+            self.database.connection.execute("UPDATE facebook_pages SET read_access_status='GRANTED' WHERE project_id=? AND page_id='page-1'", (self.project_id,))
+
     def test_csv_utf8_bom_unicode_multiline_and_duplicates(self):
         result = parse_comment_csv(b'\xef\xbb\xbfid,comment,enabled\n1,"Xin chao, Viet Nam",1\n2,"Dong 1\nDong 2",0\n3,"Xin chao, Viet Nam",1\n')
         self.assertEqual([item.comment_text for item in result.items][1], "Dong 1\nDong 2")
@@ -79,11 +83,12 @@ class AutoCommentPhase1Tests(unittest.TestCase):
             {"id": "page-1", "name": "Page 1", "permissions": ["pages_manage_posts"]},
         ])
         with patch("app.services.auto_comment_service.get_page_token", return_value="page-token"):
-            with self.assertRaisesRegex(AutoCommentValidationError, "pages_read_engagement"):
+            with self.assertRaisesRegex(AutoCommentValidationError, "chưa được xác minh"):
                 service.fetch_posts(self.project_id, "page-1", "2026-01-01", "2026-01-02", "all")
         FacebookPublishingService(self.database).save_pages(self.project_id, [
             {"id": "page-1", "name": "Page 1", "permissions": ["pages_read_engagement"]},
         ])
+        self._grant_page_read()
         with patch("app.services.auto_comment_service.get_page_token", return_value="page-token"):
             posts = service.fetch_posts(
                 self.project_id, "page-1", "2026-01-01", "2026-01-02", "reels",
@@ -100,6 +105,7 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         FacebookPublishingService(self.database).save_pages(self.project_id, [
             {"id": "page-1", "name": "Page 1", "permissions": ["pages_read_engagement"]},
         ])
+        self._grant_page_read()
         calls = []
         def graph_get(path, params, _token):
             calls.append((path, dict(params)))
@@ -124,6 +130,7 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         FacebookPublishingService(self.database).save_pages(self.project_id, [
             {"id": "page-1", "name": "Page 1", "permissions": ["pages_read_engagement"]},
         ])
+        self._grant_page_read()
         service = AutoCommentService(self.database, lambda *_args: {"id": "other-page"})
         with patch("app.services.auto_comment_service.get_page_token", return_value="page-token"):
             with self.assertRaisesRegex(AutoCommentValidationError, "không thuộc Fanpage"):
