@@ -6,19 +6,20 @@ from PySide6.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDateEdit
 from app.services.auto_comment_service import AutoCommentService, AutoCommentValidationError, CommentItem, parse_comment_csv, select_comments
 from app.database.connection import Database
 from app.ui.facebook_worker import FacebookRequestWorker
+from app.ui.widgets.loading_button import LoadingButton
 
 
 class AutoCommentPage(QWidget):
     pageManagementRequested = Signal()
     def __init__(self, database, parent=None):
-        super().__init__(parent); self.database=database; self.service=AutoCommentService(database); self.library_id=None; self.campaign_id=None; self.posts=[]; self.selected_post_ids=set(); self.preview_comments={}; self._posts_worker=None; self.setAcceptDrops(True)
+        super().__init__(parent); self.database=database; self.service=AutoCommentService(database); self.library_id=None; self.campaign_id=None; self.posts=[]; self.selected_post_ids=set(); self.preview_comments={}; self._posts_worker=None; self._preview_busy=False; self.setAcceptDrops(True)
         root=QVBoxLayout(self); root.setContentsMargins(24,18,24,18); root.addWidget(QLabel("Auto Comment", objectName="title")); root.addWidget(QLabel("Lập kế hoạch comment cục bộ. Phase UI-2 không gửi comment lên Facebook."))
         self.tabs=QTabWidget(); self.tabs.addTab(self._posts(),"Bài viết"); self.tabs.addTab(self._library(),"Thư viện CSV"); self.tabs.addTab(self._campaign(),"Chiến dịch & Preview"); root.addWidget(self.tabs,1); self.refresh_pages(); self.refresh_libraries()
     def _posts(self):
         w=QWidget(); l=QVBoxLayout(w); box=QGroupBox("Fanpage và bộ lọc"); f=QFormLayout(box); self.page=QComboBox(); self.page.currentIndexChanged.connect(self._page_changed); manage=QPushButton("Quản lý Fanpage"); manage.clicked.connect(self.pageManagementRequested.emit); pr=QHBoxLayout(); pr.addWidget(self.page,1); pr.addWidget(manage)
         self.start_date,self.end_date=QDateEdit(),QDateEdit()
         for x in (self.start_date,self.end_date): x.setCalendarPopup(True); x.setDisplayFormat("yyyy-MM-dd"); x.dateChanged.connect(self._invalidate)
-        self.start_date.setDate(date.today().replace(day=1)); self.end_date.setDate(date.today()); self.content_type=QComboBox(); self.content_type.addItems(["Tất cả","Reels","Bài viết thường"]); self.content_type.currentIndexChanged.connect(self._invalidate); self.load_posts_button=QPushButton("Tải bài viết"); self.load_posts_button.setObjectName("primary"); self.load_posts_button.clicked.connect(self.load_posts)
+        self.start_date.setDate(date.today().replace(day=1)); self.end_date.setDate(date.today()); self.content_type=QComboBox(); self.content_type.addItems(["Tất cả","Reels","Bài viết thường"]); self.content_type.currentIndexChanged.connect(self._invalidate); self.load_posts_button=LoadingButton("Tải bài viết"); self.load_posts_button.setObjectName("primary"); self.load_posts_button.clicked.connect(self.load_posts)
         f.addRow("Fanpage",pr); f.addRow("Từ ngày",self.start_date); f.addRow("Đến ngày",self.end_date); f.addRow("Loại",self.content_type); f.addRow(self.load_posts_button); l.addWidget(box)
         r=QHBoxLayout(); a=QPushButton("Chọn tất cả"); a.clicked.connect(lambda:self._all_posts(True)); b=QPushButton("Bỏ chọn tất cả"); b.clicked.connect(lambda:self._all_posts(False)); self.post_status=QLabel("Chưa tải bài viết."); r.addWidget(a);r.addWidget(b);r.addWidget(self.post_status,1);l.addLayout(r)
         self.posts_table=QTableWidget(0,5);self.posts_table.setHorizontalHeaderLabels(["Chọn","Published At","Loại","ID nguồn","Trạng thái"]);self.posts_table.horizontalHeader().setStretchLastSection(True);self.posts_table.setColumnWidth(0,54);self.posts_table.itemChanged.connect(self._post_changed);l.addWidget(self.posts_table,1);l.addWidget(QLabel("Chỉ đọc dữ liệu Facebook; Phase 1 không gửi comment."));return w
@@ -33,8 +34,8 @@ class AutoCommentPage(QWidget):
         w=QWidget();l=QVBoxLayout(w);box=QGroupBox("Cấu hình chiến dịch");f=QFormLayout(box);self.campaign_name=QLineEdit("Auto Comment draft");self.summary=QLabel();self.one=QRadioButton("Random 1 comment mỗi bài");self.three=QRadioButton("Random 3 comment khác nhau mỗi bài");self.one.setChecked(True);self.random_mode=QRadioButton("Ngẫu nhiên");self.sequential_mode=QRadioButton("Tuần tự");self.random_mode.setChecked(True);self.prevent_duplicates=QCheckBox("Không lặp nội dung trong cùng bài");self.prevent_duplicates.setChecked(True);r=QHBoxLayout()
         for x in (self.one,self.three,self.random_mode,self.sequential_mode,self.prevent_duplicates):r.addWidget(x);x.toggled.connect(self._invalidate)
         self.campaign_picker=QComboBox();self.campaign_picker.currentIndexChanged.connect(self.open_campaign);f.addRow("Tên",self.campaign_name);f.addRow("Thông tin",self.summary);f.addRow("Chọn comment",r);f.addRow("Mở campaign",self.campaign_picker);l.addWidget(box)
-        r=QHBoxLayout();
-        for text,fn in (("Tạo preview",self.generate_preview),("Tạo lại preview",self.generate_preview),("Lưu campaign",self.save_campaign),("Chọn tất cả",lambda:self._all_preview(True)),("Bỏ chọn",lambda:self._all_preview(False))):x=QPushButton(text);x.clicked.connect(fn);r.addWidget(x)
+        r=QHBoxLayout();self.preview_button=LoadingButton("Xem trước comment");self.preview_button.clicked.connect(self.generate_preview);r.addWidget(self.preview_button)
+        for text,fn in (("Tạo lại preview",self.generate_preview),("Lưu campaign",self.save_campaign),("Chọn tất cả",lambda:self._all_preview(True)),("Bỏ chọn",lambda:self._all_preview(False))):x=QPushButton(text);x.clicked.connect(fn);r.addWidget(x)
         l.addLayout(r);self.preview=QTableWidget(0,7);self.preview.setHorizontalHeaderLabels(["Chọn","Post","Loại","Published At","Số comment","Comments","Trạng thái"]);self.preview.setWordWrap(True);self.preview.horizontalHeader().setStretchLastSection(True);self.preview.setColumnWidth(0,54);self.preview.itemChanged.connect(self._preview_changed);l.addWidget(self.preview,1);self.preview_status=QLabel("Chưa có preview.");l.addWidget(self.preview_status);x=QPushButton("Đăng comment — sẽ triển khai ở Phase 2B.");x.setEnabled(False);l.addWidget(x);return w
     def refresh_pages(self):
         old=self.page.currentData();self.page.blockSignals(True);self.page.clear();self.page.addItem("Chọn Fanpage",None)
@@ -51,7 +52,7 @@ class AutoCommentPage(QWidget):
         if not selected:self.post_status.setText("Hãy chọn Fanpage trước.");return
         if self._posts_worker is not None:return
         project_id,page_id=selected; kind={"Tất cả":"all","Reels":"reels","Bài viết thường":"posts"}[self.content_type.currentText()]
-        self.load_posts_button.setEnabled(False);self.post_status.setText("Đang tải bài viết từ Facebook…")
+        self.load_posts_button.set_loading(True);self.post_status.setText("Đang tải bài viết từ Facebook...")
         path=self.database.path
         def operation():
             worker_database=Database(path)
@@ -63,10 +64,13 @@ class AutoCommentPage(QWidget):
             had_posts=bool(self.posts);previous=set(self.selected_post_ids);self.posts=posts
             self.selected_post_ids={p["post_id"] for p in posts if p["post_id"] in previous} if had_posts else {p["post_id"] for p in posts}
             self._render_posts();self._invalidate()
+            post_count=sum(p["post_type"] == "Post" for p in posts);reel_count=sum(p["post_type"] == "Reel" for p in posts)
+            self.post_status.setText(f"Đã tải {post_count} bài viết và {reel_count} Reels · {len(self.selected_post_ids)} đã chọn.")
         def failed(message):
-            self.posts=[];self.selected_post_ids.clear();self._render_posts();self.post_status.setText(f"Không tải được bài viết: {message}")
+            self.post_status.setText(f"Không tải được bài viết: {message}")
         def finished():
-            self.load_posts_button.setEnabled(True);self._posts_worker=None;worker.deleteLater()
+            if self._posts_worker is worker:self._posts_worker=None;self.load_posts_button.set_loading(False)
+            worker.deleteLater()
         worker.succeeded.connect(succeeded);worker.failed.connect(failed);worker.finished.connect(finished);worker.start()
     def _render_posts(self):
         self.posts_table.blockSignals(True);self.posts_table.setRowCount(0)
@@ -103,7 +107,7 @@ class AutoCommentPage(QWidget):
     def clear_rows(self):self.comments.setRowCount(0);self.library_id=None;self._changed()
     def save_library(self):
         try:self.library_id=self.service.save_library(self.library_name.text(),self.items(),self.library_id);self.refresh_libraries();self.csv_status.setText("Đã lưu thư viện.")
-        except AutoCommentValidationError as e:QMessageBox.warning(self,"Thư viện",str(e))
+        except AutoCommentValidationError as e:self.csv_status.setText(f"Không thể lưu thư viện: {e}");QMessageBox.warning(self,"Thư viện",str(e))
     def open_library(self):
         if i:=self.library_picker.currentData():self.library_id=i;self.library_name.setText(self.library_picker.currentText());self.set_items(self.service.load_library(i))
     def _filter(self,t):
@@ -111,11 +115,16 @@ class AutoCommentPage(QWidget):
     def _changed(self,*_):
         a=self.items();self.csv_status.setText(f"{len(a)} tổng · {sum(x.enabled for x in a)} đang bật · {len(a)-len({x.comment_text for x in a})} trùng");self._invalidate()
     def generate_preview(self):
-        posts=[p for p in self.posts if p["post_id"] in self.selected_post_ids]
-        if not posts:self.preview_status.setText("Hãy tải và chọn ít nhất một bài viết trước khi tạo preview.");return
-        try:self.preview_comments={p["post_id"]:select_comments(self.items(),3 if self.three.isChecked() else 1,"sequential" if self.sequential_mode.isChecked() else "random") for p in posts}
-        except AutoCommentValidationError as e:self.preview_status.setText(str(e));return
-        self._render_preview(posts);self.preview_status.setText(f"Preview chưa lưu: {len(posts)} bài, {sum(map(len,self.preview_comments.values()))} comment.")
+        if self._preview_busy:return
+        self._preview_busy=True;self.preview_button.set_loading(True);self.preview_status.setText("Đang tạo preview...")
+        try:
+            posts=[p for p in self.posts if p["post_id"] in self.selected_post_ids]
+            if not posts:self.preview_status.setText("Hãy tải và chọn ít nhất một bài viết trước khi tạo preview.");return
+            comments={p["post_id"]:select_comments(self.items(),3 if self.three.isChecked() else 1,"sequential" if self.sequential_mode.isChecked() else "random") for p in posts}
+            self.preview_comments=comments;self._render_preview(posts)
+            self.preview_status.setText(f"Đã tạo {sum(map(len,comments.values()))} comment cho {len(posts)} bài viết.")
+        except AutoCommentValidationError as e:self.preview_status.setText(str(e))
+        finally:self._preview_busy=False;self.preview_button.set_loading(False)
     def _render_preview(self,posts):
         self.preview.blockSignals(True)
         self.preview.setRowCount(0)
@@ -154,6 +163,15 @@ class AutoCommentPage(QWidget):
         if getattr(self,"preview_comments",None):self.preview_status.setText("Cấu hình đã thay đổi; hãy tạo lại preview.")
     def _summary(self):
         if hasattr(self,"summary"):self.summary.setText(f"Fanpage: {self.page.currentText()} · Bài viết: {len(self.selected_post_ids)} · Thư viện: {self.library_name.text()}")
+    def closeEvent(self,event):
+        worker=self._posts_worker;self._posts_worker=None;self.load_posts_button.set_loading(False)
+        if worker is not None:
+            worker.requestInterruption()
+            for signal in (worker.succeeded,worker.failed,worker.finished):
+                try:signal.disconnect()
+                except (RuntimeError,TypeError):pass
+            worker.finished.connect(worker.deleteLater)
+        super().closeEvent(event)
     def dragEnterEvent(self,e):
         if e.mimeData().hasUrls() and any(x.toLocalFile().lower().endswith('.csv') for x in e.mimeData().urls()):e.acceptProposedAction()
     def dropEvent(self,e):

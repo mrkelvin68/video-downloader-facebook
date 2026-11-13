@@ -5,7 +5,7 @@ import tempfile
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication
 
 from app.database.connection import Database
@@ -16,6 +16,19 @@ from app.services.facebook_publishing_service import FacebookPublishingService
 from app.services.project_service import ProjectService
 from app.services.video_service import VideoService
 from app.ui.pages.auto_comment_page import AutoCommentPage
+
+
+class _ManualFacebookWorker(QObject):
+    succeeded = Signal(object)
+    failed = Signal(str)
+    finished = Signal()
+    instances = []
+
+    def __init__(self, operation, parent=None):
+        super().__init__(parent); self.operation = operation; self.started = False; self.interrupted = False; type(self).instances.append(self)
+
+    def start(self): self.started = True
+    def requestInterruption(self): self.interrupted = True
 
 
 class AutoCommentPhase1Tests(unittest.TestCase):
@@ -185,6 +198,41 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         campaign = AutoCommentService(self.database).list_campaigns()[0]
         _, preview = AutoCommentService(self.database).load_campaign_preview(campaign["id"])
         self.assertEqual([row["post_id"] for row in preview], ["post-1"])
+
+    def test_post_loading_uses_spinner_prevents_duplicates_and_reports_type_counts(self):
+        _ManualFacebookWorker.instances.clear(); page = AutoCommentPage(self.database); page.page.setCurrentIndex(1)
+        with patch("app.ui.pages.auto_comment_page.FacebookRequestWorker", _ManualFacebookWorker):
+            page.load_posts(); page.load_posts()
+            worker = _ManualFacebookWorker.instances[0]
+            self.assertTrue(page.load_posts_button.is_loading); self.assertTrue(worker.started); self.assertEqual(len(_ManualFacebookWorker.instances), 1)
+            worker.succeeded.emit([
+                {"post_id": "post", "post_type": "Post", "published_at": "2026-01-01T00:00:00+00:00", "comment_target_id": "post"},
+                {"post_id": "reel:1", "reel_id": "1", "post_type": "Reel", "published_at": "2026-01-01T00:00:00+00:00"},
+            ]); worker.finished.emit()
+        self.assertFalse(page.load_posts_button.is_loading)
+        self.assertIn("1 bài viết và 1 Reels", page.post_status.text())
+
+    def test_post_loading_error_keeps_existing_rows_and_close_stops_spinner(self):
+        _ManualFacebookWorker.instances.clear(); page = AutoCommentPage(self.database); page.page.setCurrentIndex(1)
+        page.posts=[{"post_id":"old","post_type":"Post","published_at":"2026-01-01T00:00:00+00:00","comment_target_id":"old"}];page.selected_post_ids={"old"};page._render_posts()
+        with patch("app.ui.pages.auto_comment_page.FacebookRequestWorker", _ManualFacebookWorker):
+            page.load_posts(); worker=_ManualFacebookWorker.instances[0]; worker.failed.emit("Lỗi mạng"); worker.finished.emit()
+            self.assertEqual(page.posts_table.rowCount(), 1); self.assertIn("Lỗi mạng", page.post_status.text())
+            page.load_posts(); worker=_ManualFacebookWorker.instances[1]; page.close()
+        self.assertTrue(worker.interrupted); self.assertFalse(page.load_posts_button.is_loading)
+
+    def test_preview_busy_state_and_completion_feedback(self):
+        page=AutoCommentPage(self.database);page.posts=[{"post_id":"post","post_type":"Post","published_at":"2026-01-01T00:00:00+00:00"}];page.selected_post_ids={"post"};page.set_items([CommentItem("Bình luận")])
+        def choose(*_args):
+            self.assertTrue(page.preview_button.is_loading); return ["Bình luận"]
+        with patch("app.ui.pages.auto_comment_page.select_comments", side_effect=choose): page.generate_preview()
+        self.assertFalse(page.preview_button.is_loading); self.assertIn("Đã tạo 1 comment cho 1 bài viết", page.preview_status.text())
+
+    def test_library_save_feedback_reports_success_and_error(self):
+        page=AutoCommentPage(self.database);page.set_items([CommentItem("Bình luận")]);page.save_library();self.assertIn("Đã lưu",page.csv_status.text())
+        with patch.object(page.service,"save_library",side_effect=AutoCommentValidationError("Tên trống")), patch("app.ui.pages.auto_comment_page.QMessageBox.warning"):
+            page.save_library()
+        self.assertIn("Không thể lưu",page.csv_status.text())
 
 
 if __name__ == "__main__":
