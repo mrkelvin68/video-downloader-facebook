@@ -482,13 +482,19 @@ class AutoCommentService:
             existing = self.database.connection.execute(
                 "SELECT execution_status FROM auto_comment_campaign_executions WHERE preview_item_id=?", (preview_item_id,)
             ).fetchone()
-            if existing is not None:
+            if existing is not None and existing["execution_status"] != "PENDING":
                 return False
-            self.database.connection.execute(
-                """INSERT INTO auto_comment_campaign_executions
-                   (id,campaign_id,preview_item_id,execution_status,operation_id,created_at,updated_at)
-                   VALUES (?,?,?,?,?,?,?)""", (str(uuid.uuid4()), campaign_id, preview_item_id, 'RUNNING', operation_id, now, now)
-            )
+            if existing is None:
+                self.database.connection.execute(
+                    """INSERT INTO auto_comment_campaign_executions
+                       (id,campaign_id,preview_item_id,execution_status,operation_id,created_at,updated_at)
+                       VALUES (?,?,?,?,?,?,?)""", (str(uuid.uuid4()), campaign_id, preview_item_id, 'RUNNING', operation_id, now, now)
+                )
+            else:
+                self.database.connection.execute(
+                    "UPDATE auto_comment_campaign_executions SET execution_status='RUNNING',operation_id=?,updated_at=? WHERE preview_item_id=?",
+                    (operation_id, now, preview_item_id),
+                )
         return True
 
     def finish_execution(self, preview_item_id: str, result: dict) -> None:
@@ -499,3 +505,40 @@ class AutoCommentService:
                    WHERE preview_item_id=?""",
                 (state, result.get('comment_id'), result.get('message'), _now(), preview_item_id),
             )
+
+    def execute_campaign_queue(self, campaign_id: str, validate: Callable[[dict], dict],
+                               publish: Callable[[dict, str], dict],
+                               progress: Callable[[int, int, dict, dict], None] | None = None) -> list[dict]:
+        """Run approved assignments sequentially; publisher and validation stay injectable."""
+        queue = [row for row in self.campaign_execution(campaign_id) if row["execution_status"] == "PENDING"]
+        results: list[dict] = []
+        for index, row in enumerate(queue, start=1):
+            try:
+                validation = validate(row)
+            except Exception as exc:
+                validation = {"status": "TARGET_UNVERIFIED", "message": f"Không thể xác minh target: {exc}"}
+            if validation.get("status") != "READY" or validation.get("target_id") != row.get("approved_target_id"):
+                message = validation.get("message") or f"Target bị chặn: {validation.get('status', 'TARGET_UNVERIFIED')}"
+                operation_id = str(uuid.uuid4())
+                if self.begin_execution(campaign_id, row["id"], operation_id):
+                    result = {"status": "FAILED", "message": message, "error_category": validation.get("status")}
+                    self.finish_execution(row["id"], result)
+                else:
+                    result = {"status": "FAILED", "message": "Assignment không còn ở trạng thái chờ."}
+            else:
+                operation_id = str(uuid.uuid4())
+                if not self.begin_execution(campaign_id, row["id"], operation_id):
+                    result = {"status": "FAILED", "message": "Assignment đã chạy hoặc cần đối soát."}
+                else:
+                    try:
+                        result = publish(row, operation_id)
+                    except Exception as exc:
+                        result = {"status": "UNCERTAIN", "error_category": "UNCERTAIN",
+                                  "message": f"Không chắc Facebook đã nhận comment: {exc}"}
+                    self.finish_execution(row["id"], result)
+            results.append({"assignment_id": row["id"], **result})
+            if progress:
+                progress(index, len(queue), row, result)
+            if result.get("status") == "UNCERTAIN" or result.get("error_category") in {"RATE_LIMIT", "PERMISSION_DENIED"}:
+                break
+        return results

@@ -197,6 +197,58 @@ class AutoCommentPhase1Tests(unittest.TestCase):
             service.save_preview(values, [post], {"reel:1": ["Nội dung khác"]}, campaign_id)
         self.assertEqual(service.campaign_execution(campaign_id)[0]["remote_comment_id"], "comment-1")
 
+    def test_campaign_queue_runs_approved_assignments_sequentially_without_retrying_uncertain(self):
+        service = AutoCommentService(self.database)
+        values = {"name": "Queue", "project_id": self.project_id, "page_id": "page-1", "start_date": "2026-11-01", "end_date": "2026-11-13",
+                  "content_type": "Reels", "selection_mode": "random", "count": 1, "prevent_duplicates": True,
+                  "targets_by_post": {f"reel:{index}": {"status": "READY", "target_id": f"target-{index}"} for index in range(1, 4)}}
+        posts = [{"post_id": f"reel:{index}", "reel_id": str(index), "post_type": "Reel", "published_at": "2026-11-10T00:00:00+00:00"} for index in range(1, 4)]
+        campaign_id = service.save_preview(values, posts, {post["post_id"]: [f"Comment {index}"] for index, post in enumerate(posts, start=1)}, approved_post_ids={post["post_id"] for post in posts})
+        calls = []; progress = []
+        def validate(row):
+            return {"status": "TARGET_UNVERIFIED", "message": "Không hỗ trợ"} if row["post_id"] == "reel:2" else {"status": "READY", "target_id": row["approved_target_id"]}
+        def publish(row, operation_id):
+            calls.append((row["post_id"], operation_id, row["comment_text"]))
+            return {"status": "UNCERTAIN", "message": "Mạng không chắc chắn"} if row["post_id"] == "reel:3" else {"status": "SUCCESS", "comment_id": "comment-1", "verification_status": "READ_BACK"}
+        results = service.execute_campaign_queue(campaign_id, validate, publish, lambda *args: progress.append(args))
+        self.assertEqual([call[0] for call in calls], ["reel:1", "reel:3"])
+        self.assertEqual(len({call[1] for call in calls}), 2)
+        self.assertEqual([result["status"] for result in results], ["SUCCESS", "FAILED", "UNCERTAIN"])
+        self.assertEqual(len(progress), 3)
+        restored = {row["post_id"]: row["execution_status"] for row in AutoCommentService(self.database).campaign_execution(campaign_id)}
+        self.assertEqual(restored, {"reel:1": "PUBLISHED", "reel:2": "FAILED", "reel:3": "UNCERTAIN"})
+        self.assertEqual(AutoCommentService(self.database).execute_campaign_queue(campaign_id, validate, publish), [])
+        self.assertEqual([call[0] for call in calls], ["reel:1", "reel:3"])
+
+    def test_campaign_queue_stops_after_meta_rate_limit(self):
+        service = AutoCommentService(self.database)
+        values = {"name": "Rate limit", "project_id": self.project_id, "page_id": "page-1", "start_date": "2026-11-01", "end_date": "2026-11-13",
+                  "content_type": "Reels", "selection_mode": "sequential", "count": 1, "prevent_duplicates": True,
+                  "targets_by_post": {"reel:1": {"status": "READY", "target_id": "target-1"}, "reel:2": {"status": "READY", "target_id": "target-2"}}}
+        posts = [{"post_id": "reel:1", "post_type": "Reel", "published_at": "2026-11-10T00:00:00+00:00"}, {"post_id": "reel:2", "post_type": "Reel", "published_at": "2026-11-10T00:00:00+00:00"}]
+        campaign_id = service.save_preview(values, posts, {"reel:1": ["Một"], "reel:2": ["Hai"]}, approved_post_ids={"reel:1", "reel:2"})
+        calls = []
+        results = service.execute_campaign_queue(campaign_id, lambda row: {"status": "READY", "target_id": row["approved_target_id"]},
+            lambda row, _operation: calls.append(row["post_id"]) or {"status": "FAILED", "error_category": "RATE_LIMIT", "message": "Meta chặn"})
+        self.assertEqual((calls, len(results)), (["reel:1"], 1))
+        restored = {row["post_id"]: row["execution_status"] for row in service.campaign_execution(campaign_id)}
+        self.assertEqual(restored, {"reel:1": "FAILED", "reel:2": "PENDING"})
+
+    def test_execution_ui_enables_multi_assignment_queue(self):
+        target_service = AutoCommentCommentService(self.database)
+        for index in (1, 2):
+            target_service._save_target(self.project_id, "page-1", {"source_id": f"reel:{index}", "target_id": f"target-{index}",
+                "target_type": "REEL", "status": "READY", "evidence": {"owner_id": "page-1"}}, "2026-11-14T00:00:00+00:00")
+        page = AutoCommentPage(self.database); page.page.setCurrentIndex(1)
+        page.posts = [{"post_id": f"reel:{index}", "reel_id": str(index), "post_type": "Reel", "published_at": "2026-11-10T00:00:00+00:00"} for index in (1, 2)]
+        page.selected_post_ids = {"reel:1", "reel:2"}; page._restore_target_states()
+        page.preview_comments = {"reel:1": ["Một"], "reel:2": ["Hai"]}; page._render_preview(page.posts)
+        for row in range(page.preview.rowCount()): page.preview.item(row, 0).setCheckState(Qt.CheckState.Checked)
+        page.save_campaign(); page.tabs.setCurrentIndex(3)
+        self.assertTrue(page.execution_button.isEnabled())
+        self.assertIn("Chờ gửi: 2", page.test_target_info.text())
+        page.close()
+
     def test_11_reel_preview_saves_one_canonical_ready_assignment_and_reopens_it(self):
         page_id = "1490753847447865"; source_id = "122108499879536255"; target_id = "4703374409946917"
         FacebookPublishingService(self.database).save_pages(self.project_id, [{"id": page_id, "name": "Đậu Đậu Review"}])
@@ -207,7 +259,10 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         ids = [source_id, "reel:1465931375512608"] + [f"reel:{number}" for number in range(9)]
         page.posts = [{"post_id": item, "post_type": "Reel", "published_at": "2026-11-10T00:00:00+00:00"} for item in ids]
         page.selected_post_ids = set(ids); page._restore_target_states(); page._render_posts()
-        page.set_items([CommentItem(f"Comment {number}") for number in range(4)]); page.three.setChecked(True); page.generate_preview()
+        page.set_items([CommentItem(f"Comment {number}") for number in range(4)]); page.generate_preview()
+        self.assertEqual(page.preview.rowCount(), 11)
+        self.assertTrue(page.one.isChecked() and page.random_mode.isChecked())
+        page.three.setChecked(True); self.assertTrue(page.three.isChecked() and page.random_mode.isChecked()); page.generate_preview()
         self.assertEqual((len(page.posts), len(page.selected_post_ids), page.preview.rowCount()), (11, 11, 33))
         self.assertEqual(len(page.approved_preview_assignments), 0)
         source_row = next(row for row in range(page.preview.rowCount()) if page.preview.item(row, 1).text() == source_id)

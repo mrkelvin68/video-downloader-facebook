@@ -3,11 +3,11 @@ from datetime import date
 import uuid
 from pathlib import Path
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QApplication, QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDateEdit, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget
 from app.database.connection import Database
 from app.services.auto_comment_comment_service import AutoCommentCommentService
 from app.services.auto_comment_service import AutoCommentService, AutoCommentValidationError, CommentItem, parse_comment_csv, select_comments
-from app.ui.facebook_worker import FacebookRequestWorker
+from app.ui.facebook_worker import FacebookPublishWorker, FacebookRequestWorker
 from app.ui.widgets.loading_button import LoadingButton
 
 TARGET_LABELS={"READY":"Sẵn sàng","TARGET_UNVERIFIED":"Chưa xác minh","TARGET_UNSUPPORTED":"Không hỗ trợ","PERMISSION_DENIED":"Thiếu quyền","TOKEN_MISSING":"Thiếu token","TOKEN_EXPIRED":"Token hết hạn","WRONG_PAGE":"Sai Fanpage","ERROR":"Lỗi"}
@@ -47,7 +47,7 @@ class AutoCommentPage(QWidget):
         for text,fn in (("Import CSV",self.import_csv),("Thêm dòng",self.add_row),("Xóa đã chọn",self.delete_rows),("Lưu thư viện",self.save_library),("Xóa import",self.clear_rows)):x=QPushButton(text);x.clicked.connect(fn);r.addWidget(x)
         self.csv_status=QLabel();r.addWidget(self.csv_status,1);l.addLayout(r);self.comments=self._table(["Bật","ID","Comment"],"autoCommentCommentsTable",editable=True);self.comments.setColumnWidth(0,58);self.comments.setColumnWidth(1,100);self.comments.itemChanged.connect(self._changed);l.addWidget(self.comments,1);l.addWidget(QLabel("CSV gốc không bị thay đổi. Chỉ comment bật và hợp lệ được đưa vào preview."));return w
     def _campaign(self):
-        w=QWidget();l=QVBoxLayout(w);box=QGroupBox("Bước 3 · Cấu hình & xem trước");f=QFormLayout(box);self.campaign_name=QLineEdit("Auto Comment draft");self.summary=QLabel();self.one=QRadioButton("Random 1 comment mỗi bài");self.three=QRadioButton("Random 3 comment khác nhau mỗi bài");self.one.setChecked(True);self.random_mode=QRadioButton("Ngẫu nhiên");self.sequential_mode=QRadioButton("Tuần tự");self.random_mode.setChecked(True);self.prevent_duplicates=QCheckBox("Không lặp nội dung trong cùng bài");self.prevent_duplicates.setChecked(True);r=QHBoxLayout()
+        w=QWidget();l=QVBoxLayout(w);box=QGroupBox("Bước 3 · Cấu hình & xem trước");f=QFormLayout(box);self.campaign_name=QLineEdit("Auto Comment draft");self.summary=QLabel();self.one=QRadioButton("Random 1 comment mỗi bài");self.three=QRadioButton("Random 3 comment khác nhau mỗi bài");self.count_group=QButtonGroup(self);self.count_group.addButton(self.one);self.count_group.addButton(self.three);self.one.setChecked(True);self.random_mode=QRadioButton("Ngẫu nhiên");self.sequential_mode=QRadioButton("Tuần tự");self.mode_group=QButtonGroup(self);self.mode_group.addButton(self.random_mode);self.mode_group.addButton(self.sequential_mode);self.random_mode.setChecked(True);self.prevent_duplicates=QCheckBox("Không lặp nội dung trong cùng bài");self.prevent_duplicates.setChecked(True);r=QHBoxLayout()
         for x in (self.one,self.three,self.random_mode,self.sequential_mode,self.prevent_duplicates):r.addWidget(x);x.toggled.connect(self._invalidate)
         self.campaign_picker=QComboBox();self.campaign_picker.currentIndexChanged.connect(self.open_campaign);f.addRow("Tên",self.campaign_name);f.addRow("Thông tin",self.summary);f.addRow("Chọn comment",r);f.addRow("Mở campaign",self.campaign_picker);l.addWidget(box);r=QHBoxLayout();self.preview_button=LoadingButton("Xem trước comment");self.preview_button.clicked.connect(self.generate_preview);r.addWidget(self.preview_button)
         for text,fn in (("Tạo lại preview",self.generate_preview),("Lưu campaign",self.save_campaign),("Chọn tất cả",lambda:self._all_preview(True)),("Bỏ chọn",lambda:self._all_preview(False))):x=QPushButton(text);x.clicked.connect(fn);r.addWidget(x)
@@ -212,44 +212,55 @@ class AutoCommentPage(QWidget):
         if not self.campaign_id:
             return
         rows=self.service.campaign_execution(self.campaign_id)
-        selected=self.page.currentData();ready=[];blocked=[]
+        selected=self.page.currentData();ready=[];blocked=[];pending=[];published=[]
         for row in rows:
             identity_matches=bool(selected and row.get("project_id")==selected[0] and row.get("page_id")==selected[1] and row.get("source_id"))
             row["ui_preflight_status"]=row["preflight_status"] if identity_matches else "PAGE_OR_SOURCE_MISMATCH"
             (ready if row["ui_preflight_status"]=="READY" else blocked).append(row)
-        details=[f"Campaign: {self.campaign_name.text()}",f"Fanpage: {self.page.currentText()}",f"Assignment đã duyệt: {len(rows)} · READY: {len(ready)} · Chưa xác minh/chặn: {len(blocked)}"]
+            if row["execution_status"]=="PENDING":pending.append(row)
+            if row["execution_status"]=="PUBLISHED":published.append(row)
+        eligible=[row for row in pending if row["ui_preflight_status"] not in {"IDENTITY_MISSING","SNAPSHOT_UNVERIFIED","PAGE_OR_SOURCE_MISMATCH","TARGET_ID_MISMATCH"}]
+        details=[f"Campaign: {self.campaign_name.text()}",f"Fanpage: {self.page.currentText()}",f"Assignment đã duyệt: {len(rows)} · READY: {len(ready)} · Bị chặn: {len(blocked)} · Chờ gửi: {len(pending)} · Đã gửi: {len(published)}"]
         for row in rows:
             details.append(f"{row['post_type']} {row.get('source_id') or row['post_id']} → {row['comment_text']} [Target: {row.get('approved_target_id') or 'chưa lưu'} · {row['ui_preflight_status']} · {row['execution_status']}]")
         self.test_target_info.setText("\n".join(details))
-        valid=len(rows)==1 and len(ready)==1 and rows[0]["post_type"]=="Reel" and rows[0]["execution_status"]=="PENDING"
-        self.execution_button.setEnabled(valid and self._publish_worker is None)
-        if not valid:
-            self.execution_button.setToolTip("Cần đúng 1 Reel đã duyệt, target READY và chưa từng thực hiện. Hãy quay lại Bước 1 hoặc 3 để xử lý.")
+        self.execution_button.setEnabled(bool(eligible) and self._publish_worker is None)
+        self.execution_button.setToolTip("Tự xác minh GET-only từng assignment trước khi gửi tuần tự. Assignment PUBLISHED/UNCERTAIN không được gửi lại.")
     def confirm_campaign_execution(self):
         if not self.campaign_id or not self.page.currentData():self._send_status("Hãy mở campaign đã lưu trước khi thực hiện.");return
         rows=self.service.campaign_execution(self.campaign_id)
-        if len(rows)!=1 or rows[0]["post_type"]!="Reel":self._send_status("Campaign acceptance chỉ hỗ trợ đúng 1 Reel đã duyệt.");self._refresh_execution();return
-        row=rows[0];selected=self.page.currentData();identity_matches=bool(selected and row.get("project_id")==selected[0] and row.get("page_id")==selected[1] and row.get("source_id"))
-        if not identity_matches or row["preflight_status"]!="READY":self._send_status(f"Assignment {row.get('source_id') or row['post_id']} bị chặn: {row['preflight_status'] if identity_matches else 'PAGE_OR_SOURCE_MISMATCH'}.");self._refresh_execution();return
-        if QMessageBox.question(self,"Xác nhận thực hiện campaign",f"Fanpage: {self.page.currentText()}\nReel nguồn: {row['source_id']}\nTarget đã duyệt: {row['approved_target_id']}\nComment chính xác:\n{row['comment_text']}\n\nĐăng đúng một comment này?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:self._send_status("Đã hủy xác nhận; campaign không thay đổi.");return
-        operation_id=str(uuid.uuid4())
-        if not self.service.begin_execution(self.campaign_id,row["id"],operation_id):self._send_status("Assignment đã được thực hiện hoặc đang đối soát; không gửi lại.");self._refresh_execution();return
-        self._publish_campaign_confirmed(selected,row,row["approved_target_id"],operation_id)
-    def _publish_campaign_confirmed(self,selected,row,target,operation_id):
+        selected=self.page.currentData();eligible=[]
+        for row in rows:
+            same_identity=bool(row.get("project_id")==selected[0] and row.get("page_id")==selected[1] and row.get("source_id"))
+            if row["execution_status"]=="PENDING" and same_identity and row["preflight_status"] not in {"IDENTITY_MISSING","SNAPSHOT_UNVERIFIED","TARGET_ID_MISMATCH"}:eligible.append(row)
+        if not eligible:self._send_status("Không có assignment hợp lệ để tự xác minh và gửi.");self._refresh_execution();return
+        preview="\n".join(f"• {row['source_id']} → {row['comment_text']}" for row in eligible[:20])
+        if len(eligible)>20:preview+=f"\n… và {len(eligible)-20} assignment khác"
+        if QMessageBox.question(self,"Xác nhận thực hiện campaign",f"Fanpage: {self.page.currentText()}\nSẽ tự xác minh GET-only rồi gửi tuần tự {len(eligible)} assignment:\n{preview}\n\nChỉ snapshot trên được sử dụng. Tiếp tục?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:self._send_status("Đã hủy xác nhận; campaign không thay đổi.");return
+        self._publish_campaign_queue(selected,eligible)
+    def _publish_campaign_queue(self,selected,eligible):
         if self._publish_worker is not None:return
-        project_id,page_id=selected;path=self.database.path;self.execution_button.set_loading(True);self.execution_button.setEnabled(False);self._send_status("Đang gửi assignment campaign đã xác nhận…")
-        def operation():
+        project_id,page_id=selected;campaign_id=self.campaign_id;path=self.database.path;total=len(eligible);self.execution_button.set_loading(True);self.execution_button.setEnabled(False);self._send_status(f"Đang tự xác minh và gửi tuần tự 0/{total} assignment…")
+        def operation(report_progress):
             db=Database(path)
-            try:return AutoCommentCommentService(db).publish_one(project_id,page_id,row["post_id"],target,row["comment_text"],confirmed=True,operation_id=operation_id)
+            try:
+                comment_service=AutoCommentCommentService(db);campaign_service=AutoCommentService(db)
+                def validate(row):
+                    source={"post_id":row["post_id"],"comment_target_id":row["approved_target_id"],"source_post_id":row.get("source_id"),"owner_page_id":row["page_id"],"post_type":row["post_type"]}
+                    return comment_service.resolve_target(row["project_id"],row["page_id"],source)
+                def publish(row,operation_id):return comment_service.publish_one(row["project_id"],row["page_id"],row["post_id"],row["approved_target_id"],row["comment_text"],confirmed=True,operation_id=operation_id)
+                def progress(index,count,_row,_result):report_progress(index / count * 100)
+                return campaign_service.execute_campaign_queue(campaign_id,validate,publish,progress)
             finally:db.close()
-        worker=FacebookRequestWorker(operation,self);self._publish_worker=worker
-        def completed(result):
-            self.service.finish_execution(row["id"],result);self._send_status(f"Đã đăng comment {result['comment_id']} ({result['verification_status']})." if result["status"]=="SUCCESS" else f"Không gửi lại tự động: {result['message']}");self.refresh_history();self._refresh_execution()
-        def failed(message):self.service.finish_execution(row["id"],{"status":"FAILED","message":message});self._send_status(f"Không thể gửi comment: {message}");self.refresh_history();self._refresh_execution()
+        worker=FacebookPublishWorker(operation,self);self._publish_worker=worker
+        def completed(results):
+            sent=sum(x.get("status")=="SUCCESS" for x in results);blocked=sum(x.get("status")!="SUCCESS" for x in results);self._send_status(f"Đã hoàn tất queue: {sent} gửi thành công, {blocked} bị chặn/lỗi.");self._restore_target_states();self.refresh_history();self._refresh_execution();self._summary()
+        def failed(message):self._send_status(f"Queue dừng do lỗi: {message}");self.refresh_history();self._refresh_execution()
+        def progress(percent):self._send_status(f"Đang tự xác minh và gửi tuần tự {min(total,max(1,round(percent / 100 * total)))}/{total} assignment…")
         def finished():
             if self._publish_worker is worker:self._publish_worker=None;self.execution_button.set_loading(False);self._refresh_execution()
             worker.deleteLater()
-        worker.succeeded.connect(completed);worker.failed.connect(failed);worker.finished.connect(finished);worker.start()
+        worker.succeeded.connect(completed);worker.failed.connect(failed);worker.progressChanged.connect(progress);worker.finished.connect(finished);worker.start()
     def _refresh_test_target(self,*_):
         if not hasattr(self,"test_target_info"):return
         if hasattr(self,"execution_button") and self.campaign_id:
