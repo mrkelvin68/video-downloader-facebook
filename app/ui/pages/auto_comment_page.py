@@ -1,12 +1,94 @@
 from __future__ import annotations
 from datetime import date
 from pathlib import Path
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtCore import QEvent, QRectF, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QCheckBox,
+    QComboBox,
+    QDateEdit,
+    QFileDialog,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QRadioButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 from app.services.auto_comment_service import AutoCommentService, AutoCommentValidationError, CommentItem, parse_comment_csv, select_comments
 from app.database.connection import Database
 from app.ui.facebook_worker import FacebookRequestWorker
 from app.ui.widgets.loading_button import LoadingButton
+
+
+class TableLoadingOverlay(QWidget):
+    """Semi-transparent loading overlay with rotating cyan spinner and status text."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self._angle = 0
+        self._text = "Đang đồng bộ dữ liệu..."
+        self._timer = QTimer(self)
+        self._timer.setInterval(25)  # 40 fps
+        self._timer.timeout.connect(self._rotate)
+        self.hide()
+
+    def _rotate(self) -> None:
+        self._angle = (self._angle + 6) % 360
+        self.update()
+
+    def start(self, text: str = "Đang đồng bộ dữ liệu...") -> None:
+        self._text = text
+        if self.parentWidget():
+            self.resize(self.parentWidget().size())
+            self.raise_()
+        if not self._timer.isActive():
+            self._timer.start()
+        self.show()
+
+    def stop(self) -> None:
+        self._timer.stop()
+        self.hide()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Dark semi-transparent backdrop
+        painter.fillRect(self.rect(), QColor(11, 17, 32, 195))
+
+        center_x = self.width() / 2.0
+        center_y = self.height() / 2.0 - 15.0
+
+        # Draw rotating spinner arc
+        spinner_radius = 22.0
+        painter.save()
+        painter.translate(center_x, center_y)
+        painter.rotate(self._angle)
+
+        pen = QPen(QColor("#38bdf8"), 3.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        arc_rect = QRectF(-spinner_radius, -spinner_radius, spinner_radius * 2.0, spinner_radius * 2.0)
+        painter.drawArc(arc_rect, 0, 270 * 16)
+        painter.restore()
+
+        # Draw label text underneath
+        painter.setFont(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
+        painter.setPen(QColor("#e2e8f0"))
+        text_rect = QRectF(0, center_y + spinner_radius + 12, self.width(), 30)
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, self._text)
+        painter.end()
 
 
 class AutoCommentPage(QWidget):
@@ -23,10 +105,33 @@ class AutoCommentPage(QWidget):
         w=QWidget(); l=QVBoxLayout(w); box=QGroupBox("Fanpage và bộ lọc"); f=QFormLayout(box); self.page=QComboBox(); self.page.currentIndexChanged.connect(self._page_changed); manage=QPushButton("Quản lý Fanpage"); manage.clicked.connect(self.pageManagementRequested.emit); pr=QHBoxLayout(); pr.addWidget(self.page,1); pr.addWidget(manage)
         self.start_date,self.end_date=QDateEdit(),QDateEdit()
         for x in (self.start_date,self.end_date): x.setCalendarPopup(True); x.setDisplayFormat("yyyy-MM-dd"); x.dateChanged.connect(self._invalidate)
-        self.start_date.setDate(date.today().replace(day=1)); self.end_date.setDate(date.today()); self.content_type=QComboBox(); self.content_type.addItems(["Tất cả","Reels","Bài viết thường"]); self.content_type.currentIndexChanged.connect(self._invalidate); self.load_posts_button=LoadingButton("Tải bài viết"); self.load_posts_button.setObjectName("primary"); self.load_posts_button.clicked.connect(self.load_posts)
+        self.start_date.setDate(date.today().replace(day=1)); self.end_date.setDate(date.today()); self.content_type=QComboBox(); self.content_type.addItems(["Tất cả","Reels","Bài viết thường"]); self.content_type.currentIndexChanged.connect(self._invalidate); self.load_posts_button=LoadingButton("Tải bài viết", loading_text="⌛ Đang tải bài viết..."); self.load_posts_button.setObjectName("primary"); self.load_posts_button.clicked.connect(self.load_posts)
         f.addRow("Fanpage",pr); f.addRow("Từ ngày",self.start_date); f.addRow("Đến ngày",self.end_date); f.addRow("Loại",self.content_type); f.addRow(self.load_posts_button); l.addWidget(box)
+
+        self.loading_container = QWidget()
+        loading_layout = QVBoxLayout(self.loading_container)
+        loading_layout.setContentsMargins(0, 4, 0, 4)
+        loading_layout.setSpacing(4)
+        self.loading_notice = QLabel("Đang tải bài viết từ Facebook... (Vui lòng đợi giây lát) ◌")
+        self.loading_notice.setStyleSheet("color: #38bdf8; font-size: 12px; font-weight: 500;")
+        self.loading_bar = QProgressBar()
+        self.loading_bar.setFixedHeight(3)
+        self.loading_bar.setTextVisible(False)
+        self.loading_bar.setRange(0, 0)
+        self.loading_bar.setStyleSheet(
+            "QProgressBar { background: #16263d; border: 0; border-radius: 1.5px; }"
+            "QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #06b6d4, stop:1 #3b82f6); border-radius: 1.5px; }"
+        )
+        loading_layout.addWidget(self.loading_notice)
+        loading_layout.addWidget(self.loading_bar)
+        self.loading_container.hide()
+        l.addWidget(self.loading_container)
+
         r=QHBoxLayout(); a=QPushButton("Chọn tất cả"); a.clicked.connect(lambda:self._all_posts(True)); b=QPushButton("Bỏ chọn tất cả"); b.clicked.connect(lambda:self._all_posts(False)); self.post_status=QLabel("Chưa tải bài viết."); r.addWidget(a);r.addWidget(b);r.addWidget(self.post_status,1);l.addLayout(r)
-        self.posts_table=QTableWidget(0,5);self.posts_table.setHorizontalHeaderLabels(["Chọn","Published At","Loại","ID nguồn","Trạng thái"]);self.posts_table.horizontalHeader().setStretchLastSection(True);self.posts_table.setColumnWidth(0,54);self.posts_table.itemChanged.connect(self._post_changed);l.addWidget(self.posts_table,1);l.addWidget(QLabel("Chỉ đọc dữ liệu Facebook; Phase 1 không gửi comment."));return w
+        self.posts_table=QTableWidget(0,5);self.posts_table.setHorizontalHeaderLabels(["Chọn","Published At","Loại","ID nguồn","Trạng thái"]);self.posts_table.horizontalHeader().setStretchLastSection(True);self.posts_table.setColumnWidth(0,54);self.posts_table.itemChanged.connect(self._post_changed);l.addWidget(self.posts_table,1);l.addWidget(QLabel("Chỉ đọc dữ liệu Facebook; Phase 1 không gửi comment."))
+        self.table_overlay = TableLoadingOverlay(self.posts_table)
+        self.posts_table.installEventFilter(self)
+        return w
     def _library(self):
         w=QWidget();l=QVBoxLayout(w);r=QHBoxLayout();self.library_picker=QComboBox();self.library_picker.currentIndexChanged.connect(self.open_library);self.library_name=QLineEdit("Thư viện comment");self.search=QLineEdit();self.search.setPlaceholderText("Tìm comment…");self.search.textChanged.connect(self._filter)
         for x in (self.library_picker,self.library_name,self.search):r.addWidget(x,1)
@@ -82,12 +187,34 @@ class AutoCommentPage(QWidget):
         if step==1 and not any(item.enabled and item.comment_text.strip() for item in self.items()):
             self.workflow_message.setText("Hãy import hoặc thêm ít nhất một comment đang bật trước khi tiếp tục.");return
         self._go_to_step(step+1)
+    def _set_posts_loading(self, loading: bool) -> None:
+        self.load_posts_button.set_loading(loading)
+        if loading:
+            self.load_posts_button.setStyleSheet(
+                "QPushButton { background-color: #1e293b; color: #94a3b8; border: 1px solid #334155; border-radius: 6px; padding: 7px 16px; font-weight: 600; }"
+            )
+            self.loading_container.show()
+            self.post_status.setText("Đang tải bài viết từ Facebook...")
+            if hasattr(self, "table_overlay"):
+                self.table_overlay.start("Đang đồng bộ dữ liệu...")
+        else:
+            self.load_posts_button.setStyleSheet("")
+            self.loading_container.hide()
+            if hasattr(self, "table_overlay"):
+                self.table_overlay.stop()
+
+    def eventFilter(self, watched, event):
+        if hasattr(self, "posts_table") and watched is self.posts_table and event.type() == QEvent.Type.Resize:
+            if hasattr(self, "table_overlay") and self.table_overlay.isVisible():
+                self.table_overlay.resize(self.posts_table.size())
+        return super().eventFilter(watched, event)
+
     def load_posts(self):
         selected=self.page.currentData()
         if not selected:self.post_status.setText("Hãy chọn Fanpage trước.");return
         if self._posts_worker is not None:return
         project_id,page_id=selected; kind={"Tất cả":"all","Reels":"reels","Bài viết thường":"posts"}[self.content_type.currentText()]
-        self.load_posts_button.set_loading(True);self.post_status.setText("Đang tải bài viết từ Facebook...")
+        self._set_posts_loading(True)
         path=self.database.path
         def operation():
             worker_database=Database(path)
@@ -104,7 +231,7 @@ class AutoCommentPage(QWidget):
         def failed(message):
             self.post_status.setText(f"Không tải được bài viết: {message}")
         def finished():
-            if self._posts_worker is worker:self._posts_worker=None;self.load_posts_button.set_loading(False)
+            if self._posts_worker is worker:self._posts_worker=None;self._set_posts_loading(False)
             worker.deleteLater()
         worker.succeeded.connect(succeeded);worker.failed.connect(failed);worker.finished.connect(finished);worker.start()
     def _render_posts(self):
@@ -199,7 +326,7 @@ class AutoCommentPage(QWidget):
     def _summary(self):
         if hasattr(self,"_workflow_step") and hasattr(self,"summary"):self._workflow_counts()
     def closeEvent(self,event):
-        worker=self._posts_worker;self._posts_worker=None;self.load_posts_button.set_loading(False)
+        worker=self._posts_worker;self._posts_worker=None;self._set_posts_loading(False)
         if worker is not None:
             worker.requestInterruption()
             for signal in (worker.succeeded,worker.failed,worker.finished):

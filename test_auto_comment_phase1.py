@@ -245,6 +245,32 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         self.assertIn("Đã chọn: 1",page.workflow_progress.text());self.assertIn("Comment bật: 1",page.workflow_progress.text())
         page._go_to_step(0);page._go_to_step(1);self.assertEqual(page.selected_post_ids,{"post"});self.assertEqual(page.items()[0].comment_text,"Bình luận chưa lưu")
 
+    def test_post_loading_ui_elements_match_modern_specs(self):
+        _ManualFacebookWorker.instances.clear()
+        page = AutoCommentPage(self.database)
+        page.page.setCurrentIndex(1)
+        self.assertEqual(page.load_posts_button.text(), "Tải bài viết")
+        self.assertTrue(page.loading_container.isHidden())
+        self.assertTrue(page.table_overlay.isHidden())
+
+        with patch("app.ui.pages.auto_comment_page.FacebookRequestWorker", _ManualFacebookWorker):
+            page.load_posts()
+            worker = _ManualFacebookWorker.instances[0]
+            self.assertTrue(page.load_posts_button.is_loading)
+            self.assertEqual(page.load_posts_button.text(), "⌛ Đang tải bài viết...")
+            self.assertFalse(page.load_posts_button.isEnabled())
+            self.assertFalse(page.loading_container.isHidden())
+            self.assertFalse(page.table_overlay.isHidden())
+
+            worker.succeeded.emit([])
+            worker.finished.emit()
+
+        self.assertFalse(page.load_posts_button.is_loading)
+        self.assertEqual(page.load_posts_button.text(), "Tải bài viết")
+        self.assertTrue(page.load_posts_button.isEnabled())
+        self.assertTrue(page.loading_container.isHidden())
+        self.assertTrue(page.table_overlay.isHidden())
+
 
 if __name__ == "__main__":
     unittest.main()
