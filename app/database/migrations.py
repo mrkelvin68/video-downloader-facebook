@@ -489,6 +489,26 @@ def _create_auto_comment_tables(connection: sqlite3.Connection) -> None:
         FOREIGN KEY(campaign_id) REFERENCES auto_comment_campaigns(id) ON DELETE CASCADE)""")
     connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_preview_campaign
         ON auto_comment_preview_items(campaign_id, post_id, selection_order)""")
+    # These records are intentionally separate from previews: resolving a target is
+    # evidence from a read-only Graph request, while a submission is an auditable
+    # one-shot operation.  No credential material is stored here.
+    connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_targets (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, page_id TEXT NOT NULL,
+        source_id TEXT NOT NULL, target_id TEXT, target_type TEXT,
+        status TEXT NOT NULL, evidence_json TEXT NOT NULL DEFAULT '{}',
+        checked_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(project_id, page_id, source_id))""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_targets_page
+        ON auto_comment_targets(project_id, page_id, status)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_submission_attempts (
+        id TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE,
+        project_id TEXT NOT NULL, page_id TEXT NOT NULL, source_id TEXT NOT NULL,
+        target_id TEXT NOT NULL, comment_text TEXT NOT NULL,
+        remote_comment_id TEXT, status TEXT NOT NULL, error_category TEXT,
+        error_message TEXT, verification_status TEXT NOT NULL DEFAULT 'NOT_ATTEMPTED',
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_submission_history
+        ON auto_comment_submission_attempts(project_id, page_id, source_id, created_at DESC)""")
 def migrate(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("BEGIN IMMEDIATE")

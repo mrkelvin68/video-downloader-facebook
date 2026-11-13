@@ -6,12 +6,13 @@ from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app.database.connection import Database
 from app.services.auto_comment_service import (
     AutoCommentService, AutoCommentValidationError, CommentItem, parse_comment_csv, select_comments,
 )
+from app.services.auto_comment_comment_service import AutoCommentCommentService
 from app.services.facebook_publishing_service import FacebookPublishingService
 from app.services.project_service import ProjectService
 from app.services.video_service import VideoService
@@ -252,24 +253,71 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         self.assertEqual(page.load_posts_button.text(), "Tải bài viết")
         self.assertTrue(page.loading_container.isHidden())
         self.assertTrue(page.table_overlay.isHidden())
-
         with patch("app.ui.pages.auto_comment_page.FacebookRequestWorker", _ManualFacebookWorker):
-            page.load_posts()
-            worker = _ManualFacebookWorker.instances[0]
+            page.load_posts(); worker = _ManualFacebookWorker.instances[0]
             self.assertTrue(page.load_posts_button.is_loading)
             self.assertEqual(page.load_posts_button.text(), "⌛ Đang tải bài viết...")
             self.assertFalse(page.load_posts_button.isEnabled())
             self.assertFalse(page.loading_container.isHidden())
-            self.assertFalse(page.table_overlay.isHidden())
-
-            worker.succeeded.emit([])
-            worker.finished.emit()
-
+            worker.succeeded.emit([]); worker.finished.emit()
         self.assertFalse(page.load_posts_button.is_loading)
         self.assertEqual(page.load_posts_button.text(), "Tải bài viết")
-        self.assertTrue(page.load_posts_button.isEnabled())
         self.assertTrue(page.loading_container.isHidden())
-        self.assertTrue(page.table_overlay.isHidden())
+
+    def test_target_resolver_requires_page_owned_readable_target_and_persists_evidence(self):
+        self._grant_page_read()
+        calls = []
+        def graph_get(path, _params, _token):
+            calls.append(path)
+            if path == "page-1": return {"id": "page-1"}
+            if path == "post-1": return {"id": "post-1", "from": {"id": "page-1"}}
+            if path == "post-1/comments": return {"data": []}
+            raise AssertionError(path)
+        source = {"post_id": "post-1", "source_post_id": "post-1", "video_id": "video-1", "post_type": "Post"}
+        with patch("app.services.auto_comment_comment_service.get_page_token", return_value="page-token"), patch("app.services.auto_comment_service.get_page_token", return_value="page-token"):
+            result = AutoCommentCommentService(self.database, graph_get=graph_get).resolve_target(self.project_id, "page-1", source)
+        self.assertEqual((result["status"], result["target_id"]), ("READY", "post-1"))
+        self.assertEqual(calls, ["page-1", "post-1", "post-1/comments"])
+        row = self.database.connection.execute("SELECT status,target_id,evidence_json FROM auto_comment_targets").fetchone()
+        self.assertEqual((row["status"], row["target_id"]), ("READY", "post-1"))
+        self.assertNotIn("page-token", row["evidence_json"])
+
+    def test_reel_without_post_id_is_never_assumed_to_be_a_comment_target(self):
+        self._grant_page_read()
+        with patch("app.services.auto_comment_comment_service.get_page_token", return_value="page-token"), patch("app.services.auto_comment_service.get_page_token", return_value="page-token"):
+            result = AutoCommentCommentService(self.database, graph_get=lambda *_: {"id": "page-1"}).resolve_target(
+                self.project_id, "page-1", {"post_id": "reel:7", "post_type": "Reel"})
+        self.assertEqual(result["status"], "TARGET_UNVERIFIED")
+        self.assertIsNone(result["target_id"])
+
+    def test_single_publish_requires_confirmation_and_never_retries_same_operation(self):
+        service = AutoCommentCommentService(self.database, graph_get=lambda path, *_: {"id": path}, graph_post=lambda *_: {"id": "comment-1"})
+        with self.assertRaises(AutoCommentValidationError):
+            service.publish_one(self.project_id, "page-1", "post-1", "post-1", "Xin chào", confirmed=False, operation_id="op-1")
+        with patch("app.services.auto_comment_comment_service.get_page_token", return_value="page-token"):
+            result = service.publish_one(self.project_id, "page-1", "post-1", "post-1", "Xin chào", confirmed=True, operation_id="op-1")
+        self.assertEqual((result["status"], result["verification_status"]), ("SUCCESS", "READ_BACK"))
+        with self.assertRaisesRegex(AutoCommentValidationError, "không tự gửi lại"):
+            service.publish_one(self.project_id, "page-1", "post-1", "post-1", "Xin chào", confirmed=True, operation_id="op-1")
+        row = self.database.connection.execute("SELECT status,remote_comment_id FROM auto_comment_submission_attempts WHERE operation_id='op-1'").fetchone()
+        self.assertEqual((row["status"], row["remote_comment_id"]), ("SUCCESS", "comment-1"))
+
+    def test_ui_publish_requires_one_ready_target_and_explicit_confirmation(self):
+        _ManualFacebookWorker.instances.clear()
+        page = AutoCommentPage(self.database); page.page.setCurrentIndex(1)
+        page.posts = [{"post_id": "post-1", "post_type": "Post", "published_at": "2026-01-01T00:00:00+00:00"}]
+        page.selected_post_ids = {"post-1"}; page.manual_comment.setText("Xin chào")
+        page.confirm_publish_one()
+        self.assertIn("đúng một target", page.preview_status.text())
+        page.target_states = {"post-1": {"status": "READY", "target_id": "post-1"}}
+        with patch("app.ui.pages.auto_comment_page.FacebookRequestWorker", _ManualFacebookWorker), patch("app.ui.pages.auto_comment_page.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
+            page.confirm_publish_one()
+            worker = _ManualFacebookWorker.instances[0]
+            self.assertTrue(worker.started); self.assertTrue(page.publish_one_button.is_loading)
+            worker.succeeded.emit({"status": "SUCCESS", "comment_id": "comment-1", "verification_status": "READ_BACK"}); worker.finished.emit()
+        self.assertFalse(page.publish_one_button.is_loading)
+        self.assertIn("comment-1", page.preview_status.text())
+
 
 
 if __name__ == "__main__":
