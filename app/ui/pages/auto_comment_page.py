@@ -21,7 +21,7 @@ class AutoCommentPage(QWidget):
         self.start_date.setDate(date.today().replace(day=1)); self.end_date.setDate(date.today()); self.content_type=QComboBox(); self.content_type.addItems(["Tất cả","Reels","Bài viết thường"]); self.content_type.currentIndexChanged.connect(self._invalidate); self.load_posts_button=QPushButton("Tải bài viết"); self.load_posts_button.setObjectName("primary"); self.load_posts_button.clicked.connect(self.load_posts)
         f.addRow("Fanpage",pr); f.addRow("Từ ngày",self.start_date); f.addRow("Đến ngày",self.end_date); f.addRow("Loại",self.content_type); f.addRow(self.load_posts_button); l.addWidget(box)
         r=QHBoxLayout(); a=QPushButton("Chọn tất cả"); a.clicked.connect(lambda:self._all_posts(True)); b=QPushButton("Bỏ chọn tất cả"); b.clicked.connect(lambda:self._all_posts(False)); self.post_status=QLabel("Chưa tải bài viết."); r.addWidget(a);r.addWidget(b);r.addWidget(self.post_status,1);l.addLayout(r)
-        self.posts_table=QTableWidget(0,5);self.posts_table.setHorizontalHeaderLabels(["Chọn","Published At","Loại","Post ID","Trạng thái"]);self.posts_table.horizontalHeader().setStretchLastSection(True);self.posts_table.setColumnWidth(0,54);self.posts_table.itemChanged.connect(self._post_changed);l.addWidget(self.posts_table,1);l.addWidget(QLabel("Phase 2A sẽ bổ sung đồng bộ Facebook. Chỉ bài publish cục bộ có Post ID/timestamp tin cậy được hiển thị."));return w
+        self.posts_table=QTableWidget(0,5);self.posts_table.setHorizontalHeaderLabels(["Chọn","Published At","Loại","ID nguồn","Trạng thái"]);self.posts_table.horizontalHeader().setStretchLastSection(True);self.posts_table.setColumnWidth(0,54);self.posts_table.itemChanged.connect(self._post_changed);l.addWidget(self.posts_table,1);l.addWidget(QLabel("Chỉ đọc dữ liệu Facebook; Phase 1 không gửi comment."));return w
     def _library(self):
         w=QWidget();l=QVBoxLayout(w);r=QHBoxLayout();self.library_picker=QComboBox();self.library_picker.currentIndexChanged.connect(self.open_library);self.library_name=QLineEdit("Thư viện comment");self.search=QLineEdit();self.search.setPlaceholderText("Tìm comment…");self.search.textChanged.connect(self._filter)
         for x in (self.library_picker,self.library_name,self.search):r.addWidget(x,1)
@@ -72,11 +72,15 @@ class AutoCommentPage(QWidget):
         self.posts_table.blockSignals(True);self.posts_table.setRowCount(0)
         for p in self.posts:
             row=self.posts_table.rowCount();self.posts_table.insertRow(row);q=QTableWidgetItem();q.setCheckState(Qt.CheckState.Checked if p["post_id"] in self.selected_post_ids else Qt.CheckState.Unchecked);self.posts_table.setItem(row,0,q)
-            for c,v in enumerate((p["published_at"],p["post_type"],p["post_id"],"Sẵn sàng"),1):self.posts_table.setItem(row,c,QTableWidgetItem(str(v)))
-        self.posts_table.blockSignals(False);self.post_status.setText(f"{len(self.posts)} bài · {len(self.selected_post_ids)} đã chọn" if self.posts else "Không có bài phù hợp trong dữ liệu cục bộ.");self._summary()
+            source_id=p.get("source_post_id") or p.get("reel_id") or p["post_id"];status="Sẵn sàng" if p.get("comment_target_id") else "Reel: chưa có Post ID"
+            for c,v in enumerate((p["published_at"],p["post_type"],source_id,status),1):
+                item=QTableWidgetItem(str(v));
+                if c==3:item.setData(Qt.ItemDataRole.UserRole,p["post_id"])
+                self.posts_table.setItem(row,c,item)
+        self.posts_table.blockSignals(False);self.post_status.setText(f"{len(self.posts)} bài · {len(self.selected_post_ids)} đã chọn" if self.posts else "Tải thành công nhưng không có bài phù hợp trong khoảng ngày đã chọn.");self._summary()
     def _post_changed(self,i):
         if i.column()==0:
-            pid=self.posts_table.item(i.row(),3).text();(self.selected_post_ids.add if i.checkState()==Qt.CheckState.Checked else self.selected_post_ids.discard)(pid);self._render_posts();self._invalidate()
+            pid=self.posts_table.item(i.row(),3).data(Qt.ItemDataRole.UserRole);(self.selected_post_ids.add if i.checkState()==Qt.CheckState.Checked else self.selected_post_ids.discard)(pid);self._render_posts();self._invalidate()
     def _all_posts(self,on):self.selected_post_ids={p["post_id"] for p in self.posts} if on else set();self._render_posts();self._invalidate()
     def set_items(self,items):
         self.comments.blockSignals(True);self.comments.setRowCount(0)

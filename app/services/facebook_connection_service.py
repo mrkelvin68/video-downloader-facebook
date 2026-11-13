@@ -211,11 +211,15 @@ class FacebookConnectionService:
                     raise FacebookConnectionError("Không thể xác thực Facebook. Vui lòng xem chi tiết lỗi API.", category="api")
                 validated.append(page)
         if validated:
+            default_page_id = next((row["page_id"] for row in stored_pages if row["is_default"]), None)
+            self.publishing.save_pages(project_id, validated, default_page_id)
             return validated
         token = get_meta_token()
         if not token:
             raise FacebookConnectionError("Chưa lưu thông tin kết nối Facebook.")
-        return self.client_factory(token).validate_and_list_pages()
+        pages = self.client_factory(token).validate_and_list_pages()
+        self.publishing.save_pages(project_id, pages)
+        return pages
 
     def sync_pages(self, project_id: str) -> list[dict[str, Any]]:
         """Refresh locally stored Page metadata using the existing Meta token."""

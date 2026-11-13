@@ -1,7 +1,9 @@
 import unittest
+import io
 from pathlib import Path
 import tempfile
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
@@ -90,7 +92,55 @@ class AutoCommentPhase1Tests(unittest.TestCase):
                     {"id": "reel", "created_time": "2026-01-02T00:00:00+00:00", "post_type": "Reel"},
                 ],
             )
-        self.assertEqual(posts, [{"post_id": "reel", "published_at": "2026-01-02T00:00:00+00:00", "post_type": "Reel"}])
+        self.assertEqual(posts[0]["post_id"], "reel:reel")
+        self.assertEqual(posts[0]["reel_id"], "reel")
+        self.assertIsNone(posts[0]["source_post_id"])
+
+    def test_live_sync_paginates_filters_deduplicates_and_keeps_source_ids_distinct(self):
+        FacebookPublishingService(self.database).save_pages(self.project_id, [
+            {"id": "page-1", "name": "Page 1", "permissions": ["pages_read_engagement"]},
+        ])
+        calls = []
+        def graph_get(path, params, _token):
+            calls.append((path, dict(params)))
+            if path == "page-1": return {"id": "page-1"}
+            if path == "page-1/posts" and "after" not in params:
+                return {"data": [{"id": "post-1", "created_time": "2026-01-02T12:00:00+00:00"}], "paging": {"cursors": {"after": "posts-2"}}}
+            if path == "page-1/posts":
+                return {"data": [{"id": "post-1", "created_time": "2026-01-02T12:00:00+00:00"}, {"id": "old", "created_time": "2025-12-31T12:00:00+00:00"}]}
+            if path == "page-1/video_reels" and "after" not in params:
+                return {"data": [{"id": "reel-1", "video_id": "video-1", "created_time": "2026-01-03T12:00:00+00:00"}], "paging": {"cursors": {"after": "reels-2"}}}
+            return {"data": [{"id": "reel-2", "post_id": "post-for-reel", "video_id": "video-2", "created_time": "2026-01-04T12:00:00+00:00"}]}
+        service = AutoCommentService(self.database, graph_get)
+        with patch("app.services.auto_comment_service.get_page_token", return_value="page-token"):
+            rows = service.fetch_posts(self.project_id, "page-1", "2026-01-01", "2026-01-04", "all")
+        self.assertEqual({row["post_id"] for row in rows}, {"post-1", "reel:reel-1", "post-for-reel"})
+        reel = next(row for row in rows if row["reel_id"] == "reel-2")
+        self.assertEqual((reel["source_post_id"], reel["video_id"], reel["comment_target_id"]), ("post-for-reel", "video-2", "post-for-reel"))
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(calls[1][1]["until"], "2026-01-05")
+
+    def test_live_sync_rejects_page_token_for_another_page(self):
+        FacebookPublishingService(self.database).save_pages(self.project_id, [
+            {"id": "page-1", "name": "Page 1", "permissions": ["pages_read_engagement"]},
+        ])
+        service = AutoCommentService(self.database, lambda *_args: {"id": "other-page"})
+        with patch("app.services.auto_comment_service.get_page_token", return_value="page-token"):
+            with self.assertRaisesRegex(AutoCommentValidationError, "không thuộc Fanpage"):
+                service.fetch_posts(self.project_id, "page-1", "2026-01-01", "2026-01-02", "all")
+
+    def test_live_sync_maps_expired_permission_and_network_errors_without_token_output(self):
+        expired = HTTPError("https://graph.facebook.com", 401, "", {}, io.BytesIO(b'{"error":{"code":190}}'))
+        with patch("app.services.auto_comment_service.urlopen", side_effect=expired):
+            with self.assertRaisesRegex(AutoCommentValidationError, "hết hạn"):
+                AutoCommentService._live_graph_get("page-1", {"fields": "id"}, "secret-token")
+        denied = HTTPError("https://graph.facebook.com", 403, "", {}, io.BytesIO(b'{"error":{"code":200}}'))
+        with patch("app.services.auto_comment_service.urlopen", side_effect=denied):
+            with self.assertRaisesRegex(AutoCommentValidationError, "pages_read_engagement"):
+                AutoCommentService._live_graph_get("page-1", {"fields": "id"}, "secret-token")
+        with patch("app.services.auto_comment_service.urlopen", side_effect=URLError("offline")):
+            with self.assertRaisesRegex(AutoCommentValidationError, "kết nối"):
+                AutoCommentService._live_graph_get("page-1", {"fields": "id"}, "secret-token")
 
     def test_saving_existing_campaign_updates_instead_of_duplicates(self):
         service = AutoCommentService(self.database)

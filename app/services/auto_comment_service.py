@@ -7,7 +7,7 @@ import random
 import uuid
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -108,8 +108,9 @@ def select_comments(items: list[CommentItem], count: int, mode: str = "random") 
 
 
 class AutoCommentService:
-    def __init__(self, database) -> None:
+    def __init__(self, database, graph_get: Callable[[str, dict[str, str], str], dict[str, Any]] | None = None) -> None:
         self.database = database
+        self._graph_get = graph_get or self._live_graph_get
 
     def list_pages(self) -> list[dict]:
         return [dict(row) for row in self.database.connection.execute(
@@ -136,7 +137,7 @@ class AutoCommentService:
             "verified": bool(permissions),
         }
 
-    def fetch_posts(
+    def _fetch_posts_single_page(
         self, project_id: str, page_id: str, start_date: str, end_date: str, content_type: str,
         *, request: Callable[[str, str, str, str], list[dict[str, Any]]] | None = None,
     ) -> list[dict]:
@@ -168,7 +169,7 @@ class AutoCommentService:
         return sorted(posts, key=lambda item: (item["published_at"], item["post_id"]), reverse=True)
 
     @staticmethod
-    def _graph_posts(page_id: str, token: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
+    def _graph_posts_single_page(page_id: str, token: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
         params = {
             "fields": "id,created_time,status_type,type",
             "since": start_date, "until": end_date, "limit": "100", "access_token": token,
@@ -204,6 +205,123 @@ class AutoCommentService:
              "post_type": "Reel" if item.get("type") == "VIDEO" and item.get("status_type") == "added_video" else "Post"}
             for item in payload.get("data", [])
         ]
+
+    def fetch_posts(
+        self, project_id: str, page_id: str, start_date: str, end_date: str, content_type: str,
+        *, request: Callable[[str, str, str, str], list[dict[str, Any]]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read normal Page posts and Reels; this service never sends a Graph POST."""
+        if content_type not in {"all", "posts", "reels"}:
+            raise AutoCommentValidationError("Loại bài viết không hợp lệ.")
+        access = self.page_access(project_id, page_id)
+        if not access["has_token"]:
+            raise AutoCommentPageAccessError("Fanpage chưa có Page Access Token; hãy kết nối hoặc đồng bộ lại Fanpage.")
+        if not access["verified"]:
+            raise AutoCommentPageAccessError("Quyền Fanpage chưa được xác minh; hãy dùng “Kiểm tra Token & quyền”.")
+        if not access["can_read_posts"]:
+            raise AutoCommentPageAccessError("Token hợp lệ nhưng thiếu quyền pages_read_engagement để đọc bài viết.")
+        token = get_page_token(project_id, page_id)
+        if request is not None:  # Compatibility seam for existing local callers/tests.
+            rows = request(page_id, token, start_date, end_date)
+        else:
+            self._verify_page_token(page_id, token)
+            rows = []
+            if content_type in {"all", "posts"}:
+                rows.extend(self._read_edge(page_id, token, "posts", start_date, end_date))
+            if content_type in {"all", "reels"}:
+                rows.extend(self._read_edge(page_id, token, "video_reels", start_date, end_date))
+        return self._normalise_posts(rows, start_date, end_date, content_type)
+
+    def _verify_page_token(self, page_id: str, token: str) -> None:
+        payload = self._graph_get(page_id, {"fields": "id"}, token)
+        if str(payload.get("id") or "") != page_id:
+            raise AutoCommentPageAccessError("Page Access Token không thuộc Fanpage đang chọn.")
+
+    def _read_edge(self, page_id: str, token: str, edge: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
+        fields = "id,created_time" if edge == "video_reels" else "id,created_time"
+        until = (date.fromisoformat(end_date) + timedelta(days=1)).isoformat()
+        params = {"fields": fields, "since": start_date, "until": until, "limit": "100"}
+        rows: list[dict[str, Any]] = []
+        seen_cursors: set[str] = set()
+        while True:
+            payload = self._graph_get(f"{page_id}/{edge}", params, token)
+            data = payload.get("data", [])
+            if not isinstance(data, list):
+                raise AutoCommentPageAccessError("Phản hồi Facebook không có danh sách bài viết hợp lệ.")
+            for item in data:
+                if isinstance(item, dict):
+                    rows.append({**item, "_edge": edge})
+            after = str(payload.get("paging", {}).get("cursors", {}).get("after") or "")
+            if not after or after in seen_cursors:
+                break
+            seen_cursors.add(after)
+            params = {**params, "after": after}
+        return rows
+
+    @staticmethod
+    def _normalise_posts(rows: list[dict[str, Any]], start_date: str, end_date: str, content_type: str) -> list[dict[str, Any]]:
+        start, end = date.fromisoformat(start_date), date.fromisoformat(end_date)
+        unique: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            published_at = str(row.get("published_at") or row.get("created_time") or "")
+            try:
+                published_date = datetime.fromisoformat(published_at.replace("Z", "+00:00")).date()
+            except ValueError:
+                continue
+            if not start <= published_date <= end:
+                continue
+            is_reel = row.get("_edge") == "video_reels" or str(row.get("post_type") or "") == "Reel"
+            if content_type == "posts" and is_reel or content_type == "reels" and not is_reel:
+                continue
+            if is_reel:
+                reel_id = str(row.get("reel_id") or row.get("id") or "")
+                source_post_id = str(row.get("source_post_id") or row.get("post_id") or "") or None
+                video_id = str(row.get("video_id") or "") or None
+                if not reel_id:
+                    continue
+                planner_id = source_post_id or f"reel:{reel_id}"
+                record = {"post_id": planner_id, "source_post_id": source_post_id, "video_id": video_id,
+                          "reel_id": reel_id, "comment_target_id": source_post_id,
+                          "published_at": published_at, "post_type": "Reel"}
+            else:
+                source_post_id = str(row.get("source_post_id") or row.get("post_id") or row.get("id") or "")
+                if not source_post_id:
+                    continue
+                record = {"post_id": source_post_id, "source_post_id": source_post_id, "video_id": None,
+                          "reel_id": None, "comment_target_id": source_post_id,
+                          "published_at": published_at, "post_type": "Post"}
+            unique.setdefault(record["post_id"], record)
+        return sorted(unique.values(), key=lambda item: (item["published_at"], item["post_id"]), reverse=True)
+
+    @staticmethod
+    def _live_graph_get(path: str, params: dict[str, str], token: str) -> dict[str, Any]:
+        request = Request(
+            f"https://graph.facebook.com/v26.0/{path}?{urlencode({**params, 'access_token': token})}",
+            headers={"Accept": "application/json"},
+        )
+        try:
+            with urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            try:
+                code = str(json.loads(exc.read().decode("utf-8")).get("error", {}).get("code") or "")
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                code = ""
+            if code == "190" or exc.code == 401:
+                raise AutoCommentPageAccessError("Access Token đã hết hạn hoặc bị thu hồi.") from exc
+            if code in {"10", "200", "283"} or exc.code == 403:
+                raise AutoCommentPageAccessError("Token hợp lệ nhưng thiếu quyền pages_read_engagement để đọc bài viết.") from exc
+            raise AutoCommentPageAccessError(f"Không thể tải bài viết từ Facebook (HTTP {exc.code}).") from exc
+        except (URLError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AutoCommentPageAccessError("Không thể kết nối Meta Graph API để tải bài viết.") from exc
+        if "error" in payload:
+            code = str(payload["error"].get("code") or "")
+            if code == "190":
+                raise AutoCommentPageAccessError("Access Token đã hết hạn hoặc bị thu hồi.")
+            if code in {"10", "200", "283"}:
+                raise AutoCommentPageAccessError("Token hợp lệ nhưng thiếu quyền pages_read_engagement để đọc bài viết.")
+            raise AutoCommentPageAccessError("Không thể tải bài viết từ Facebook.")
+        return payload
 
     def save_library(self, name: str, items: list[CommentItem], library_id: str | None = None) -> str:
         if not name.strip():

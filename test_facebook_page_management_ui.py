@@ -18,6 +18,14 @@ class _SyncClient:
         return [{"id": "page-c", "name": "Page C", "permissions": ["pages_manage_posts"], "access_token": "page-token"}]
 
 
+class _TestClient:
+    def __init__(self, token): self.token = token
+    def _get_page_identity(self, page_id, *, raise_errors=False):
+        return {"id": page_id, "name": "Verified Page", "url": "", "permissions": ["pages_read_engagement"], "access_token": self.token}
+    def validate_and_list_pages(self):
+        return [{"id": "page-a", "name": "Verified Page", "permissions": ["pages_read_engagement"], "access_token": self.token}]
+
+
 class FacebookPageManagementTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -61,6 +69,13 @@ class FacebookPageManagementTests(unittest.TestCase):
             pages = service.sync_pages(self.project_id)
         self.assertEqual(pages[0]["id"], "page-c")
         self.assertIn("page-c", [page["page_id"] for page in FacebookPublishingService(self.database).list_pages(self.project_id)])
+
+    def test_token_check_persists_verified_page_permissions_for_auto_comment(self):
+        service = FacebookConnectionService(self.database, _TestClient)
+        with patch("app.services.facebook_connection_service.get_page_token", return_value="page-token"):
+            service.test_connection(self.project_id)
+        page = next(row for row in FacebookPublishingService(self.database).list_pages(self.project_id) if row["page_id"] == "page-a")
+        self.assertIn("pages_read_engagement", page["permissions_json"])
 
 
 if __name__ == "__main__":
