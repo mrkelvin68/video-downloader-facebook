@@ -320,6 +320,22 @@ class AutoCommentPhase1Tests(unittest.TestCase):
             result = AutoCommentCommentService(self.database, graph_get=graph_get).resolve_target(self.project_id, "page-1", source)
         self.assertEqual((result["status"], result["target_id"]), ("READY", "video-9"))
 
+    def test_ready_reel_target_is_restored_for_step_three_after_reload(self):
+        service = AutoCommentCommentService(self.database)
+        service._save_target(self.project_id, "page-1", {
+            "source_id": "reel:7", "target_id": "video-9", "target_type": "REEL", "status": "READY",
+            "evidence": {"owner_id": "page-1", "checked": "comments"},
+        }, "2026-11-14T00:00:00+00:00")
+        page = AutoCommentPage(self.database); page.page.setCurrentIndex(1)
+        page.posts = [{"post_id": "reel:7", "reel_id": "reel-7", "video_id": "video-9", "owner_page_id": "page-1",
+                       "post_type": "Reel", "published_at": "2026-11-01T00:00:00+00:00"}]
+        page.selected_post_ids = {"reel:7"}; page._restore_target_states(); page._render_posts()
+        self.assertEqual(page.target_states["reel:7"]["target_id"], "video-9")
+        self.assertEqual(page.posts_table.item(0, 4).text(), "Sẵn sàng")
+        page.tabs.setCurrentIndex(2)
+        self.assertIn("Target sẵn sàng: 1", page.summary.text())
+        page.close()
+
     def test_single_publish_requires_confirmation_and_never_retries_same_operation(self):
         service = AutoCommentCommentService(self.database, graph_get=lambda path, *_: {"id": path}, graph_post=lambda *_: {"id": "comment-1"})
         with self.assertRaises(AutoCommentValidationError):
@@ -345,12 +361,17 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         page.posts = [{"post_id": "post-1", "post_type": "Post", "published_at": "2026-01-01T00:00:00+00:00"}]
         page.selected_post_ids = {"post-1"}; page.manual_comment.setText("Xin chào")
         page.confirm_publish_one()
-        self.assertIn("đúng một target", page.preview_status.text())
+        self.assertIn("đúng một Reel hoặc bài viết", page.preview_status.text())
         page.target_states = {"post-1": {"status": "READY", "target_id": "post-1"}}
-        with patch("app.ui.pages.auto_comment_page.FacebookRequestWorker", _ManualFacebookWorker), patch("app.ui.pages.auto_comment_page.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
+        page.posts.append({"post_id": "post-2", "post_type": "Post", "published_at": "2026-01-01T00:00:00+00:00"}); page.selected_post_ids.add("post-2")
+        page.confirm_publish_one()
+        self.assertIn("đúng một Reel hoặc bài viết", page.preview_status.text())
+        page.posts.pop(); page.selected_post_ids.remove("post-2")
+        with patch("app.ui.pages.auto_comment_page.FacebookRequestWorker", _ManualFacebookWorker), patch("app.ui.pages.auto_comment_page.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes) as confirmation:
             page.confirm_publish_one()
             worker = _ManualFacebookWorker.instances[0]
             self.assertTrue(worker.started); self.assertTrue(page.publish_one_button.is_loading)
+            self.assertIn("Reel/bài viết: post-1", confirmation.call_args.args[2]); self.assertIn("Target comment: post-1", confirmation.call_args.args[2])
             worker.succeeded.emit({"status": "SUCCESS", "comment_id": "comment-1", "verification_status": "READ_BACK"}); worker.finished.emit()
         self.assertFalse(page.publish_one_button.is_loading)
         self.assertIn("comment-1", page.preview_status.text())

@@ -146,6 +146,26 @@ class AutoCommentCommentService:
                  result["target_type"], result["status"], json.dumps(result["evidence"], ensure_ascii=False), now, now),
             )
 
+    def load_targets(self, project_id: str, page_id: str, source_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Restore only persisted GET-only evidence for the currently loaded rows."""
+        if not source_ids:
+            return {}
+        placeholders = ",".join("?" for _ in source_ids)
+        rows = self.database.connection.execute(
+            f"""SELECT source_id,target_id,target_type,status,evidence_json FROM auto_comment_targets
+                WHERE project_id=? AND page_id=? AND source_id IN ({placeholders})""",
+            (project_id, page_id, *source_ids),
+        ).fetchall()
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            try:
+                evidence = json.loads(row["evidence_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                evidence = {}
+            result[row["source_id"]] = {"source_id": row["source_id"], "target_id": row["target_id"],
+                                        "target_type": row["target_type"], "status": row["status"], "evidence": evidence}
+        return result
+
     def publish_one(self, project_id: str, page_id: str, source_id: str, target_id: str,
                     comment_text: str, *, confirmed: bool, operation_id: str | None = None) -> dict[str, Any]:
         """Send exactly one comment after explicit confirmation; never auto-retry."""

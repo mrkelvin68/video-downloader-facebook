@@ -86,7 +86,7 @@ class AutoCommentPage(QWidget):
         worker=FacebookRequestWorker(operation,self);self._posts_worker=worker
         def succeeded(posts):
             if self.page.currentData()!=selected:return
-            old=set(self.selected_post_ids);had=bool(self.posts);self.posts=posts;self.selected_post_ids={p["post_id"] for p in posts if p["post_id"] in old} if had else {p["post_id"] for p in posts};self.target_states={};self._render_posts();a=sum(p["post_type"]=="Post" for p in posts);b=sum(p["post_type"]=="Reel" for p in posts);self.post_status.setText(f"Đã tải {a} bài viết và {b} Reels · {len(self.selected_post_ids)} đã chọn.")
+            old=set(self.selected_post_ids);had=bool(self.posts);self.posts=posts;self.selected_post_ids={p["post_id"] for p in posts if p["post_id"] in old} if had else {p["post_id"] for p in posts};self._restore_target_states();self._render_posts();a=sum(p["post_type"]=="Post" for p in posts);b=sum(p["post_type"]=="Reel" for p in posts);self.post_status.setText(f"Đã tải {a} bài viết và {b} Reels · {len(self.selected_post_ids)} đã chọn.")
         def failed(message):self.post_status.setText(f"Không tải được bài viết: {message}")
         def finished():
             if self._posts_worker is worker:self._posts_worker=None;self._set_posts_loading(False)
@@ -96,6 +96,8 @@ class AutoCommentPage(QWidget):
         state=self.target_states.get(p["post_id"])
         if state:return TARGET_LABELS.get(state["status"],state["status"])
         return "Chờ xác minh" if p.get("comment_target_id") or p.get("video_id") else "Reel chưa có target"
+    def _restore_target_states(self):
+        selected=self.page.currentData();self.target_states=self.comment_service.load_targets(*selected,[p["post_id"] for p in self.posts]) if selected else {}
     def _render_posts(self):
         self.posts_table.blockSignals(True);self.posts_table.setRowCount(0)
         for p in self.posts:
@@ -176,7 +178,7 @@ class AutoCommentPage(QWidget):
         if idx>=0:self.page.setCurrentIndex(idx)
         self.start_date.setDate(date.fromisoformat(c["post_start_date"]));self.end_date.setDate(date.fromisoformat(c["post_end_date"]));self.content_type.setCurrentText(c["content_type"]);self.three.setChecked(c["comments_per_post"]==3);self.one.setChecked(c["comments_per_post"]!=3);self.sequential_mode.setChecked(c["selection_mode"]=="sequential");self.random_mode.setChecked(c["selection_mode"]!="sequential");self.prevent_duplicates.setChecked(bool(c["prevent_duplicates"]));grouped={}
         for row in rows:grouped.setdefault(row["post_id"],[]).append(row)
-        self.posts=[{"post_id":pid,"post_type":items[0]["post_type"],"published_at":items[0]["published_at"]} for pid,items in grouped.items()];self.selected_post_ids=set(grouped);self.preview_comments={pid:[x["comment_text"] for x in items] for pid,items in grouped.items()};self._render_posts();self._render_preview(self.posts);self.preview_status.setText(f"Đã mở campaign {c['name']}.")
+        self.posts=[{"post_id":pid,"post_type":items[0]["post_type"],"published_at":items[0]["published_at"]} for pid,items in grouped.items()];self.selected_post_ids=set(grouped);self.preview_comments={pid:[x["comment_text"] for x in items] for pid,items in grouped.items()};self._restore_target_states();self._render_posts();self._render_preview(self.posts);self.preview_status.setText(f"Đã mở campaign {c['name']}.")
     def _all_preview(self,on):
         for r in range(self.preview.rowCount()):self.preview.item(r,0).setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
     def _preview_post_selected(self,pid):return any(self.preview.item(r,1).text()==pid and self.preview.item(r,0).checkState()==Qt.CheckState.Checked for r in range(self.preview.rowCount()))
@@ -188,10 +190,10 @@ class AutoCommentPage(QWidget):
     def _summary(self):
         if hasattr(self,"_workflow_step") and hasattr(self,"summary"):self._workflow_counts()
     def confirm_publish_one(self):
-        selected=self.page.currentData();posts=[p for p in self.posts if p["post_id"] in self.selected_post_ids and self.target_states.get(p["post_id"],{}).get("status")=="READY"];text=self.manual_comment.text().strip()
-        if len(posts)!=1 or not selected or not text:self.preview_status.setText("Chọn đúng một target đã xác minh và nhập một comment trước khi gửi.");return
-        p=posts[0];target=self.target_states[p["post_id"]]["target_id"]
-        if QMessageBox.question(self,"Xác nhận gửi 1 comment",f"Fanpage: {self.page.currentText()}\nTarget: {target}\nNội dung:\n{text}\n\nGửi đúng một comment này?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:self.preview_status.setText("Đã hủy gửi comment.");return
+        selected=self.page.currentData();posts=[p for p in self.posts if p["post_id"] in self.selected_post_ids];text=self.manual_comment.text().strip()
+        if len(posts)!=1 or not selected or not text or self.target_states.get(posts[0]["post_id"],{}).get("status")!="READY":self.preview_status.setText("Chọn đúng một Reel hoặc bài viết có target đã xác minh và nhập một comment trước khi gửi.");return
+        p=posts[0];target=self.target_states[p["post_id"]]["target_id"];reel_id=p.get("reel_id") or p["post_id"]
+        if QMessageBox.question(self,"Xác nhận gửi 1 comment",f"Fanpage: {self.page.currentText()}\nReel/bài viết: {reel_id}\nTarget comment: {target}\nNội dung:\n{text}\n\nGửi đúng một comment này?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:self.preview_status.setText("Đã hủy gửi comment.");return
         self._publish_confirmed(selected,p,target,text)
     def _publish_confirmed(self,selected,p,target,text):
         if self._publish_worker is not None:return
