@@ -234,6 +234,17 @@ class AutoCommentPhase1Tests(unittest.TestCase):
             page.save_library()
         self.assertIn("Không thể lưu",page.csv_status.text())
 
+    def test_guided_workflow_validates_navigation_and_preserves_unsaved_state(self):
+        page=AutoCommentPage(self.database)
+        self.assertTrue(page.tabs.tabBar().isHidden());self.assertIn("Bước 1",page.workflow_progress.text())
+        page._next_step();self.assertEqual(page.tabs.currentIndex(),0);self.assertIn("Fanpage",page.workflow_message.text())
+        page.page.setCurrentIndex(1);page.posts=[{"post_id":"post","post_type":"Post","published_at":"2026-01-01T00:00:00+00:00","comment_target_id":"post"}];page.selected_post_ids={"post"};page._render_posts()
+        page._next_step();self.assertEqual(page.tabs.currentIndex(),1)
+        page._next_step();self.assertEqual(page.tabs.currentIndex(),1);self.assertIn("ít nhất một comment",page.workflow_message.text())
+        page.set_items([CommentItem("Bình luận chưa lưu")]);page._next_step();self.assertEqual(page.tabs.currentIndex(),2)
+        self.assertIn("Đã chọn: 1",page.workflow_progress.text());self.assertIn("Comment bật: 1",page.workflow_progress.text())
+        page._go_to_step(0);page._go_to_step(1);self.assertEqual(page.selected_post_ids,{"post"});self.assertEqual(page.items()[0].comment_text,"Bình luận chưa lưu")
+
 
 if __name__ == "__main__":
     unittest.main()

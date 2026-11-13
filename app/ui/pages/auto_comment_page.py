@@ -13,8 +13,12 @@ class AutoCommentPage(QWidget):
     pageManagementRequested = Signal()
     def __init__(self, database, parent=None):
         super().__init__(parent); self.database=database; self.service=AutoCommentService(database); self.library_id=None; self.campaign_id=None; self.posts=[]; self.selected_post_ids=set(); self.preview_comments={}; self._posts_worker=None; self._preview_busy=False; self.setAcceptDrops(True)
-        root=QVBoxLayout(self); root.setContentsMargins(24,18,24,18); root.addWidget(QLabel("Auto Comment", objectName="title")); root.addWidget(QLabel("Lập kế hoạch comment cục bộ. Phase UI-2 không gửi comment lên Facebook."))
-        self.tabs=QTabWidget(); self.tabs.addTab(self._posts(),"Bài viết"); self.tabs.addTab(self._library(),"Thư viện CSV"); self.tabs.addTab(self._campaign(),"Chiến dịch & Preview"); root.addWidget(self.tabs,1); self.refresh_pages(); self.refresh_libraries()
+        root=QVBoxLayout(self); root.setContentsMargins(24,18,24,18); root.addWidget(QLabel("Auto Comment", objectName="title")); root.addWidget(QLabel("Lập kế hoạch comment cục bộ. Preview và lưu campaign không đăng comment lên Facebook."))
+        self.workflow_progress=QLabel();self.workflow_progress.setObjectName("autoCommentProgress");root.addWidget(self.workflow_progress)
+        self.workflow_help=QLabel();self.workflow_help.setWordWrap(True);root.addWidget(self.workflow_help)
+        self.workflow_message=QLabel();self.workflow_message.setWordWrap(True);root.addWidget(self.workflow_message)
+        self.tabs=QTabWidget(); self.tabs.addTab(self._posts(),"Bước 1"); self.tabs.addTab(self._library(),"Bước 2"); self.tabs.addTab(self._campaign(),"Bước 3");self.tabs.tabBar().hide();self.tabs.currentChanged.connect(self._workflow_step_changed); root.addWidget(self.tabs,1)
+        navigation=QHBoxLayout();self.back_button=QPushButton("← Quay lại");self.back_button.clicked.connect(lambda:self._go_to_step(self.tabs.currentIndex()-1));self.next_button=QPushButton("Tiếp theo →");self.next_button.setObjectName("primary");self.next_button.clicked.connect(self._next_step);navigation.addWidget(self.back_button);navigation.addStretch();navigation.addWidget(self.next_button);root.addLayout(navigation); self.refresh_pages(); self.refresh_libraries();self._workflow_step_changed(0)
     def _posts(self):
         w=QWidget(); l=QVBoxLayout(w); box=QGroupBox("Fanpage và bộ lọc"); f=QFormLayout(box); self.page=QComboBox(); self.page.currentIndexChanged.connect(self._page_changed); manage=QPushButton("Quản lý Fanpage"); manage.clicked.connect(self.pageManagementRequested.emit); pr=QHBoxLayout(); pr.addWidget(self.page,1); pr.addWidget(manage)
         self.start_date,self.end_date=QDateEdit(),QDateEdit()
@@ -47,6 +51,37 @@ class AutoCommentPage(QWidget):
         self.library_picker.blockSignals(False);self.campaign_picker.blockSignals(True);self.campaign_picker.clear();self.campaign_picker.addItem("Mở campaign đã lưu…",None)
         for x in self.service.list_campaigns():self.campaign_picker.addItem(x["name"],x["id"])
         self.campaign_picker.blockSignals(False);self._summary()
+    def _workflow_step_changed(self,index):
+        titles=("Chọn Fanpage & bài viết","Chuẩn bị thư viện comment","Cấu hình & xem trước")
+        help_text=(
+            "Chọn Fanpage, tải dữ liệu Facebook và chọn các bài viết cần đưa vào preview.",
+            "Import CSV hoặc thêm comment cục bộ, sau đó bật các comment muốn sử dụng.",
+            "Chọn Random 1/3, tạo preview và lưu campaign cục bộ. Không có comment nào được đăng Facebook.",
+        )
+        self._workflow_step=index;self._workflow_titles=titles
+        self.workflow_help.setText(help_text[index]);self.workflow_message.setText("")
+        self.back_button.setEnabled(index>0);self.next_button.setVisible(index<2)
+        if index<2:self.next_button.setText("Tiếp theo →")
+        self._workflow_counts()
+    def _workflow_counts(self):
+        selected=len(self.selected_post_ids);eligible=sum(bool(p["post_id"] in self.selected_post_ids and (p.get("comment_target_id") or p.get("post_type")!="Reel")) for p in self.posts)
+        enabled=sum(bool(item.enabled and item.comment_text.strip()) for item in self.items()) if hasattr(self,"comments") else 0
+        preview_count=sum(map(len,self.preview_comments.values()))
+        counts=f"Đã chọn: {selected} bài ({eligible} target đã xác minh) · Comment bật: {enabled} · Preview: {preview_count}"
+        self.workflow_progress.setText("  •  ".join(f"{'●' if i==self._workflow_step else '○'} Bước {i+1}: {title}" for i,title in enumerate(self._workflow_titles))+"\n"+counts)
+        self.summary.setText(counts)
+    def _go_to_step(self,index):
+        if 0<=index<self.tabs.count():self.tabs.setCurrentIndex(index)
+    def _next_step(self):
+        step=self.tabs.currentIndex()
+        if step==0:
+            if not self.page.currentData():self.workflow_message.setText("Hãy chọn Fanpage, sau đó tải bài viết từ Facebook.");return
+            if not self.selected_post_ids:self.workflow_message.setText("Hãy tải và chọn ít nhất một bài viết trước khi tiếp tục.");return
+            unverified=sum(p["post_id"] in self.selected_post_ids and p.get("post_type")=="Reel" and not p.get("comment_target_id") for p in self.posts)
+            if unverified:self.workflow_message.setText(f"Có {unverified} Reels chưa có Post ID mục tiêu; chúng chỉ được giữ để xem trước, không dùng để gửi comment.")
+        if step==1 and not any(item.enabled and item.comment_text.strip() for item in self.items()):
+            self.workflow_message.setText("Hãy import hoặc thêm ít nhất một comment đang bật trước khi tiếp tục.");return
+        self._go_to_step(step+1)
     def load_posts(self):
         selected=self.page.currentData()
         if not selected:self.post_status.setText("Hãy chọn Fanpage trước.");return
@@ -113,7 +148,7 @@ class AutoCommentPage(QWidget):
     def _filter(self,t):
         for r in range(self.comments.rowCount()):self.comments.setRowHidden(r,bool(t and t.casefold() not in self.comments.item(r,2).text().casefold()))
     def _changed(self,*_):
-        a=self.items();self.csv_status.setText(f"{len(a)} tổng · {sum(x.enabled for x in a)} đang bật · {len(a)-len({x.comment_text for x in a})} trùng");self._invalidate()
+        a=self.items();self.csv_status.setText(f"{len(a)} tổng · {sum(x.enabled for x in a)} đang bật · {len(a)-len({x.comment_text for x in a})} trùng");self._invalidate();self._summary()
     def generate_preview(self):
         if self._preview_busy:return
         self._preview_busy=True;self.preview_button.set_loading(True);self.preview_status.setText("Đang tạo preview...")
@@ -121,7 +156,7 @@ class AutoCommentPage(QWidget):
             posts=[p for p in self.posts if p["post_id"] in self.selected_post_ids]
             if not posts:self.preview_status.setText("Hãy tải và chọn ít nhất một bài viết trước khi tạo preview.");return
             comments={p["post_id"]:select_comments(self.items(),3 if self.three.isChecked() else 1,"sequential" if self.sequential_mode.isChecked() else "random") for p in posts}
-            self.preview_comments=comments;self._render_preview(posts)
+            self.preview_comments=comments;self._render_preview(posts);self._summary()
             self.preview_status.setText(f"Đã tạo {sum(map(len,comments.values()))} comment cho {len(posts)} bài viết.")
         except AutoCommentValidationError as e:self.preview_status.setText(str(e))
         finally:self._preview_busy=False;self.preview_button.set_loading(False)
@@ -157,12 +192,12 @@ class AutoCommentPage(QWidget):
             if self.preview.item(r,1).text()==post_id:return self.preview.item(r,0).checkState()==Qt.CheckState.Checked
         return False
     def _preview_changed(self,item):
-        if item.column()==0:self.preview_status.setText(f"Preview: {sum(self._preview_post_selected(self.preview.item(r,1).text()) for r in range(self.preview.rowCount()))} bài viết được chọn.")
+        if item.column()==0:self.preview_status.setText(f"Preview: {sum(self._preview_post_selected(self.preview.item(r,1).text()) for r in range(self.preview.rowCount()))} bài viết được chọn.");self._summary()
     def _page_changed(self,*_):self.posts=[];self.selected_post_ids.clear();self._render_posts();self._invalidate()
     def _invalidate(self,*_):
         if getattr(self,"preview_comments",None):self.preview_status.setText("Cấu hình đã thay đổi; hãy tạo lại preview.")
     def _summary(self):
-        if hasattr(self,"summary"):self.summary.setText(f"Fanpage: {self.page.currentText()} · Bài viết: {len(self.selected_post_ids)} · Thư viện: {self.library_name.text()}")
+        if hasattr(self,"_workflow_step") and hasattr(self,"summary"):self._workflow_counts()
     def closeEvent(self,event):
         worker=self._posts_worker;self._posts_worker=None;self.load_posts_button.set_loading(False)
         if worker is not None:
