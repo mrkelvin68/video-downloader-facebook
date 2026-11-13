@@ -41,6 +41,9 @@ class FacebookPageManagementTests(unittest.TestCase):
         self.assertEqual(page.table.rowCount(), 2)
         self.assertEqual(page.table.item(0, 4).text(), "Chưa xác minh")
         self.assertEqual(page.table.item(0, 3).text(), "Đã kết nối (chưa xác minh)")
+        page.set_verified(self.project_id, [{"id": "page-a"}])
+        self.assertEqual(page.table.item(0, 5).text(), "Chưa xác minh")
+        self.assertEqual(page.table.item(0, 6).text(), "Chưa xác minh")
 
     def test_default_and_single_page_disconnect_preserve_other_page(self):
         service = FacebookConnectionService(self.database)

@@ -1,6 +1,10 @@
 import unittest
 from pathlib import Path
 import tempfile
+from unittest.mock import patch
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 
 from app.database.connection import Database
 from app.services.auto_comment_service import (
@@ -9,9 +13,14 @@ from app.services.auto_comment_service import (
 from app.services.facebook_publishing_service import FacebookPublishingService
 from app.services.project_service import ProjectService
 from app.services.video_service import VideoService
+from app.ui.pages.auto_comment_page import AutoCommentPage
 
 
 class AutoCommentPhase1Tests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.database = Database(Path(self.temp.name) / "test.sqlite3")
@@ -58,6 +67,67 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         campaign, preview = service.load_campaign_preview(campaign_id)
         self.assertEqual(campaign["status"], "PREVIEW_READY")
         self.assertEqual(preview[0]["comment_text"], "Binh luan")
+
+    def test_page_post_read_requires_saved_token_and_read_permission(self):
+        service = AutoCommentService(self.database)
+        with patch("app.services.auto_comment_service.get_page_token", return_value="page-token"):
+            with self.assertRaisesRegex(AutoCommentValidationError, "chưa được xác minh"):
+                service.fetch_posts(self.project_id, "page-1", "2026-01-01", "2026-01-02", "all")
+        FacebookPublishingService(self.database).save_pages(self.project_id, [
+            {"id": "page-1", "name": "Page 1", "permissions": ["pages_manage_posts"]},
+        ])
+        with patch("app.services.auto_comment_service.get_page_token", return_value="page-token"):
+            with self.assertRaisesRegex(AutoCommentValidationError, "pages_read_engagement"):
+                service.fetch_posts(self.project_id, "page-1", "2026-01-01", "2026-01-02", "all")
+        FacebookPublishingService(self.database).save_pages(self.project_id, [
+            {"id": "page-1", "name": "Page 1", "permissions": ["pages_read_engagement"]},
+        ])
+        with patch("app.services.auto_comment_service.get_page_token", return_value="page-token"):
+            posts = service.fetch_posts(
+                self.project_id, "page-1", "2026-01-01", "2026-01-02", "reels",
+                request=lambda *_args: [
+                    {"id": "post", "created_time": "2026-01-01T00:00:00+00:00", "post_type": "Post"},
+                    {"id": "reel", "created_time": "2026-01-02T00:00:00+00:00", "post_type": "Reel"},
+                ],
+            )
+        self.assertEqual(posts, [{"post_id": "reel", "published_at": "2026-01-02T00:00:00+00:00", "post_type": "Reel"}])
+
+    def test_saving_existing_campaign_updates_instead_of_duplicates(self):
+        service = AutoCommentService(self.database)
+        values = {"name": "Draft", "page_id": "page-1", "start_date": "2026-01-01", "end_date": "2026-01-02",
+                  "content_type": "all", "selection_mode": "random", "count": 1, "prevent_duplicates": True}
+        posts = [{"post_id": "post-1", "post_type": "Post", "published_at": "2026-01-01T00:00:00+00:00"}]
+        campaign_id = service.save_preview(values, posts, {"post-1": ["Bình luận cũ"]})
+        values["name"] = "Draft đã sửa"
+        self.assertEqual(campaign_id, service.save_preview(values, posts, {"post-1": ["Bình luận mới"]}, campaign_id))
+        self.assertEqual(self.database.connection.execute("SELECT COUNT(*) FROM auto_comment_campaigns").fetchone()[0], 1)
+        campaign, rows = service.load_campaign_preview(campaign_id)
+        self.assertEqual(campaign["name"], "Draft đã sửa")
+        self.assertEqual([row["comment_text"] for row in rows], ["Bình luận mới"])
+
+    def test_rerunning_migration_preserves_auto_comment_data(self):
+        service = AutoCommentService(self.database)
+        library_id = service.save_library("Thư viện cũ", [CommentItem("Xin chào Việt Nam")])
+        from app.database.migrations import migrate
+        migrate(self.database.connection)
+        self.assertEqual(service.load_library(library_id)[0].comment_text, "Xin chào Việt Nam")
+
+    def test_tab_switch_preserves_post_selection_and_campaign_save_respects_preview_selection(self):
+        page = AutoCommentPage(self.database)
+        page.page.setCurrentIndex(1)
+        page.posts = [
+            {"post_id": "post-1", "post_type": "Post", "published_at": "2026-01-01T00:00:00+00:00"},
+            {"post_id": "post-2", "post_type": "Post", "published_at": "2026-01-02T00:00:00+00:00"},
+        ]
+        page.selected_post_ids = {"post-1"}; page._render_posts()
+        page.tabs.setCurrentIndex(1); page.tabs.setCurrentIndex(0)
+        self.assertEqual(page.selected_post_ids, {"post-1"})
+        page.preview_comments = {"post-1": ["Một"], "post-2": ["Hai"]}; page._render_preview(page.posts)
+        page.preview.item(1, 0).setCheckState(Qt.CheckState.Unchecked)
+        page.save_campaign()
+        campaign = AutoCommentService(self.database).list_campaigns()[0]
+        _, preview = AutoCommentService(self.database).load_campaign_preview(campaign["id"])
+        self.assertEqual([row["post_id"] for row in preview], ["post-1"])
 
 
 if __name__ == "__main__":

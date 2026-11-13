@@ -5,8 +5,15 @@ import csv
 import io
 import random
 import uuid
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any, Callable
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+from app.services.credential_service import get_page_token
 
 
 def _now() -> str:
@@ -29,6 +36,14 @@ class CsvImport:
 
 class AutoCommentValidationError(ValueError):
     pass
+
+
+class AutoCommentPageAccessError(AutoCommentValidationError):
+    """A saved Page is not ready for a read-only Auto Comment preview."""
+
+
+REQUIRED_READ_PERMISSION = "pages_read_engagement"
+REQUIRED_COMMENT_PERMISSION = "pages_manage_engagement"
 
 
 def parse_comment_csv(raw: bytes | str) -> CsvImport:
@@ -98,9 +113,97 @@ class AutoCommentService:
 
     def list_pages(self) -> list[dict]:
         return [dict(row) for row in self.database.connection.execute(
-            """SELECT page_id, MIN(page_name) AS page_name, COUNT(*) AS connection_count
-               FROM facebook_pages GROUP BY page_id ORDER BY page_name COLLATE NOCASE"""
+            """SELECT project_id, page_id, page_name, permissions_json
+               FROM facebook_pages ORDER BY page_name COLLATE NOCASE, project_id"""
         )]
+
+    def page_access(self, project_id: str, page_id: str) -> dict[str, bool]:
+        row = self.database.connection.execute(
+            "SELECT permissions_json FROM facebook_pages WHERE project_id=? AND page_id=?",
+            (project_id, page_id),
+        ).fetchone()
+        if row is None:
+            raise AutoCommentPageAccessError("Không tìm thấy Fanpage đã lưu.")
+        try:
+            permissions = {str(value) for value in json.loads(row["permissions_json"] or "[]")}
+        except (TypeError, json.JSONDecodeError):
+            permissions = set()
+        has_token = bool(get_page_token(project_id, page_id))
+        return {
+            "has_token": has_token,
+            "can_read_posts": REQUIRED_READ_PERMISSION in permissions,
+            "can_manage_comments": REQUIRED_COMMENT_PERMISSION in permissions,
+            "verified": bool(permissions),
+        }
+
+    def fetch_posts(
+        self, project_id: str, page_id: str, start_date: str, end_date: str, content_type: str,
+        *, request: Callable[[str, str, str, str], list[dict[str, Any]]] | None = None,
+    ) -> list[dict]:
+        """Read Page posts only; this method never creates comments or other Graph objects."""
+        access = self.page_access(project_id, page_id)
+        if not access["has_token"]:
+            raise AutoCommentPageAccessError("Fanpage chưa có Page Access Token; hãy kết nối hoặc đồng bộ lại Fanpage.")
+        if not access["verified"]:
+            raise AutoCommentPageAccessError("Quyền Fanpage chưa được xác minh; hãy dùng “Kiểm tra Token & quyền”.")
+        if not access["can_read_posts"]:
+            raise AutoCommentPageAccessError("Token hợp lệ nhưng thiếu quyền pages_read_engagement để đọc bài viết.")
+        token = get_page_token(project_id, page_id)
+        loader = request or self._graph_posts
+        rows = loader(page_id, token, start_date, end_date)
+        wanted = {"all", "posts", "reels"}
+        if content_type not in wanted:
+            raise AutoCommentValidationError("Loại bài viết không hợp lệ.")
+        posts = []
+        for row in rows:
+            post_type = str(row.get("post_type") or "Post")
+            if content_type == "reels" and post_type != "Reel":
+                continue
+            if content_type == "posts" and post_type == "Reel":
+                continue
+            post_id = str(row.get("post_id") or row.get("id") or "")
+            published_at = str(row.get("published_at") or row.get("created_time") or "")
+            if post_id and published_at:
+                posts.append({"post_id": post_id, "published_at": published_at, "post_type": post_type})
+        return sorted(posts, key=lambda item: (item["published_at"], item["post_id"]), reverse=True)
+
+    @staticmethod
+    def _graph_posts(page_id: str, token: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
+        params = {
+            "fields": "id,created_time,status_type,type",
+            "since": start_date, "until": end_date, "limit": "100", "access_token": token,
+        }
+        request = Request(
+            f"https://graph.facebook.com/v26.0/{page_id}/posts?{urlencode(params)}",
+            headers={"Accept": "application/json"},
+        )
+        try:
+            with urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            try:
+                error_code = str(json.loads(exc.read().decode("utf-8")).get("error", {}).get("code") or "")
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                error_code = ""
+            if error_code == "190" or exc.code == 401:
+                raise AutoCommentPageAccessError("Access Token đã hết hạn hoặc bị thu hồi.") from exc
+            if error_code in {"10", "200"} or exc.code == 403:
+                raise AutoCommentPageAccessError("Token hợp lệ nhưng thiếu quyền pages_read_engagement để đọc bài viết.") from exc
+            raise AutoCommentPageAccessError(f"Không thể tải bài viết từ Facebook (HTTP {exc.code}).") from exc
+        except (URLError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AutoCommentPageAccessError("Không thể kết nối Meta Graph API để tải bài viết.") from exc
+        if "error" in payload:
+            error_code = str(payload["error"].get("code") or "")
+            if error_code == "190":
+                raise AutoCommentPageAccessError("Access Token đã hết hạn hoặc bị thu hồi.")
+            if error_code in {"10", "200"}:
+                raise AutoCommentPageAccessError("Token hợp lệ nhưng thiếu quyền pages_read_engagement để đọc bài viết.")
+            raise AutoCommentPageAccessError("Không thể tải bài viết từ Facebook.")
+        return [
+            {"post_id": item.get("id"), "published_at": item.get("created_time"),
+             "post_type": "Reel" if item.get("type") == "VIDEO" and item.get("status_type") == "added_video" else "Post"}
+            for item in payload.get("data", [])
+        ]
 
     def save_library(self, name: str, items: list[CommentItem], library_id: str | None = None) -> str:
         if not name.strip():
@@ -172,17 +275,24 @@ class AutoCommentService:
         )]
         return dict(campaign), rows
 
-    def save_preview(self, values: dict, posts: list[dict], comments_by_post: dict[str, list[str]]) -> str:
-        campaign_id = str(uuid.uuid4())
+    def save_preview(self, values: dict, posts: list[dict], comments_by_post: dict[str, list[str]],
+                     campaign_id: str | None = None) -> str:
+        campaign_id = campaign_id or str(uuid.uuid4())
         now = _now()
         with self.database.connection:
             self.database.connection.execute(
                 """INSERT INTO auto_comment_campaigns
                    (id,name,page_id,post_start_date,post_end_date,content_type,selection_mode,comments_per_post,prevent_duplicates,status,created_at,updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,'PREVIEW_READY',?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,'PREVIEW_READY',?,?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     name=excluded.name,page_id=excluded.page_id,post_start_date=excluded.post_start_date,
+                     post_end_date=excluded.post_end_date,content_type=excluded.content_type,
+                     selection_mode=excluded.selection_mode,comments_per_post=excluded.comments_per_post,
+                     prevent_duplicates=excluded.prevent_duplicates,status=excluded.status,updated_at=excluded.updated_at""",
                 (campaign_id, values["name"], values["page_id"], values["start_date"], values["end_date"],
                  values["content_type"], values["selection_mode"], values["count"], int(values["prevent_duplicates"]), now, now),
             )
+            self.database.connection.execute("DELETE FROM auto_comment_preview_items WHERE campaign_id=?", (campaign_id,))
             preview_rows = []
             for post in posts:
                 for order, comment in enumerate(comments_by_post.get(post["post_id"], []), start=1):

@@ -37,8 +37,8 @@ class FacebookPageManagementPage(QWidget):
         form.addRow("Dự án", self.project); form.addRow("Access Token", self.token); form.addRow(buttons)
         root.addWidget(card)
         self.status = QLabel("Chọn dự án để xem các Fanpage đã kết nối."); self.status.setWordWrap(True); root.addWidget(self.status)
-        self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(["Mặc định", "Tên Fanpage", "Page ID", "Kết nối", "Đăng video", "Đọc bài/comment", "Thao tác"])
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(["Mặc định", "Tên Fanpage", "Page ID", "Kết nối", "Đăng video", "Đọc bài viết", "Quản lý comment", "Thao tác"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True); self.table.setColumnWidth(0, 82); self.table.setColumnWidth(2, 170)
         root.addWidget(self.table, 1)
@@ -67,12 +67,14 @@ class FacebookPageManagementPage(QWidget):
             self.table.setItem(row, 3, QTableWidgetItem("Đã xác minh" if verified else "Đã kết nối (chưa xác minh)"))
             permissions = set(json.loads(page["permissions_json"] or "[]")) if verified else set()
             self.table.setItem(row, 4, QTableWidgetItem("Có" if "pages_manage_posts" in permissions else "Chưa xác minh"))
-            read_ok = {"pages_read_engagement", "pages_manage_engagement"}.issubset(permissions)
+            read_ok = "pages_read_engagement" in permissions
+            comment_ok = "pages_manage_engagement" in permissions
             self.table.setItem(row, 5, QTableWidgetItem("Có" if read_ok else "Chưa xác minh"))
+            self.table.setItem(row, 6, QTableWidgetItem("Có" if comment_ok else "Chưa xác minh"))
             actions = QWidget(); action_layout = QHBoxLayout(actions); action_layout.setContentsMargins(2, 1, 2, 1)
             make_default = QPushButton("Mặc định"); make_default.setEnabled(not bool(page["is_default"])); make_default.clicked.connect(lambda _=False, p=page_id: self.defaultRequested.emit(str(project_id), p))
             disconnect = QPushButton("Ngắt"); disconnect.setObjectName("danger"); disconnect.clicked.connect(lambda _=False, p=page_id, n=str(page["page_name"]): self._disconnect(p, n))
-            action_layout.addWidget(make_default); action_layout.addWidget(disconnect); self.table.setCellWidget(row, 6, actions)
+            action_layout.addWidget(make_default); action_layout.addWidget(disconnect); self.table.setCellWidget(row, 7, actions)
 
     def set_verified(self, project_id: str, pages: list[dict]) -> None:
         self._verified_pages.update((project_id, str(page.get("id", ""))) for page in pages)
