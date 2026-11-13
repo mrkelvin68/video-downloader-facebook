@@ -166,6 +166,32 @@ class AutoCommentCommentService:
                                         "target_type": row["target_type"], "status": row["status"], "evidence": evidence}
         return result
 
+    def submission_history(self, *, project_id: str | None = None, page_id: str | None = None,
+                           target_type: str | None = None, status: str | None = None,
+                           since: str | None = None, until: str | None = None) -> list[dict[str, Any]]:
+        """Return the existing auditable one-shot submission records; no links are inferred."""
+        clauses: list[str] = []
+        values: list[str] = []
+        for column, value in (("a.project_id", project_id), ("a.page_id", page_id), ("COALESCE(t.target_type,'')", target_type), ("a.status", status)):
+            if value:
+                clauses.append(f"{column}=?"); values.append(value)
+        if since:
+            clauses.append("substr(a.created_at,1,10)>=?"); values.append(since)
+        if until:
+            clauses.append("substr(a.created_at,1,10)<=?"); values.append(until)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.database.connection.execute(
+            f"""SELECT a.created_at,a.project_id,a.page_id,a.source_id,a.target_id,a.comment_text,
+                       a.remote_comment_id,a.status,a.verification_status,a.error_category,a.error_message,
+                       p.page_name,COALESCE(t.target_type,'') AS target_type
+                FROM auto_comment_submission_attempts a
+                LEFT JOIN facebook_pages p ON p.project_id=a.project_id AND p.page_id=a.page_id
+                LEFT JOIN auto_comment_targets t ON t.project_id=a.project_id AND t.page_id=a.page_id
+                    AND t.source_id=a.source_id
+                {where} ORDER BY a.created_at DESC""", values,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def publish_one(self, project_id: str, page_id: str, source_id: str, target_id: str,
                     comment_text: str, *, confirmed: bool, operation_id: str | None = None) -> dict[str, Any]:
         """Send exactly one comment after explicit confirmation; never auto-retry."""

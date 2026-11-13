@@ -2,7 +2,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget
 from app.database.connection import Database
 from app.services.auto_comment_comment_service import AutoCommentCommentService
 from app.services.auto_comment_service import AutoCommentService, AutoCommentValidationError, CommentItem, parse_comment_csv, select_comments
@@ -25,7 +25,7 @@ class AutoCommentPage(QWidget):
         super().__init__(parent);self.database=database;self.service=AutoCommentService(database);self.comment_service=AutoCommentCommentService(database);self.library_id=self.campaign_id=None;self.posts=[];self.selected_post_ids=set();self.preview_comments={};self.target_states={};self._posts_worker=self._target_worker=self._publish_worker=None;self._preview_busy=False;self.setAcceptDrops(True)
         self.setStyleSheet("QTableWidget#autoCommentPostsTable,QTableWidget#autoCommentCommentsTable,QTableWidget#autoCommentPreviewTable{selection-background-color:#1d4ed8;selection-color:white} QLabel#autoCommentProgress{padding:8px 10px;border-radius:6px;background:#17243a;color:#dbeafe} QFrame#autoCommentLoading{background:rgba(10,18,32,210);border:1px solid #2d5f9e;border-radius:6px}")
         root=QVBoxLayout(self);root.setContentsMargins(18,14,18,14);root.setSpacing(7);title=QLabel("Auto Comment",objectName="title");root.addWidget(title);root.addWidget(QLabel("Chuẩn bị, xác minh và xem trước cục bộ. Preview và lưu campaign không đăng comment Facebook."));self.workflow_progress=QLabel(objectName="autoCommentProgress");self.workflow_help=QLabel(wordWrap=True);self.workflow_message=QLabel(wordWrap=True);root.addWidget(self.workflow_progress);root.addWidget(self.workflow_help);root.addWidget(self.workflow_message)
-        self.tabs=QTabWidget();self.tabs.addTab(self._posts(),"Bước 1");self.tabs.addTab(self._library(),"Bước 2");self.tabs.addTab(self._campaign(),"Bước 3");self.tabs.tabBar().hide();self.tabs.currentChanged.connect(self._workflow_step_changed);root.addWidget(self.tabs,1);nav=QHBoxLayout();self.back_button=QPushButton("← Quay lại");self.back_button.clicked.connect(lambda:self._go_to_step(self.tabs.currentIndex()-1));self.next_button=QPushButton("Tiếp theo →",objectName="primary");self.next_button.clicked.connect(self._next_step);nav.addWidget(self.back_button);nav.addStretch();nav.addWidget(self.next_button);root.addLayout(nav);self.refresh_pages();self.refresh_libraries();self._workflow_step_changed(0)
+        self.tabs=QTabWidget();self.tabs.addTab(self._posts(),"Bước 1");self.tabs.addTab(self._library(),"Bước 2");self.tabs.addTab(self._campaign(),"Bước 3");self.tabs.addTab(self._testing(),"Bước 4");self.tabs.tabBar().hide();self.tabs.currentChanged.connect(self._workflow_step_changed);root.addWidget(self.tabs,1);nav=QHBoxLayout();self.back_button=QPushButton("← Quay lại");self.back_button.clicked.connect(lambda:self._go_to_step(self.tabs.currentIndex()-1));self.next_button=QPushButton("Tiếp theo →",objectName="primary");self.next_button.clicked.connect(self._next_step);nav.addWidget(self.back_button);nav.addStretch();nav.addWidget(self.next_button);root.addLayout(nav);self.refresh_pages();self.refresh_libraries();self._workflow_step_changed(0)
     @staticmethod
     def _table(columns,name,editable=False):
         table=CheckboxTable(0,len(columns));table.setObjectName(name);table.setHorizontalHeaderLabels(columns);table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows);table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked|QAbstractItemView.EditTrigger.EditKeyPressed if editable else QAbstractItemView.EditTrigger.NoEditTriggers);header=table.horizontalHeader();header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive);header.setStretchLastSection(True);return table
@@ -50,11 +50,21 @@ class AutoCommentPage(QWidget):
         for x in (self.one,self.three,self.random_mode,self.sequential_mode,self.prevent_duplicates):r.addWidget(x);x.toggled.connect(self._invalidate)
         self.campaign_picker=QComboBox();self.campaign_picker.currentIndexChanged.connect(self.open_campaign);f.addRow("Tên",self.campaign_name);f.addRow("Thông tin",self.summary);f.addRow("Chọn comment",r);f.addRow("Mở campaign",self.campaign_picker);l.addWidget(box);r=QHBoxLayout();self.preview_button=LoadingButton("Xem trước comment");self.preview_button.clicked.connect(self.generate_preview);r.addWidget(self.preview_button)
         for text,fn in (("Tạo lại preview",self.generate_preview),("Lưu campaign",self.save_campaign),("Chọn tất cả",lambda:self._all_preview(True)),("Bỏ chọn",lambda:self._all_preview(False))):x=QPushButton(text);x.clicked.connect(fn);r.addWidget(x)
-        l.addLayout(r);self.preview=self._table(["Chọn","Post","Loại","Published At","Số comment","Comments","Trạng thái"],"autoCommentPreviewTable");self.preview.setColumnWidth(0,58);self.preview.setColumnWidth(1,200);self.preview.setColumnWidth(2,70);self.preview.setColumnWidth(3,150);self.preview.setColumnWidth(4,90);self.preview.setColumnWidth(5,300);self.preview.itemChanged.connect(self._preview_changed);l.addWidget(self.preview,1);self.preview_status=QLabel("Chưa có preview.");l.addWidget(self.preview_status);send=QGroupBox("Gửi đúng 1 comment đã xác nhận");sf=QFormLayout(send);self.manual_comment=QLineEdit(placeholderText="Chọn hoặc nhập một comment cần gửi");self.publish_one_button=LoadingButton("Gửi 1 comment…");self.publish_one_button.clicked.connect(self.confirm_publish_one);sf.addRow("Nội dung",self.manual_comment);sf.addRow(self.publish_one_button);l.addWidget(send);l.addWidget(QLabel("Preview và Lưu campaign không đăng Facebook. Chỉ nút trên, sau khi xác nhận target, nội dung và Fanpage, mới có thể gửi một comment."));return w
+        l.addLayout(r);self.preview=self._table(["Chọn","Post","Loại","Published At","Số comment","Comments","Target","Preview"],"autoCommentPreviewTable");self.preview.setColumnWidth(0,58);self.preview.setColumnWidth(1,200);self.preview.setColumnWidth(2,70);self.preview.setColumnWidth(3,150);self.preview.setColumnWidth(4,90);self.preview.setColumnWidth(5,300);self.preview.itemChanged.connect(self._preview_changed);l.addWidget(self.preview,1);self.preview_status=QLabel("Chưa có preview.");l.addWidget(self.preview_status);l.addWidget(QLabel("Preview chỉ là kế hoạch cục bộ; không có comment nào được đăng từ bước này."));return w
+    def _testing(self):
+        w=QWidget();l=QVBoxLayout(w);box=QGroupBox("Gửi thử 1 comment");f=QFormLayout(box);self.test_target_info=QLabel("Chọn đúng một Post hoặc Reel ở Bước 1.",wordWrap=True);self.manual_comment=QLineEdit(placeholderText="Nhập một comment thử nghiệm");self.manual_comment.textChanged.connect(self._refresh_test_target);self.publish_one_button=LoadingButton("Gửi thử 1 comment");self.publish_one_button.clicked.connect(self.confirm_publish_one);self.test_status=QLabel();f.addRow("Target đã chọn",self.test_target_info);f.addRow("Nội dung xem trước",self.manual_comment);f.addRow(self.publish_one_button);l.addWidget(box)
+        history=QGroupBox("Lịch sử comment");h=QVBoxLayout(history);filters=QHBoxLayout();self.history_page=QComboBox();self.history_type=QComboBox();self.history_type.addItem("Tất cả loại","");self.history_type.addItems(["POST","REEL"]);self.history_status=QComboBox();self.history_status.addItem("Tất cả trạng thái","");self.history_status.addItems(["SUCCESS","FAILED","UNCERTAIN"]);self.history_from=QLineEdit(placeholderText="Từ ngày YYYY-MM-DD");self.history_to=QLineEdit(placeholderText="Đến ngày YYYY-MM-DD");refresh=QPushButton("Làm mới lịch sử");refresh.clicked.connect(self.refresh_history)
+        for x in (self.history_page,self.history_type,self.history_status,self.history_from,self.history_to,refresh):filters.addWidget(x)
+        h.addLayout(filters);self.history_table=self._table(["Thời gian","Fanpage","Loại","Nguồn","Target","Comment","Comment ID","Xuất bản","Lỗi","Link"],"autoCommentHistoryTable");self.history_table.setColumnWidth(0,145);self.history_table.setColumnWidth(1,150);self.history_table.setColumnWidth(3,145);self.history_table.setColumnWidth(4,145);self.history_table.setColumnWidth(5,220);self.history_table.setColumnWidth(6,210);h.addWidget(self.history_table,1);actions=QHBoxLayout();copy=QPushButton("Sao chép Comment ID");copy.clicked.connect(self.copy_history_comment_id);self.open_history_link=QPushButton("Không có liên kết trực tiếp");self.open_history_link.setEnabled(False);actions.addWidget(copy);actions.addWidget(self.open_history_link);actions.addStretch();h.addLayout(actions);l.addWidget(history,1);l.addWidget(self.test_status);return w
     def refresh_pages(self):
         old=self.page.currentData();self.page.blockSignals(True);self.page.clear();self.page.addItem("Chọn Fanpage",None)
         for p in self.service.list_pages():self.page.addItem(p["page_name"],(p["project_id"],p["page_id"]))
-        self.page.setCurrentIndex(max(0,self.page.findData(old)));self.page.blockSignals(False);self._summary()
+        self.page.setCurrentIndex(max(0,self.page.findData(old)));self.page.blockSignals(False)
+        if hasattr(self,"history_page"):
+            current=self.history_page.currentData();self.history_page.blockSignals(True);self.history_page.clear();self.history_page.addItem("Tất cả Fanpage",None)
+            for p in self.service.list_pages():self.history_page.addItem(f"{p['page_name']} · {p['page_id']}",(p["project_id"],p["page_id"]))
+            self.history_page.setCurrentIndex(max(0,self.history_page.findData(current)));self.history_page.blockSignals(False);self.refresh_history()
+        self._summary()
     def refresh_libraries(self):
         self.library_picker.blockSignals(True);self.library_picker.clear();self.library_picker.addItem("Mở thư viện đã lưu…",None)
         for x in self.service.list_libraries():self.library_picker.addItem(x["name"],x["id"])
@@ -62,7 +72,7 @@ class AutoCommentPage(QWidget):
         for x in self.service.list_campaigns():self.campaign_picker.addItem(x["name"],x["id"])
         self.campaign_picker.blockSignals(False);self._summary()
     def _workflow_step_changed(self,index):
-        titles=("Chọn Fanpage & bài viết","Chuẩn bị thư viện comment","Cấu hình & xem trước");help_text=("Chọn Fanpage, tải dữ liệu Facebook, sau đó chọn bài viết. Xác minh target trước khi muốn gửi một comment.","Import CSV hoặc thêm comment cục bộ; bật các dòng hợp lệ cần dùng.","Chọn Random 1/3, tạo preview và lưu campaign. Các thao tác này không đăng Facebook.");self._workflow_step=index;self._workflow_titles=titles;self.workflow_help.setText(help_text[index]);self.workflow_message.setText("");self.back_button.setEnabled(index>0);self.next_button.setVisible(index<2);self._workflow_counts()
+        titles=("Chọn Fanpage & bài viết","Chuẩn bị thư viện comment","Chiến dịch & Preview","Gửi thử & Lịch sử");help_text=("Chọn Fanpage, tải dữ liệu Facebook, sau đó chọn bài viết. Xác minh target trước khi muốn gửi một comment.","Import CSV hoặc thêm comment cục bộ; bật các dòng hợp lệ cần dùng.","Chọn Random 1/3, tạo preview và lưu campaign. Các thao tác này không đăng Facebook.","Gửi đúng một comment sau khi target đã READY và xác nhận rõ ràng; xem lịch sử đã lưu.");self._workflow_step=index;self._workflow_titles=titles;self.workflow_help.setText(help_text[index]);self.workflow_message.setText("");self.back_button.setEnabled(index>0);self.next_button.setVisible(index<3);self._workflow_counts()
     def _workflow_counts(self):
         selected=len(self.selected_post_ids);eligible=sum(p["post_id"] in self.selected_post_ids and self.target_states.get(p["post_id"],{}).get("status")=="READY" for p in self.posts);enabled=sum(x.enabled and bool(x.comment_text.strip()) for x in self.items()) if hasattr(self,"comments") else 0;preview_count=sum(map(len,self.preview_comments.values()));counts=f"Đã chọn: {selected} bài · Target sẵn sàng: {eligible} · Comment bật: {enabled} · Preview: {preview_count}";self.workflow_progress.setText("  •  ".join(f"{'●' if i==self._workflow_step else '○'} Bước {i+1}: {title}" for i,title in enumerate(self._workflow_titles))+"\n"+counts);self.summary.setText(counts)
     def _go_to_step(self,index):
@@ -103,11 +113,11 @@ class AutoCommentPage(QWidget):
         for p in self.posts:
             r=self.posts_table.rowCount();self.posts_table.insertRow(r);self.posts_table.setItem(r,0,self._check_item(p["post_id"] in self.selected_post_ids));source=p.get("source_post_id") or p.get("reel_id") or p["post_id"]
             for c,v in enumerate((p.get("published_at",""),p.get("post_type",""),source,self._target_status(p)),1):item=QTableWidgetItem(str(v));item.setData(Qt.ItemDataRole.UserRole,p["post_id"]);self.posts_table.setItem(r,c,item)
-        self.posts_table.blockSignals(False);self._update_header_selection();self._summary()
+        self.posts_table.blockSignals(False);self._update_header_selection();self._refresh_test_target();self._summary()
     def _update_header_selection(self):self.select_all_posts.setEnabled(bool(self.posts));self.clear_all_posts.setEnabled(bool(self.selected_post_ids))
     def _post_changed(self,item):
         if item.column()==0:
-            pid=self.posts_table.item(item.row(),3).data(Qt.ItemDataRole.UserRole);(self.selected_post_ids.add if item.checkState()==Qt.CheckState.Checked else self.selected_post_ids.discard)(pid);self._update_header_selection();self._invalidate();self._summary()
+            pid=self.posts_table.item(item.row(),3).data(Qt.ItemDataRole.UserRole);(self.selected_post_ids.add if item.checkState()==Qt.CheckState.Checked else self.selected_post_ids.discard)(pid);self._update_header_selection();self._refresh_test_target();self._invalidate();self._summary()
     def _all_posts(self,on):self.selected_post_ids={p["post_id"] for p in self.posts} if on else set();self._render_posts();self._invalidate()
     def verify_selected_targets(self):
         selected=self.page.currentData();posts=[p for p in self.posts if p["post_id"] in self.selected_post_ids]
@@ -163,8 +173,8 @@ class AutoCommentPage(QWidget):
     def _render_preview(self,posts):
         self.preview.blockSignals(True);self.preview.setRowCount(0)
         for p in posts:
-            r=self.preview.rowCount();self.preview.insertRow(r);self.preview.setItem(r,0,self._check_item());status=TARGET_LABELS.get(self.target_states.get(p["post_id"],{}).get("status",""),"PREVIEW")
-            for c,v in enumerate((p["post_id"],p.get("post_type",""),p.get("published_at",""),str(len(self.preview_comments.get(p["post_id"],[]))),"\n".join(self.preview_comments.get(p["post_id"],[])),status),1):self.preview.setItem(r,c,QTableWidgetItem(v))
+            r=self.preview.rowCount();self.preview.insertRow(r);self.preview.setItem(r,0,self._check_item());target=TARGET_LABELS.get(self.target_states.get(p["post_id"],{}).get("status",""),"Chưa xác minh")
+            for c,v in enumerate((p["post_id"],p.get("post_type",""),p.get("published_at",""),str(len(self.preview_comments.get(p["post_id"],[]))),"\n".join(self.preview_comments.get(p["post_id"],[])),target,"PREVIEW"),1):self.preview.setItem(r,c,QTableWidgetItem(v))
         self.preview.blockSignals(False)
     def save_campaign(self):
         selected=self.page.currentData();posts=[p for p in self.posts if p["post_id"] in self.preview_comments and self._preview_post_selected(p["post_id"])]
@@ -189,22 +199,45 @@ class AutoCommentPage(QWidget):
         if self.preview_comments:self.preview_status.setText("Cấu hình đã thay đổi; hãy tạo lại preview.")
     def _summary(self):
         if hasattr(self,"_workflow_step") and hasattr(self,"summary"):self._workflow_counts()
+    def _send_status(self,text):
+        self.preview_status.setText(text);self.test_status.setText(text)
+    def _refresh_test_target(self,*_):
+        if not hasattr(self,"test_target_info"):return
+        selected=self.page.currentData();posts=[p for p in self.posts if p["post_id"] in self.selected_post_ids]
+        if len(posts)!=1 or not selected:
+            self.test_target_info.setText("Chọn đúng một Post hoặc Reel ở Bước 1 để gửi thử.");self.publish_one_button.setEnabled(False);return
+        p=posts[0];state=self.target_states.get(p["post_id"],{});status=state.get("status","TARGET_UNVERIFIED");target=state.get("target_id") or "Chưa có"
+        self.test_target_info.setText(f"Fanpage: {self.page.currentText()}\nPage ID: {selected[1]}\nLoại: {p.get('post_type','')}\nNguồn: {p['post_id']}\nTarget comment: {target}\nXác minh: {TARGET_LABELS.get(status,status)}\nĐăng lúc: {p.get('published_at','')}")
+        self.publish_one_button.setEnabled(status=="READY" and bool(self.manual_comment.text().strip()))
+    def refresh_history(self):
+        if not hasattr(self,"history_table"):return
+        page=self.history_page.currentData();type_filter=self.history_type.currentText() if self.history_type.currentIndex() else None;status=self.history_status.currentText() if self.history_status.currentIndex() else None
+        rows=self.comment_service.submission_history(project_id=page[0] if page else None,page_id=page[1] if page else None,target_type=type_filter,status=status,since=self.history_from.text().strip() or None,until=self.history_to.text().strip() or None)
+        self.history_table.setRowCount(0)
+        for entry in rows:
+            row=self.history_table.rowCount();self.history_table.insertRow(row);publication="PUBLISHED" if entry["status"]=="SUCCESS" else entry["status"]
+            values=(entry["created_at"],f"{entry.get('page_name') or 'Không rõ'} · {entry['page_id']}",entry.get("target_type") or "Không rõ",entry["source_id"],entry["target_id"],entry["comment_text"],entry.get("remote_comment_id") or "",f"{publication} · {entry['verification_status']}",entry.get("error_category") or "", "Không có liên kết trực tiếp")
+            for column,value in enumerate(values):self.history_table.setItem(row,column,QTableWidgetItem(str(value)))
+    def copy_history_comment_id(self):
+        row=self.history_table.currentRow();item=self.history_table.item(row,6) if row>=0 else None
+        if item and item.text():QApplication.clipboard().setText(item.text());self.test_status.setText("Đã sao chép Comment ID.")
+        else:self.test_status.setText("Hãy chọn một dòng có Comment ID.")
     def confirm_publish_one(self):
         selected=self.page.currentData();posts=[p for p in self.posts if p["post_id"] in self.selected_post_ids];text=self.manual_comment.text().strip()
-        if len(posts)!=1 or not selected or not text or self.target_states.get(posts[0]["post_id"],{}).get("status")!="READY":self.preview_status.setText("Chọn đúng một Reel hoặc bài viết có target đã xác minh và nhập một comment trước khi gửi.");return
+        if len(posts)!=1 or not selected or not text or self.target_states.get(posts[0]["post_id"],{}).get("status")!="READY":self._send_status("Chọn đúng một Reel hoặc bài viết có target đã xác minh và nhập một comment trước khi gửi.");return
         p=posts[0];target=self.target_states[p["post_id"]]["target_id"];reel_id=p.get("reel_id") or p["post_id"]
-        if QMessageBox.question(self,"Xác nhận gửi 1 comment",f"Fanpage: {self.page.currentText()}\nReel/bài viết: {reel_id}\nTarget comment: {target}\nNội dung:\n{text}\n\nGửi đúng một comment này?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:self.preview_status.setText("Đã hủy gửi comment.");return
+        if QMessageBox.question(self,"Xác nhận gửi 1 comment",f"Fanpage: {self.page.currentText()}\nReel/bài viết: {reel_id}\nTarget comment: {target}\nNội dung:\n{text}\n\nGửi đúng một comment này?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:self._send_status("Đã hủy gửi comment.");return
         self._publish_confirmed(selected,p,target,text)
     def _publish_confirmed(self,selected,p,target,text):
         if self._publish_worker is not None:return
-        project_id,page_id=selected;path=self.database.path;self.publish_one_button.set_loading(True);self.preview_status.setText("Đang gửi 1 comment đã xác nhận…")
+        project_id,page_id=selected;path=self.database.path;self.publish_one_button.set_loading(True);self._send_status("Đang gửi 1 comment đã xác nhận…")
         def operation():
             db=Database(path)
             try:return AutoCommentCommentService(db).publish_one(project_id,page_id,p["post_id"],target,text,confirmed=True)
             finally:db.close()
         worker=FacebookRequestWorker(operation,self);self._publish_worker=worker
-        def succeeded(result):self.preview_status.setText(f"Đã gửi comment {result['comment_id']} ({result['verification_status']})." if result["status"]=="SUCCESS" else f"Không gửi lại tự động: {result['message']}")
-        def failed(message):self.preview_status.setText(f"Không thể gửi comment: {message}")
+        def succeeded(result):self._send_status(f"Đã gửi comment {result['comment_id']} ({result['verification_status']})." if result["status"]=="SUCCESS" else f"Không gửi lại tự động: {result['message']}");self.refresh_history()
+        def failed(message):self._send_status(f"Không thể gửi comment: {message}");self.refresh_history()
         def finished():
             if self._publish_worker is worker:self._publish_worker=None;self.publish_one_button.set_loading(False)
             worker.deleteLater()

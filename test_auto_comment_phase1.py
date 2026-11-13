@@ -376,6 +376,28 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         self.assertFalse(page.publish_one_button.is_loading)
         self.assertIn("comment-1", page.preview_status.text())
 
+    def test_single_comment_tab_displays_target_and_persisted_history_filters(self):
+        service = AutoCommentCommentService(self.database, graph_get=lambda path, *_: {"id": path}, graph_post=lambda *_: {"id": "comment-1"})
+        service._save_target(self.project_id, "page-1", {"source_id": "reel:7", "target_id": "video-9",
+                             "target_type": "REEL", "status": "READY", "evidence": {"owner_id": "page-1"}}, "2026-11-14T00:00:00+00:00")
+        with patch("app.services.auto_comment_comment_service.get_page_token", return_value="page-token"):
+            service.publish_one(self.project_id, "page-1", "reel:7", "video-9", "Bình luận thử", confirmed=True,
+                                operation_id="history-op")
+        page = AutoCommentPage(self.database); page.page.setCurrentIndex(1)
+        page.posts = [{"post_id": "reel:7", "reel_id": "reel-7", "post_type": "Reel", "published_at": "2026-11-01T00:00:00+00:00"}]
+        page.selected_post_ids = {"reel:7"}; page._restore_target_states(); page.manual_comment.setText("Bình luận thử"); page._render_posts()
+        page.tabs.setCurrentIndex(3)
+        self.assertIn("Target comment: video-9", page.test_target_info.text())
+        self.assertTrue(page.publish_one_button.isEnabled())
+        page.history_page.setCurrentIndex(page.history_page.findData((self.project_id, "page-1"))); page.history_type.setCurrentText("REEL"); page.refresh_history()
+        self.assertEqual(page.history_table.rowCount(), 1)
+        self.assertEqual(page.history_table.item(0, 6).text(), "comment-1")
+        self.assertIn("PUBLISHED", page.history_table.item(0, 7).text())
+        self.assertEqual(page.history_table.item(0, 9).text(), "Không có liên kết trực tiếp")
+        page.history_table.selectRow(0); page.copy_history_comment_id(); self.assertEqual(QApplication.clipboard().text(), "comment-1")
+        page.history_status.setCurrentText("FAILED"); page.refresh_history(); self.assertEqual(page.history_table.rowCount(), 0)
+        page.close()
+
     def test_native_checkbox_mouse_selection_model_handles_seven_mixed_rows_and_keyboard(self):
         page = AutoCommentPage(self.database)
         page.show(); self.app.processEvents()
