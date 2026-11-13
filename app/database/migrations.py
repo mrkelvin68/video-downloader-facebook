@@ -485,8 +485,14 @@ def _create_auto_comment_tables(connection: sqlite3.Connection) -> None:
         id TEXT PRIMARY KEY, campaign_id TEXT NOT NULL, post_id TEXT NOT NULL,
         post_type TEXT NOT NULL, published_at TEXT NOT NULL, comment_text TEXT NOT NULL,
         selection_order INTEGER NOT NULL, selected INTEGER NOT NULL DEFAULT 1 CHECK(selected IN (0,1)),
+        project_id TEXT, page_id TEXT, source_id TEXT, approved_target_id TEXT,
+        target_status_snapshot TEXT,
         created_at TEXT NOT NULL,
         FOREIGN KEY(campaign_id) REFERENCES auto_comment_campaigns(id) ON DELETE CASCADE)""")
+    preview_columns = {row["name"] for row in connection.execute("PRAGMA table_info(auto_comment_preview_items)")}
+    for name in ("project_id", "page_id", "source_id", "approved_target_id", "target_status_snapshot"):
+        if name not in preview_columns:
+            connection.execute(f"ALTER TABLE auto_comment_preview_items ADD COLUMN {name} TEXT")
     connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_preview_campaign
         ON auto_comment_preview_items(campaign_id, post_id, selection_order)""")
     connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_campaign_executions (

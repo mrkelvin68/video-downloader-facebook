@@ -193,6 +193,45 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         self.assertFalse(service.begin_execution(campaign_id, assignment["id"], "operation-2"))
         service.finish_execution(assignment["id"], {"status": "SUCCESS", "comment_id": "comment-1"})
         self.assertEqual(service.campaign_execution(campaign_id)[0]["execution_status"], "PUBLISHED")
+        with self.assertRaisesRegex(AutoCommentValidationError, "snapshot"):
+            service.save_preview(values, [post], {"reel:1": ["Nội dung khác"]}, campaign_id)
+        self.assertEqual(service.campaign_execution(campaign_id)[0]["remote_comment_id"], "comment-1")
+
+    def test_11_reel_preview_saves_one_canonical_ready_assignment_and_reopens_it(self):
+        page_id = "1490753847447865"; source_id = "122108499879536255"; target_id = "4703374409946917"
+        FacebookPublishingService(self.database).save_pages(self.project_id, [{"id": page_id, "name": "Đậu Đậu Review"}])
+        service = AutoCommentCommentService(self.database)
+        service._save_target(self.project_id, page_id, {"source_id": source_id, "target_id": target_id,
+                             "target_type": "REEL", "status": "READY", "evidence": {"owner_id": page_id}}, "2026-11-14T00:00:00+00:00")
+        page = AutoCommentPage(self.database); page.page.setCurrentIndex(next(index for index in range(page.page.count()) if page.page.itemData(index) and page.page.itemData(index)[1] == page_id))
+        ids = [source_id, "reel:1465931375512608"] + [f"reel:{number}" for number in range(9)]
+        page.posts = [{"post_id": item, "post_type": "Reel", "published_at": "2026-11-10T00:00:00+00:00"} for item in ids]
+        page.selected_post_ids = set(ids); page._restore_target_states(); page._render_posts()
+        page.set_items([CommentItem(f"Comment {number}") for number in range(4)]); page.three.setChecked(True); page.generate_preview()
+        self.assertEqual((len(page.posts), len(page.selected_post_ids), page.preview.rowCount()), (11, 11, 33))
+        self.assertEqual(len(page.approved_preview_assignments), 0)
+        source_row = next(row for row in range(page.preview.rowCount()) if page.preview.item(row, 1).text() == source_id)
+        page.preview.item(source_row, 0).setCheckState(Qt.CheckState.Checked); page.save_campaign()
+        campaign_id = page.campaign_id; execution = AutoCommentService(self.database).campaign_execution(campaign_id)
+        self.assertEqual(len(execution), 1)
+        self.assertEqual((execution[0]["project_id"], execution[0]["page_id"], execution[0]["source_id"], execution[0]["approved_target_id"]),
+                         (self.project_id, page_id, source_id, target_id))
+        self.assertEqual(execution[0]["preflight_status"], "READY")
+        self.assertNotEqual(execution[0]["source_id"], "reel:1465931375512608")
+        with self.database.connection:
+            self.database.connection.execute("UPDATE auto_comment_targets SET target_id='wrong-target' WHERE project_id=? AND page_id=? AND source_id=?", (self.project_id, page_id, source_id))
+        self.assertEqual(AutoCommentService(self.database).campaign_execution(campaign_id)[0]["preflight_status"], "TARGET_ID_MISMATCH")
+        with self.database.connection:
+            self.database.connection.execute("UPDATE auto_comment_targets SET target_id=? WHERE project_id=? AND page_id=? AND source_id=?", (target_id, self.project_id, page_id, source_id))
+        reopened = AutoCommentPage(self.database); reopened.campaign_picker.setCurrentIndex(reopened.campaign_picker.findData(campaign_id))
+        reopened.tabs.setCurrentIndex(3)
+        self.assertEqual(reopened.approved_preview_assignments, {(source_id, 1)})
+        self.assertIn(source_id, reopened.test_target_info.text()); self.assertIn(target_id, reopened.test_target_info.text())
+        self.assertTrue(reopened.execution_button.isEnabled())
+        campaign_count = len(AutoCommentService(self.database).list_campaigns()); page.campaign_id = None; page.approved_preview_assignments.clear(); page.save_campaign()
+        self.assertEqual(len(AutoCommentService(self.database).list_campaigns()), campaign_count)
+        self.assertIn("checkbox", page.preview_status.text())
+        page.close(); reopened.close()
 
     def test_rerunning_migration_preserves_auto_comment_data(self):
         service = AutoCommentService(self.database)
@@ -212,6 +251,7 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         page.tabs.setCurrentIndex(1); page.tabs.setCurrentIndex(0)
         self.assertEqual(page.selected_post_ids, {"post-1"})
         page.preview_comments = {"post-1": ["Một"], "post-2": ["Hai"]}; page._render_preview(page.posts)
+        page.preview.item(0, 0).setCheckState(Qt.CheckState.Checked)
         page.preview.item(1, 0).setCheckState(Qt.CheckState.Unchecked)
         page.save_campaign()
         campaign = AutoCommentService(self.database).list_campaigns()[0]

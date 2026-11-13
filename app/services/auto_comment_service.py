@@ -431,31 +431,50 @@ class AutoCommentService:
                 (campaign_id, values["name"], values["page_id"], values["start_date"], values["end_date"],
                  values["content_type"], values["selection_mode"], values["count"], int(values["prevent_duplicates"]), now, now),
             )
-            published = self.database.connection.execute(
-                "SELECT 1 FROM auto_comment_campaign_executions WHERE campaign_id=? AND execution_status IN ('RUNNING','PUBLISHED','UNCERTAIN')",
+            executed = self.database.connection.execute(
+                "SELECT 1 FROM auto_comment_campaign_executions WHERE campaign_id=?",
                 (campaign_id,),
             ).fetchone()
-            if published:
-                raise AutoCommentValidationError("Campaign đã chạy hoặc cần đối soát; không thể thay đổi snapshot đã duyệt.")
+            if executed:
+                raise AutoCommentValidationError("Campaign đã có lịch sử thực hiện; snapshot được giữ nguyên và không thể ghi đè.")
             self.database.connection.execute("DELETE FROM auto_comment_preview_items WHERE campaign_id=?", (campaign_id,))
             preview_rows = []
+            targets = values.get("targets_by_post", {})
             for post in posts:
                 for order, comment in enumerate(comments_by_post.get(post["post_id"], []), start=1):
-                    preview_rows.append((str(uuid.uuid4()), campaign_id, post["post_id"], post["post_type"], post["published_at"], comment, order, int(approved_post_ids is None or post["post_id"] in approved_post_ids), now))
+                    target = targets.get(post["post_id"], {})
+                    source_id = post.get("source_post_id") or post.get("reel_id") or post["post_id"]
+                    preview_rows.append((str(uuid.uuid4()), campaign_id, post["post_id"], post["post_type"], post["published_at"], comment, order, int(approved_post_ids is None or post["post_id"] in approved_post_ids), values.get("project_id"), values["page_id"], source_id, target.get("target_id"), target.get("status"), now))
             self.database.connection.executemany(
                 """INSERT INTO auto_comment_preview_items
-                   (id,campaign_id,post_id,post_type,published_at,comment_text,selection_order,selected,created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?)""", preview_rows)
+                   (id,campaign_id,post_id,post_type,published_at,comment_text,selection_order,selected,
+                    project_id,page_id,source_id,approved_target_id,target_status_snapshot,created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", preview_rows)
         return campaign_id
 
     def campaign_execution(self, campaign_id: str) -> list[dict]:
-        return [dict(row) for row in self.database.connection.execute(
+        rows = [dict(row) for row in self.database.connection.execute(
             """SELECT p.*, COALESCE(e.execution_status, 'PENDING') AS execution_status,
-                      e.operation_id,e.remote_comment_id,e.message
+                      e.operation_id,e.remote_comment_id,e.message,
+                      t.status AS current_target_status,t.target_id AS current_target_id
                FROM auto_comment_preview_items p
                LEFT JOIN auto_comment_campaign_executions e ON e.preview_item_id=p.id
+               LEFT JOIN auto_comment_targets t ON t.project_id=p.project_id AND t.page_id=p.page_id
+                    AND t.source_id=p.post_id
                WHERE p.campaign_id=? AND p.selected=1 ORDER BY p.selection_order,p.post_id""", (campaign_id,)
         )]
+        for row in rows:
+            if not all(row.get(key) for key in ("project_id", "page_id", "source_id", "approved_target_id")):
+                row["preflight_status"] = "IDENTITY_MISSING"
+            elif row.get("target_status_snapshot") != "READY":
+                row["preflight_status"] = "SNAPSHOT_UNVERIFIED"
+            elif row.get("current_target_status") != "READY":
+                row["preflight_status"] = row.get("current_target_status") or "TARGET_UNVERIFIED"
+            elif row.get("current_target_id") != row.get("approved_target_id"):
+                row["preflight_status"] = "TARGET_ID_MISMATCH"
+            else:
+                row["preflight_status"] = "READY"
+        return rows
 
     def begin_execution(self, campaign_id: str, preview_item_id: str, operation_id: str) -> bool:
         now = _now()
