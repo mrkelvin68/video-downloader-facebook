@@ -42,6 +42,8 @@ class CommentMixerTests(unittest.TestCase):
     def test_widget_select_save_once_and_page_isolation(self):
         templates, links = self._seed(); library = self.libraries.save_library("Đích", [CommentItem("Giữ nguyên")], project_id="proj-1", page_id="page-a")
         scope = [("proj-1", "page-a")]; widget = CommentComposerWidget(self.db, "proj-1", "page-a", "A", active_scope_provider=lambda:scope[0])
+        self.assertEqual(widget.destination.currentData(), library)
+        self.assertEqual(widget.results.columnWidth(0), 55)
         widget.template_toggle.click(); widget.link_toggle.click(); widget.mix(); self.assertEqual(widget.results.rowCount(), 3)
         widget.results.item(1, 1).setText("Đã sửa cuối cùng"); widget.results.item(2, 0).setCheckState(Qt.CheckState.Unchecked)
         widget.destination.setCurrentIndex(widget.destination.findData(library))
@@ -51,6 +53,17 @@ class CommentMixerTests(unittest.TestCase):
         rows = self.db.connection.execute("SELECT comment_text FROM auto_comment_library_items WHERE library_id=? ORDER BY sort_order", (library,)).fetchall()
         self.assertEqual([row[0] for row in rows], ["Giữ nguyên", rows[1][0], "Đã sửa cuối cùng"])
         scope[0] = ("proj-1", "page-b"); self.assertFalse(widget.save_button.isEnabled())
+    def test_creates_library_when_page_has_none_and_preserves_full_text(self):
+        templates, links = self._seed(1); seen=[]
+        widget = CommentComposerWidget(self.db, "proj-1", "page-a", "A", saved_callback=seen.append)
+        self.assertEqual(widget.destination.currentData(), "__new__")
+        widget.template_toggle.click(); widget.link_toggle.click(); widget.mix(); widget.destination.setCurrentIndex(0)
+        final = "Comment đầy đủ\nhttps://s.shopee.vn/item0?utm_source=fb"
+        widget.results.item(0, 1).setText(final)
+        ids = widget.save_selected()
+        self.assertEqual(len(ids), 1); self.assertEqual(seen, [widget._saved_library_id])
+        row = self.db.connection.execute("SELECT comment_text FROM auto_comment_library_items WHERE id=?", (ids[0],)).fetchone()
+        self.assertEqual(row[0], final); self.assertTrue(widget.view_saved_button.isEnabled())
     def test_atomic_rollback_stale_sources_and_legacy_blocked(self):
         templates, links = self._seed(1); library = self.libraries.save_library("Đích", [CommentItem("old")], project_id="proj-1", page_id="page-a")
         drafts = self.service.mix_drafts("proj-1", "page-a", templates, links[:2], mode="all")

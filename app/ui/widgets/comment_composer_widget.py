@@ -3,9 +3,10 @@ from __future__ import annotations
 from typing import Callable
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QRadioButton, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QPushButton
+from PySide6.QtWidgets import QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QRadioButton, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QPushButton, QLineEdit, QHeaderView
 
 from app.services.auto_comment_composer_service import AutoCommentComposerService, CommentComposerError, ComposedCommentDraft, evaluate_draft_warnings
+from app.services.auto_comment_service import AutoCommentService
 
 
 class CommentComposerWidget(QWidget):
@@ -21,8 +22,8 @@ class CommentComposerWidget(QWidget):
         self.limit = QSpinBox(); self.limit.setRange(1, 500); self.limit.setValue(10); self.potential = QLabel()
         form.addRow("Cách trộn", modes); form.addRow("Vị trí link", placements); form.addRow("Giới hạn bản nháp", self.limit); form.addRow("Dự kiến", self.potential); root.addLayout(form)
         self.mix_button = QPushButton("Trộn comment"); self.mix_button.clicked.connect(self.mix); root.addWidget(self.mix_button)
-        self.results = QTableWidget(0, 5); self.results.setHorizontalHeaderLabels(["Chọn", "Nội dung sau trộn", "Mẫu", "Link", "Cảnh báo"]); self.results.setColumnWidth(0, 55); self.results.setColumnWidth(2, 150); self.results.setColumnWidth(3, 150); self.results.horizontalHeader().setStretchLastSection(True); self.results.itemChanged.connect(self._result_changed); root.addWidget(self.results, 1)
-        actions = QHBoxLayout(); self.select_results = QPushButton("Chọn tất cả"); self.select_results.clicked.connect(self.toggle_results); self.destination = QComboBox(); self.destination.currentIndexChanged.connect(self._update_save); self.save_button = QPushButton("Lưu comment đã chọn"); self.save_button.clicked.connect(self.save_selected); actions.addWidget(self.select_results); actions.addWidget(QLabel("Thư viện đích")); actions.addWidget(self.destination, 1); actions.addWidget(self.save_button); root.addLayout(actions)
+        self.results = QTableWidget(0, 5); self.results.setHorizontalHeaderLabels(["Chọn", "Nội dung sau trộn", "Mẫu", "Link AFF", "Cảnh báo"]); header=self.results.horizontalHeader(); header.setSectionResizeMode(0,QHeaderView.ResizeMode.Fixed); header.setSectionResizeMode(1,QHeaderView.ResizeMode.Stretch); header.setSectionResizeMode(2,QHeaderView.ResizeMode.ResizeToContents); header.setSectionResizeMode(3,QHeaderView.ResizeMode.Interactive); header.setSectionResizeMode(4,QHeaderView.ResizeMode.ResizeToContents); self.results.setColumnWidth(0,55); self.results.setColumnWidth(3,220); self.results.setColumnWidth(4,140); self.results.itemChanged.connect(self._result_changed); root.addWidget(self.results, 1)
+        actions = QHBoxLayout(); self.select_results = QPushButton("Chọn tất cả"); self.select_results.clicked.connect(self.toggle_results); self.destination = QComboBox(); self.destination.currentIndexChanged.connect(self._destination_changed); self.new_library_name = QLineEdit("Thư viện comment mới"); self.new_library_name.setVisible(False); self.save_button = QPushButton("Lưu 0 comment đã chọn"); self.save_button.clicked.connect(self.save_selected); actions.addWidget(self.select_results); actions.addWidget(QLabel("Lưu kết quả")); actions.addWidget(self.destination, 1); actions.addWidget(self.new_library_name, 1); actions.addWidget(self.save_button); root.addLayout(actions); self.destination_help=QLabel("Comment sau khi lưu sẽ xuất hiện trong thư viện comment của Fanpage này."); root.addWidget(self.destination_help); self.view_saved_button=QPushButton("Xem comment vừa lưu"); self.view_saved_button.setEnabled(False); self.view_saved_button.clicked.connect(self.view_saved); root.addWidget(self.view_saved_button)
         self.status_label = QLabel(); self.status_label.setWordWrap(True); root.addWidget(self.status_label)
         for control in (self.round_robin, self.combinations, self.end_placement, self.placeholder_placement, self.limit): (control.toggled if hasattr(control, "toggled") else control.valueChanged).connect(self._update_potential)
         self.reload_options()
@@ -37,12 +38,14 @@ class CommentComposerWidget(QWidget):
         for item in items: item.setCheckState(Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked)
         button.setText("Chọn tất cả" if checked else "Bỏ chọn tất cả")
     def reload_options(self):
-        self.template_list.clear(); self.link_list.clear(); self.destination.clear(); self.destination.addItem("— Chọn thư viện đích —", None)
+        self.template_list.clear(); self.link_list.clear(); self.destination.clear()
         if not self.project_id or not self.page_id: self.mix_button.setEnabled(False); return
         for listing, rows in ((self.template_list, self.service.list_enabled_templates(self.project_id, self.page_id)), (self.link_list, self.service.list_enabled_links(self.project_id, self.page_id))):
             for row in rows:
                 item = QListWidgetItem(str(row["name"])); item.setData(Qt.ItemDataRole.UserRole, row["id"]); item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable); item.setCheckState(Qt.CheckState.Unchecked); listing.addItem(item)
-        for library in self.service.list_destination_libraries(self.project_id, self.page_id): self.destination.addItem(library["name"], library["id"])
+        libraries=self.service.list_destination_libraries(self.project_id, self.page_id)
+        for library in libraries: self.destination.addItem(library["name"], library["id"])
+        if not libraries: self.destination.addItem("＋ Tạo thư viện mới", "__new__")
         self._update_potential()
     def _update_potential(self, *_):
         templates, links = self._ids(self.template_list), self._ids(self.link_list); total = len(templates) * (len(links) if self.combinations.isChecked() else 1)
@@ -53,7 +56,7 @@ class CommentComposerWidget(QWidget):
         except CommentComposerError as exc: self.status_label.setText(str(exc)); return
         self._saved = False; self.results.blockSignals(True); self.results.setRowCount(0)
         for draft in self.drafts:
-            row = self.results.rowCount(); self.results.insertRow(row); check = QTableWidgetItem(); check.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable); check.setCheckState(Qt.CheckState.Checked); self.results.setItem(row, 0, check); self.results.setItem(row, 1, QTableWidgetItem(draft.edited_text)); self.results.setItem(row, 2, QTableWidgetItem(draft.template_name)); self.results.setItem(row, 3, QTableWidgetItem(draft.affiliate_link_name or "")); self.results.setItem(row, 4, QTableWidgetItem(" | ".join(draft.warnings)))
+            row = self.results.rowCount(); self.results.insertRow(row); check = QTableWidgetItem(); check.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable); check.setCheckState(Qt.CheckState.Checked); self.results.setItem(row, 0, check); self.results.setItem(row, 1, QTableWidgetItem(draft.edited_text)); self.results.setItem(row, 2, QTableWidgetItem(draft.template_name)); link=QTableWidgetItem(draft.affiliate_link_name or ""); link.setToolTip(draft.affiliate_url or ""); self.results.setItem(row, 3, link); self.results.setItem(row, 4, QTableWidgetItem(" | ".join(draft.warnings)))
         self.results.blockSignals(False); self.status_label.setText(f"Đã tạo {len(self.drafts)} bản nháp cục bộ; chưa lưu."); self._update_save()
     def _result_changed(self, item):
         if item.column() == 1 and item.row() < len(self.drafts):
@@ -66,16 +69,21 @@ class CommentComposerWidget(QWidget):
         checked = self.results.rowCount() and all(self.results.item(r, 0).checkState() == Qt.CheckState.Checked for r in range(self.results.rowCount()))
         for row in range(self.results.rowCount()): self.results.item(row, 0).setCheckState(Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked)
         self.select_results.setText("Chọn tất cả" if checked else "Bỏ chọn tất cả")
+    def _destination_changed(self, *_): self.new_library_name.setVisible(self.destination.currentData()=="__new__"); self._update_save()
     def _update_save(self, *_):
-        selected = any(self.results.item(r, 0) and self.results.item(r, 0).checkState() == Qt.CheckState.Checked for r in range(self.results.rowCount())); self.save_button.setEnabled(bool(selected and self.destination.currentData() and not self._saved and self._active_scope() == self._scope))
+        count=sum(bool(self.results.item(r,0) and self.results.item(r,0).checkState()==Qt.CheckState.Checked) for r in range(self.results.rowCount())); self.save_button.setText(f"Lưu {count} comment đã chọn"); self.save_button.setEnabled(bool(count and self.destination.currentData() and not self._saved and self._active_scope() == self._scope))
     def save_selected(self):
         if self._saved or self._active_scope() != self._scope: self.status_label.setText("Bản nháp không còn hợp lệ hoặc đã được lưu."); return None
-        chosen = [draft for row, draft in enumerate(self.drafts) if self.results.item(row, 0).checkState() == Qt.CheckState.Checked]
-        try: ids = self.service.save_selected_drafts(chosen, str(self.destination.currentData() or ""), self.project_id, self.page_id)
+        chosen = [draft for row, draft in enumerate(self.drafts) if self.results.item(row, 0).checkState() == Qt.CheckState.Checked]; library_id=str(self.destination.currentData() or "")
+        try:
+            if library_id=="__new__": library_id=AutoCommentService(self.service.database).create_owned_library(self.project_id,self.page_id,self.new_library_name.text())
+            ids = self.service.save_selected_drafts(chosen, library_id, self.project_id, self.page_id)
         except CommentComposerError as exc: self.status_label.setText(str(exc)); return None
-        self._saved = True; self.status_label.setText(f"Đã lưu {len(ids)} comment vào thư viện."); self._update_save()
-        if self._saved_callback: self._saved_callback()
+        self._saved = True; self.status_label.setText(f"Đã lưu {len(ids)} comment vào thư viện."); self.view_saved_button.setEnabled(True); self._saved_library_id=library_id; self._update_save()
+        if self._saved_callback: self._saved_callback(library_id)
         return ids
+    def view_saved(self):
+        if self._saved_callback: self._saved_callback(self._saved_library_id)
 
 
 class CommentComposerDialog(QDialog):

@@ -511,6 +511,15 @@ class AutoCommentService:
             raise AutoCommentValidationError("Không thể lưu comment do lỗi cơ sở dữ liệu.") from exc
         return ids
 
+    def create_owned_library(self, project_id: str, page_id: str, name: str) -> str:
+        clean_name = str(name or "").strip() or "Thư viện comment mới"
+        library_id, now = str(uuid.uuid4()), _now()
+        with self.database.connection:
+            if not self.database.connection.execute("SELECT 1 FROM facebook_pages WHERE project_id=? AND page_id=?", (project_id, page_id)).fetchone():
+                raise AutoCommentValidationError("Fanpage đang chọn không còn hợp lệ.")
+            self.database.connection.execute("INSERT INTO auto_comment_libraries(id,name,project_id,page_id,created_at,updated_at) VALUES (?,?,?,?,?,?)", (library_id, clean_name, project_id, page_id, now, now))
+        return library_id
+
     def load_library(self, library_id: str) -> list[CommentItem]:
         return [CommentItem(str(row["comment_text"]), bool(row["enabled"]), row["source_row_id"], int(row["sort_order"]))
                 for row in self.database.connection.execute(
