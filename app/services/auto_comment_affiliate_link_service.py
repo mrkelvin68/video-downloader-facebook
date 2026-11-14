@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import ipaddress
 import re
+import sqlite3
 from urllib.parse import urlsplit, urlunsplit
 import uuid
 
@@ -176,8 +177,10 @@ class AutoCommentAffiliateLinkService:
                         now,
                     ),
                 )
-        except Exception as exc:
+        except sqlite3.IntegrityError as exc:
             raise AffiliateLinkError("URL sản phẩm này đã tồn tại trong Fanpage đang chọn.") from exc
+        except Exception as exc:
+            raise AffiliateLinkError("Không thể lưu link sản phẩm do lỗi cơ sở dữ liệu.") from exc
         return link_id
 
     def list_links(
@@ -254,19 +257,24 @@ class AutoCommentAffiliateLinkService:
                         clean_page,
                     ),
                 )
-        except Exception as exc:
+        except sqlite3.IntegrityError as exc:
             raise AffiliateLinkError("URL sản phẩm này đã tồn tại trong Fanpage đang chọn.") from exc
+        except Exception as exc:
+            raise AffiliateLinkError("Không thể cập nhật link sản phẩm do lỗi cơ sở dữ liệu.") from exc
         if cur.rowcount != 1:
             raise AffiliateLinkError("Không tìm thấy link sản phẩm trong Fanpage đang chọn.")
 
     def delete_link(self, project_id: str, page_id: str, link_id: str) -> None:
         clean_project, clean_page = _validate_scope(project_id, page_id)
         clean_id = str(link_id or "").strip()
-        with self.database.connection:
-            cur = self.database.connection.execute(
-                "DELETE FROM auto_comment_affiliate_links WHERE id=? AND project_id=? AND page_id=?",
-                (clean_id, clean_project, clean_page),
-            )
+        try:
+            with self.database.connection:
+                cur = self.database.connection.execute(
+                    "DELETE FROM auto_comment_affiliate_links WHERE id=? AND project_id=? AND page_id=?",
+                    (clean_id, clean_project, clean_page),
+                )
+        except Exception as exc:
+            raise AffiliateLinkError("Không thể xóa link sản phẩm do lỗi cơ sở dữ liệu.") from exc
         if cur.rowcount != 1:
             raise AffiliateLinkError("Không tìm thấy link sản phẩm trong Fanpage đang chọn.")
 

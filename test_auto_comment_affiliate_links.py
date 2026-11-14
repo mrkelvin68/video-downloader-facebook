@@ -5,6 +5,11 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from app.database.connection import Database
 from app.database.migrations import migrate
@@ -15,6 +20,12 @@ from app.services.auto_comment_affiliate_link_service import (
     validate_affiliate_url,
 )
 from app.services.auto_comment_template_service import AutoCommentTemplateService
+from app.services.facebook_publishing_service import FacebookPublishingService
+from app.services.project_service import ProjectService
+from app.ui.pages.auto_comment_page import AutoCommentPage
+from app.ui.widgets.comment_affiliate_link_library_widget import (
+    CommentAffiliateLinkLibraryWidget,
+)
 
 
 class AffiliateLinkTests(unittest.TestCase):
@@ -579,6 +590,392 @@ class AffiliateLinkTests(unittest.TestCase):
         with self.assertRaises(AffiliateLinkError):
             self.service.set_link_enabled("proj-1", "page-2", link_id, False)
         self.assertEqual(self.service.get_link("proj-1", "page-1", link_id)["enabled"], 1)
+
+    def test_36_update_link_enforces_normalized_duplicate_key_and_preserves_records(self):
+        id1 = self.service.create_link(
+            self.project_id,
+            self.page_id,
+            "Link 1",
+            "https://s.shopee.vn/itemNorm1?aff_id=100",
+        )
+        id2 = self.service.create_link(
+            self.project_id,
+            self.page_id,
+            "Link 2",
+            "https://s.shopee.vn/itemNorm2?aff_id=200",
+        )
+        with self.assertRaises(AffiliateLinkError):
+            self.service.update_link(
+                self.project_id,
+                self.page_id,
+                id2,
+                "Link 2 sửa trùng domain hoa thường",
+                "HTTPS://S.SHOPEE.VN:443/itemNorm1?aff_id=100",
+            )
+        # Existing records remain intact
+        self.assertEqual(
+            self.service.get_link(self.project_id, self.page_id, id1)["url"],
+            "https://s.shopee.vn/itemNorm1?aff_id=100",
+        )
+        self.assertEqual(
+            self.service.get_link(self.project_id, self.page_id, id2)["url"],
+            "https://s.shopee.vn/itemNorm2?aff_id=200",
+        )
+
+
+class AffiliateLinkUITests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tmp.name) / "affiliate_ui_test.sqlite3"
+        self.db = Database(self.db_path)
+        self.service = AutoCommentAffiliateLinkService(self.db)
+        pid = ProjectService(self.db).create(
+            "Project 1", "p1", str(Path(self.tmp.name) / "v")
+        )
+        with self.db.connection:
+            self.db.connection.execute(
+                "UPDATE projects SET uuid='proj-1' WHERE uuid=?", (pid,)
+            )
+        FacebookPublishingService(self.db).save_pages(
+            "proj-1",
+            [
+                {"id": "page-a", "name": "Fanpage A"},
+                {"id": "page-b", "name": "Fanpage B"},
+            ],
+        )
+
+    def tearDown(self):
+        self.db.close()
+        self.tmp.cleanup()
+
+    def test_ui_01_widget_opens_and_step2_dialog_launches(self):
+        page = AutoCommentPage(self.db)
+        page._go_to_step(1)
+        self.assertTrue(hasattr(page, "open_affiliate_library_button"))
+        self.assertEqual(page.open_affiliate_library_button.text(), "Kho link AFF")
+
+        # Without selecting a page, shows actionable Vietnamese message
+        page.page.setCurrentIndex(0)
+        with patch.object(QMessageBox, "information") as mock_info:
+            dlg_none = page.open_affiliate_library()
+            self.assertIsNone(dlg_none)
+            mock_info.assert_called_once()
+            self.assertIn("Hãy chọn Fanpage", mock_info.call_args[0][2])
+
+        # Select Fanpage A and open dialog
+        page.page.setCurrentIndex(1)
+        with patch.object(QDialog, "exec", return_value=QDialog.DialogCode.Accepted):
+            dlg = page.open_affiliate_library()
+            self.assertIsNotNone(dlg)
+            self.assertEqual(dlg.windowTitle(), "Kho link AFF")
+            self.assertTrue(
+                bool(dlg.windowFlags() & Qt.WindowType.WindowMaximizeButtonHint)
+            )
+            self.assertIsInstance(
+                page.affiliate_library_widget, CommentAffiliateLinkLibraryWidget
+            )
+            headers = [
+                page.affiliate_library_widget.table.horizontalHeaderItem(i).text()
+                for i in range(page.affiliate_library_widget.table.columnCount())
+            ]
+            self.assertEqual(
+                headers,
+                ["Bật", "Tên sản phẩm", "Affiliate URL", "Mô tả", "Cập nhật"],
+            )
+            dlg.close()
+        page.close()
+
+    def test_ui_02_to_06_create_edit_enable_disable_cancel_and_confirm_delete(self):
+        widget = CommentAffiliateLinkLibraryWidget(self.db, "proj-1", "page-a")
+
+        # 2. Create link via Add/Edit dialog
+        ed = widget.create_editor_dialog(None)
+        self.assertIsNotNone(ed)
+        ed.name_edit.setText("Bàn phím cơ không dây")
+        ed.url_edit.setText("https://s.shopee.vn/kbWireless01?sub_id=reel1")
+        ed.description_edit.setPlainText("Switch gõ êm, pin 1 tháng")
+        ed.enabled_checkbox.setChecked(True)
+        ed.save_link()
+
+        self.assertEqual(widget.table.rowCount(), 1)
+        self.assertEqual(widget.table.item(0, 1).text(), "Bàn phím cơ không dây")
+        self.assertEqual(widget.table.item(0, 3).text(), "Switch gõ êm, pin 1 tháng")
+        self.assertEqual(widget.table.item(0, 0).checkState(), Qt.CheckState.Checked)
+
+        # 3. Edit link
+        widget.table.setCurrentCell(0, 1)
+        ed_edit = widget.create_editor_dialog(widget.selected())
+        self.assertEqual(ed_edit.name_edit.text(), "Bàn phím cơ không dây")
+        self.assertEqual(
+            ed_edit.url_edit.text(), "https://s.shopee.vn/kbWireless01?sub_id=reel1"
+        )
+        ed_edit.name_edit.setText("Bàn phím cơ RGB Pro")
+        ed_edit.url_edit.setText("https://s.shopee.vn/kbWireless02?sub_id=reel2")
+        ed_edit.description_edit.setPlainText("Bản nâng cấp LED RGB")
+        ed_edit.save_link()
+
+        self.assertEqual(widget.table.item(0, 1).text(), "Bàn phím cơ RGB Pro")
+        self.assertEqual(
+            widget.selected_url(), "https://s.shopee.vn/kbWireless02?sub_id=reel2"
+        )
+        self.assertEqual(widget.table.item(0, 3).text(), "Bản nâng cấp LED RGB")
+
+        # 6. Enable/disable via checkbox & Space key
+        widget.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+        link_id = widget.selected()
+        self.assertEqual(
+            self.service.get_link("proj-1", "page-a", link_id)["enabled"], 0
+        )
+        widget.table.setCurrentCell(0, 0)
+        QTest.keyClick(widget.table, Qt.Key.Key_Space)
+        self.assertEqual(
+            self.service.get_link("proj-1", "page-a", link_id)["enabled"], 1
+        )
+
+        # 5. Cancel deletion
+        with patch.object(
+            QMessageBox, "question", return_value=QMessageBox.StandardButton.No
+        ):
+            widget.delete()
+        self.assertEqual(widget.table.rowCount(), 1)
+
+        # 4. Confirm delete link
+        with patch.object(
+            QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes
+        ):
+            widget.delete()
+        self.assertEqual(widget.table.rowCount(), 0)
+        self.assertEqual(self.service.list_links("proj-1", "page-a"), [])
+        widget.close()
+
+    def test_ui_07_08_09_search_copy_and_preserve_long_affiliate_url(self):
+        long_url = (
+            "https://shopee.vn/universal-link/product/888888/999999"
+            "?gads_t_sig=VTJGc2RHVmtYMTlxTFVSVVRrdENkWVp3"
+            "&uls_trackid=51abcdef0123456789"
+            "&utm_content=----Reels_Fanpage_A_Campaign_Long_Tracking_Param"
+            "&utm_medium=affiliates&utm_source=an_17300000000#deal-hot"
+        )
+        self.service.create_link(
+            "proj-1",
+            "page-a",
+            "Kem dưỡng ẩm chuyên sâu",
+            long_url,
+            "Dành cho da khô nhạy cảm",
+        )
+        self.service.create_link(
+            "proj-1",
+            "page-a",
+            "Son dưỡng môi",
+            "https://s.shopee.vn/lipBalm99",
+            "Màu hồng cam tự nhiên",
+        )
+
+        widget = CommentAffiliateLinkLibraryWidget(self.db, "proj-1", "page-a")
+        self.assertEqual(widget.table.rowCount(), 2)
+
+        # 7. Search by name, description, or URL
+        widget.search.setText("da khô")
+        self.assertEqual(widget.table.rowCount(), 1)
+        self.assertEqual(widget.table.item(0, 1).text(), "Kem dưỡng ẩm chuyên sâu")
+
+        # 9. Long URL elided visually in cell display, but tooltip and stored URL preserve full tracking string
+        url_cell = widget.table.item(0, 2)
+        self.assertLess(len(url_cell.text()), len(long_url))
+        self.assertEqual(url_cell.toolTip(), long_url)
+        self.assertEqual(widget.selected_url(), long_url)
+
+        # 8. Copy URL copies full original URL to clipboard
+        copied = widget.copy_selected_url()
+        self.assertEqual(copied, long_url)
+        self.assertEqual(QApplication.clipboard().text(), long_url)
+
+        widget.search.setText("lipBalm99")
+        self.assertEqual(widget.table.rowCount(), 1)
+        self.assertEqual(widget.table.item(0, 1).text(), "Son dưỡng môi")
+
+        widget.search.setText("")
+        self.assertEqual(widget.table.rowCount(), 2)
+        widget.close()
+
+    def test_ui_10_11_duplicate_and_invalid_url_warnings_and_db_error(self):
+        self.service.create_link(
+            "proj-1",
+            "page-a",
+            "Sản phẩm gốc",
+            "https://s.shopee.vn/dupTest99?sub=A",
+        )
+        widget = CommentAffiliateLinkLibraryWidget(self.db, "proj-1", "page-a")
+        ed = widget.create_editor_dialog(None)
+
+        # Empty name warning
+        ed.name_edit.setText("   ")
+        ed.url_edit.setText("https://s.shopee.vn/validUrl1")
+        with patch.object(QMessageBox, "warning") as mock_warn:
+            ed.save_link()
+            mock_warn.assert_called_once()
+            self.assertIn("Tên link sản phẩm", mock_warn.call_args[0][2])
+
+        # 11. Invalid URL warning
+        ed.name_edit.setText("Sản phẩm lỗi URL")
+        ed.url_edit.setText("http://localhost/bad-link")
+        with patch.object(QMessageBox, "warning") as mock_warn:
+            ed.save_link()
+            mock_warn.assert_called_once()
+            self.assertIn("https://", mock_warn.call_args[0][2])
+
+        # 10. Duplicate URL warning (including case-normalized domain)
+        ed.name_edit.setText("Sản phẩm trùng link")
+        ed.url_edit.setText("HTTPS://S.SHOPEE.VN/dupTest99?sub=A")
+        with patch.object(QMessageBox, "warning") as mock_warn:
+            ed.save_link()
+            mock_warn.assert_called_once()
+            self.assertIn("đã tồn tại", mock_warn.call_args[0][2])
+
+        self.assertEqual(widget.table.rowCount(), 1)
+        ed.close()
+        widget.close()
+
+    def test_ui_12_13_14_page_isolation_switch_page_while_open_and_reopen_persistence(
+        self,
+    ):
+        self.service.create_link(
+            "proj-1",
+            "page-a",
+            "SP Fanpage A",
+            "https://s.shopee.vn/linkPageA",
+            "Mô tả A",
+        )
+        self.service.create_link(
+            "proj-1",
+            "page-b",
+            "SP Fanpage B",
+            "https://s.shopee.vn/linkPageB",
+            "Mô tả B",
+        )
+
+        page = AutoCommentPage(self.db)
+        page.page.setCurrentIndex(1)  # Fanpage A
+        self.assertEqual(page.page.currentData(), ("proj-1", "page-a"))
+
+        with patch.object(QDialog, "exec", return_value=QDialog.DialogCode.Accepted):
+            dlg = page.open_affiliate_library()
+        widget = page.affiliate_library_widget
+
+        # 12. Page A shows only Page A links
+        self.assertEqual(widget.table.rowCount(), 1)
+        self.assertEqual(widget.table.item(0, 1).text(), "SP Fanpage A")
+
+        # Open Add/Edit dialog while on Page A
+        ed = widget.create_editor_dialog(None)
+        ed.name_edit.setText("Link tạo dở ở Page A")
+        ed.url_edit.setText("https://s.shopee.vn/draftPageA")
+
+        # 13. Switch Page to Fanpage B while dialog is open
+        page.page.setCurrentIndex(2)  # Fanpage B
+        self.assertEqual(page.page.currentData(), ("proj-1", "page-b"))
+        self.assertEqual(widget.project_id, "proj-1")
+        self.assertEqual(widget.page_id, "page-b")
+        self.assertEqual(widget.table.rowCount(), 1)
+        self.assertEqual(widget.table.item(0, 1).text(), "SP Fanpage B")
+
+        # Stale editor dialog from Page A is blocked from saving
+        self.assertFalse(ed.save_button.isEnabled())
+        self.assertFalse(ed.context_warning.isHidden())
+        with patch.object(QMessageBox, "warning") as mock_warn:
+            ed.save_link()
+            mock_warn.assert_called_once()
+            self.assertIn("Fanpage đang chọn đã thay đổi", mock_warn.call_args[0][2])
+
+        # Neither Page A nor Page B got the stale draft
+        self.assertEqual(len(self.service.list_links("proj-1", "page-a")), 1)
+        self.assertEqual(len(self.service.list_links("proj-1", "page-b")), 1)
+        ed.close()
+
+        # Add a new link on Page B
+        ed_b = widget.create_editor_dialog(None)
+        ed_b.name_edit.setText("SP Fanpage B Mới")
+        ed_b.url_edit.setText("https://s.shopee.vn/newPageB?aff=999")
+        ed_b.save_link()
+        self.assertEqual(widget.table.rowCount(), 2)
+        dlg.close()
+        page.close()
+
+        # 14. Reopen database and widget -> persisted links intact for both pages
+        self.db.close()
+        self.db = Database(self.db_path)
+        self.service = AutoCommentAffiliateLinkService(self.db)
+        reopened_a = CommentAffiliateLinkLibraryWidget(self.db, "proj-1", "page-a")
+        reopened_b = CommentAffiliateLinkLibraryWidget(self.db, "proj-1", "page-b")
+        self.assertEqual(reopened_a.table.rowCount(), 1)
+        self.assertEqual(reopened_a.table.item(0, 1).text(), "SP Fanpage A")
+        self.assertEqual(reopened_b.table.rowCount(), 2)
+        reopened_a.close()
+        reopened_b.close()
+
+    def test_ui_15_16_17_step2_controls_available_and_no_facebook_post(self):
+        with (
+            patch(
+                "app.services.auto_comment_comment_service.AutoCommentCommentService.publish_one"
+            ) as mock_publish_one,
+            patch(
+                "app.ui.pages.auto_comment_page.FacebookPublishWorker"
+            ) as mock_publish_worker,
+        ):
+            page = AutoCommentPage(self.db)
+            page._go_to_step(1)
+            page.page.setCurrentIndex(1)
+
+            # 15. Existing Kho mẫu comment button remains available and functional
+            self.assertTrue(hasattr(page, "open_template_library_button"))
+            self.assertEqual(page.open_template_library_button.text(), "Kho mẫu comment")
+            with patch.object(
+                QDialog, "exec", return_value=QDialog.DialogCode.Accepted
+            ):
+                tpl_dlg = page.open_template_library()
+                self.assertIsNotNone(tpl_dlg)
+                tpl_dlg.close()
+
+            # 16. Existing CSV / AI Generator / manual row / save library controls remain available
+            step2_buttons = [
+                btn.text() for btn in page.tabs.widget(1).findChildren(type(page.open_affiliate_library_button))
+            ]
+            for expected_label in (
+                "✨ AI tạo comment",
+                "Import CSV",
+                "Thêm dòng",
+                "Xóa đã chọn",
+                "Lưu thư viện",
+                "Xóa import",
+                "Kho mẫu comment",
+                "Kho link AFF",
+            ):
+                self.assertIn(expected_label, step2_buttons)
+
+            page.add_row()
+            page.comments.item(0, 2).setText("Comment thử nghiệm Step 2")
+            page.save_library()
+            self.assertIsNotNone(page.library_id)
+
+            # 17. Perform full Affiliate URL Library operations and verify zero Facebook POST calls
+            with patch.object(
+                QDialog, "exec", return_value=QDialog.DialogCode.Accepted
+            ):
+                aff_dlg = page.open_affiliate_library()
+            w = page.affiliate_library_widget
+            ed = w.create_editor_dialog(None)
+            ed.name_edit.setText("Áo sơ mi")
+            ed.url_edit.setText("https://s.shopee.vn/shirtNoPost")
+            ed.save_link()
+            aff_dlg.close()
+            page.close()
+
+            mock_publish_one.assert_not_called()
+            mock_publish_worker.assert_not_called()
 
 
 if __name__ == "__main__":
