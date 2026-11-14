@@ -431,7 +431,7 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         with patch("app.ui.pages.auto_comment_page.FacebookRequestWorker", _ManualFacebookWorker):
             page.load_posts(); worker = _ManualFacebookWorker.instances[0]
             self.assertTrue(page.load_posts_button.is_loading)
-            self.assertEqual(page.load_posts_button.text(), "⌛ Đang tải bài viết...")
+            self.assertEqual(page.load_posts_button.text(), "Đang tải bài viết...")
             self.assertFalse(page.load_posts_button.isEnabled())
             self.assertFalse(page.loading_container.isHidden())
             worker.succeeded.emit([]); worker.finished.emit()

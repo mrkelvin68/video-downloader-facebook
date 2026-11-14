@@ -122,6 +122,11 @@ class LoadingButton(QPushButton):
                 self._original_text = None
             self.setEnabled(self._enabled_before_loading)
 
+    def setText(self, text: str) -> None:
+        super().setText(text)
+        if self._loading:
+            self._position_spinner()
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._position_spinner()
