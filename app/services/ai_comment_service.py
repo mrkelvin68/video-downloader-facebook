@@ -29,3 +29,19 @@ def generate_comment_drafts(context: str, urls: list[str], count: int, tone: str
         if text and (not url or url in urls): valid.append({"id":str(len(valid)),"text":text,"url":url,"context":context})
     if not valid: raise AICommentError("AI không trả về mẫu hợp lệ.")
     return valid[:count]
+
+def generate_text_templates(context: str, category: str, count: int, tone: str, placeholder: bool) -> list[dict]:
+    """Generate reusable text templates only; URLs are explicitly prohibited."""
+    if count not in {3,5,10}: raise AICommentError("Số mẫu chỉ hỗ trợ 3, 5 hoặc 10.")
+    drafts=generate_comment_drafts(context, [], count, tone)
+    result=[]; names=set(); bodies=set()
+    for draft in drafts:
+        text=draft["text"]
+        if "http://" in text.casefold() or "https://" in text.casefold(): raise AICommentError("AI trả về URL không được phép trong mẫu text.")
+        if any(item != "affiliate_url" for item in __import__("re").findall(r"{([^{}]+)}",text)): raise AICommentError("AI trả về placeholder không hỗ trợ.")
+        if not placeholder: text=text.replace("{affiliate_url}", "").strip()
+        name=f"AI {len(result)+1}"
+        if name in names or text in bodies: raise AICommentError("AI trả về mẫu trùng lặp.")
+        names.add(name);bodies.add(text);result.append({"id":draft["id"],"name":name,"category":category,"body_text":text,"has_affiliate_placeholder":"{affiliate_url}" in text,"enabled":False})
+    if len(result)!=count: raise AICommentError(f"AI chỉ trả về {len(result)}/{count} mẫu hợp lệ.")
+    return result
