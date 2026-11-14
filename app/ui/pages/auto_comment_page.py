@@ -121,8 +121,8 @@ class AutoCommentPage(QWidget):
     def open_template_library(self):
         active=self.page.currentData()
         if not active:
-            QMessageBox.information(self,"Kho mẫu comment","Hãy chọn Fanpage trước khi quản lý mẫu comment.");return
-        dialog=QDialog(self);dialog.setWindowTitle("Kho mẫu comment");dialog.setMinimumSize(850,500);dialog.setWindowFlags(dialog.windowFlags()|Qt.WindowType.WindowMaximizeButtonHint);layout=QVBoxLayout(dialog);layout.addWidget(CommentTemplateLibraryWidget(self.database,*active,dialog));dialog.exec()
+            QMessageBox.information(self,"Kho mẫu comment","Hãy chọn Fanpage trước khi quản lý mẫu comment.");return None
+        dialog=QDialog(self);dialog.setWindowTitle("Kho mẫu comment");dialog.setMinimumSize(850,500);dialog.setWindowFlags(dialog.windowFlags()|Qt.WindowType.WindowMaximizeButtonHint);layout=QVBoxLayout(dialog);self.template_library_widget=CommentTemplateLibraryWidget(self.database,*active,dialog);layout.addWidget(self.template_library_widget);self.template_library_dialog=dialog;dialog.exec();return dialog
     def _workflow_step_changed(self,index):
         titles=("Chọn Fanpage & bài viết","Chuẩn bị thư viện comment","Chiến dịch & Preview","Thực hiện chiến dịch & Lịch sử");help_text=("Chọn Fanpage, tải dữ liệu Facebook, sau đó chọn bài viết.","Import CSV hoặc thêm comment cục bộ; bật các dòng hợp lệ cần dùng.","Tạo preview cục bộ, chọn các assignment được duyệt rồi lưu. Preview không đăng Facebook.","Campaign đã lưu chỉ có thể đăng đúng snapshot được duyệt sau khi bạn xác nhận rõ ràng.");self._workflow_step=index;self._workflow_titles=titles;self.workflow_help.setText(help_text[index]);self.workflow_message.setText("");self.back_button.setEnabled(index>0);self.next_button.setVisible(index<3);self._refresh_execution();self._workflow_counts()
     def _workflow_counts(self):
@@ -310,7 +310,11 @@ class AutoCommentPage(QWidget):
     def _preview_post_selected(self,pid):return any(self.preview.item(r,1).text()==pid and self.preview.item(r,0).checkState()==Qt.CheckState.Checked for r in range(self.preview.rowCount()))
     def _preview_changed(self,item):
         if item.column()==0:self.approved_preview_assignments={tuple(self.preview.item(r,0).data(Qt.ItemDataRole.UserRole)) for r in range(self.preview.rowCount()) if self.preview.item(r,0).checkState()==Qt.CheckState.Checked};self.preview_status.setText(f"Preview: {len(self.approved_preview_assignments)} assignment được duyệt.");self._summary()
-    def _page_changed(self,*_):self.campaign_id=None;self.posts=[];self.selected_post_ids.clear();self.approved_preview_assignments.clear();self.preview_comments={};self.target_states={};self._render_posts();self._render_preview([]);self.refresh_libraries();self._invalidate()
+    def _page_changed(self,*_):
+        self.campaign_id=None;self.posts=[];self.selected_post_ids.clear();self.approved_preview_assignments.clear();self.preview_comments={};self.target_states={};self._render_posts();self._render_preview([]);self.refresh_libraries();self._invalidate()
+        if hasattr(self,"template_library_widget") and self.template_library_widget is not None:
+            active=self.page.currentData() or (None,None)
+            self.template_library_widget.set_context(*active)
     def _invalidate(self,*_):
         if self.preview_comments:self.approved_preview_assignments={key for key in self.approved_preview_assignments if key[0] in self.selected_post_ids};self.preview_status.setText("Cấu hình đã thay đổi; hãy tạo lại preview.")
     def _summary(self):
