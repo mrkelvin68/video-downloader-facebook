@@ -533,6 +533,18 @@ def _create_auto_comment_tables(connection: sqlite3.Connection) -> None:
         UNIQUE(project_id,page_id,name))""")
     connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_templates_scope
         ON auto_comment_templates(project_id,page_id,updated_at DESC)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_affiliate_links (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, page_id TEXT NOT NULL,
+        name TEXT NOT NULL, url TEXT NOT NULL, description TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(project_id,page_id,url))""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_affiliate_links_scope
+        ON auto_comment_affiliate_links(project_id,page_id,updated_at DESC)""")
+    connection.execute("""CREATE UNIQUE INDEX IF NOT EXISTS ux_auto_comment_affiliate_links_url
+        ON auto_comment_affiliate_links(project_id,page_id,url)""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_affiliate_links_name
+        ON auto_comment_affiliate_links(project_id,page_id,name COLLATE NOCASE)""")
 def migrate(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("BEGIN IMMEDIATE")
