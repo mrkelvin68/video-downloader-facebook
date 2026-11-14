@@ -207,9 +207,16 @@ class AutoCommentPage(QWidget):
         settings=QSettings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION)
         if not settings.value("ai/model", "", type=str) or not (get_ai_provider_key() or settings.value("ai/provider", "", type=str)=="Ollama local"):
             QMessageBox.information(self,"Cấu hình AI","Chưa cấu hình AI. Vui lòng vào Cài đặt → Cấu hình AI.");return
-        dialog=QDialog(self);dialog.setWindowTitle("✨ AI tạo comment");layout=QVBoxLayout(dialog);form=QFormLayout();context=QLineEdit();url=QLineEdit();style=QComboBox();style.addItems(["Tự nhiên","Thân thiện","Ngắn gọn"]);count=QComboBox();count.addItems(["3","5","10"])
-        for label,field in (("Ngữ cảnh Reel/sản phẩm",context),("Affiliate URL (tùy chọn)",url),("Phong cách",style),("Số mẫu",count)):form.addRow(label,field)
-        layout.addLayout(form);layout.addWidget(QLabel("Draft AI chỉ để xem xét; không tự duyệt hoặc đăng Facebook."));close=QPushButton("Đóng");close.clicked.connect(dialog.reject);layout.addWidget(close);dialog.exec()
+        dialog=QDialog(self);dialog.setWindowTitle("✨ AI tạo comment");layout=QVBoxLayout(dialog);form=QFormLayout();context=QLineEdit();style=QComboBox();style.addItems(["Tự nhiên","Thân thiện","Ngắn gọn"]);count=QComboBox();count.addItems(["3","5","10"])
+        urls=QTableWidget(0,1);urls.setHorizontalHeaderLabels(["Affiliate URL (tùy chọn)"]);urls.horizontalHeader().setStretchLastSection(True);urls.setMaximumHeight(120)
+        def add_url():
+            row=urls.rowCount();urls.insertRow(row);urls.setItem(row,0,QTableWidgetItem(""));urls.setCurrentCell(row,0);urls.editItem(urls.item(row,0))
+        def remove_url():
+            row=urls.currentRow()
+            if row>=0:urls.removeRow(row)
+        actions=QHBoxLayout();add=QPushButton("Thêm AFF URL");add.clicked.connect(add_url);remove=QPushButton("Xóa URL đã chọn");remove.clicked.connect(remove_url);actions.addWidget(add);actions.addWidget(remove);actions.addStretch()
+        for label,field in (("Ngữ cảnh Reel/sản phẩm",context),("Phong cách",style),("Số mẫu",count)):form.addRow(label,field)
+        layout.addLayout(form);layout.addWidget(urls);layout.addLayout(actions);layout.addWidget(QLabel("Draft AI chỉ để xem xét; không tự duyệt hoặc đăng Facebook."));close=QPushButton("Đóng");close.clicked.connect(dialog.reject);layout.addWidget(close);dialog.exec()
     def import_csv(self):
         p,_=QFileDialog.getOpenFileName(self,"Chọn CSV comment","","CSV (*.csv)")
         if p:self.load_csv(Path(p))
