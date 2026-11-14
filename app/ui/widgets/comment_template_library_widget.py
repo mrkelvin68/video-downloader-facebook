@@ -1,12 +1,15 @@
 from __future__ import annotations
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QPushButton,QLineEdit,QTableWidget,QTableWidgetItem,QDialog,QFormLayout,QPlainTextEdit,QCheckBox,QDialogButtonBox,QMessageBox
+from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QPushButton,QLineEdit,QTableWidget,QTableWidgetItem,QDialog,QFormLayout,QPlainTextEdit,QCheckBox,QDialogButtonBox,QMessageBox,QComboBox,QLabel
 from app.services.auto_comment_template_service import AutoCommentTemplateService,TemplateError
+from app.services.ai_comment_service import generate_text_templates
+from app.ui.facebook_worker import FacebookRequestWorker
+from app.ui.widgets.loading_button import LoadingButton
 
 class CommentTemplateLibraryWidget(QWidget):
  def __init__(self,database,project_id=None,page_id=None,parent=None):
-  super().__init__(parent);self.service=AutoCommentTemplateService(database);self.project_id=project_id;self.page_id=page_id;layout=QVBoxLayout(self);bar=QHBoxLayout();self.search=QLineEdit(placeholderText="Tìm mẫu…");self.search.textChanged.connect(self.reload);add=QPushButton("Thêm mẫu");add.clicked.connect(self.create_template_dialog);edit=QPushButton("Sửa mẫu");edit.clicked.connect(self.edit_selected_template);delete=QPushButton("Xóa mẫu");delete.clicked.connect(self.delete);refresh=QPushButton("Làm mới");refresh.clicked.connect(self.reload)
-  for x in (add,edit,delete,refresh,self.search):bar.addWidget(x)
+  super().__init__(parent);self.service=AutoCommentTemplateService(database);self.project_id=project_id;self.page_id=page_id;layout=QVBoxLayout(self);bar=QHBoxLayout();self.search=QLineEdit(placeholderText="Tìm mẫu…");self.search.textChanged.connect(self.reload);ai=QPushButton("✨ AI tạo mẫu text");ai.clicked.connect(self.open_ai_generator);add=QPushButton("Thêm mẫu");add.clicked.connect(self.create_template_dialog);edit=QPushButton("Sửa mẫu");edit.clicked.connect(self.edit_selected_template);delete=QPushButton("Xóa mẫu");delete.clicked.connect(self.delete);refresh=QPushButton("Làm mới");refresh.clicked.connect(self.reload)
+  for x in (ai,add,edit,delete,refresh,self.search):bar.addWidget(x)
   layout.addLayout(bar);self.table=QTableWidget(0,6);self.table.setHorizontalHeaderLabels(["Bật","Tên mẫu","Phân loại","Nội dung","Placeholder","Cập nhật"]);self.table.horizontalHeader().setStretchLastSection(True);self.table.itemChanged.connect(self.toggle);layout.addWidget(self.table);self.reload()
  def set_context(self,project_id,page_id): self.project_id=project_id;self.page_id=page_id;self.reload()
  def reload(self,*_):
@@ -42,3 +45,20 @@ class CommentTemplateLibraryWidget(QWidget):
   if tid and QMessageBox.question(self,"Xóa mẫu","Xóa mẫu đã chọn?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No)==QMessageBox.StandardButton.Yes:
    try:self.service.delete_template(self.project_id,self.page_id,tid);self.reload()
    except TemplateError:pass
+ def open_ai_generator(self):
+  if not self.project_id or not self.page_id:return
+  d=QDialog(self);d.setWindowTitle("✨ AI tạo mẫu text");d.setMinimumSize(900,650);layout=QVBoxLayout(d);form=QFormLayout();context=QPlainTextEdit();category=QLineEdit();tone=QComboBox();tone.addItems(["Tự nhiên","Thân thiện","Ngắn gọn"]);count=QComboBox();count.addItems(["3","5","10"]);placeholder=QCheckBox("Có placeholder {affiliate_url}")
+  for label,field in (("Chủ đề / ngữ cảnh",context),("Phân loại",category),("Phong cách",tone),("Số mẫu",count)):form.addRow(label,field)
+  layout.addLayout(form);layout.addWidget(placeholder);results=QTableWidget(0,6);results.setHorizontalHeaderLabels(["Chọn","Tên mẫu","Phân loại","Nội dung mẫu","Placeholder","Cảnh báo"]);results.horizontalHeader().setStretchLastSection(True);status=QLabel();go=LoadingButton("✨ Xử lý AI")
+  def run():
+   if go.is_loading:return
+   go.set_loading(True);status.setText("AI đang tạo mẫu text…");worker=FacebookRequestWorker(lambda:generate_text_templates(context.toPlainText(),category.text(),int(count.currentText()),tone.currentText(),placeholder.isChecked()),d)
+   def ok(items):
+    results.setRowCount(0)
+    for item in items:
+     r=results.rowCount();results.insertRow(r);check=QTableWidgetItem();check.setFlags(Qt.ItemFlag.ItemIsEnabled|Qt.ItemFlag.ItemIsUserCheckable);check.setCheckState(Qt.CheckState.Unchecked);check.setData(Qt.ItemDataRole.UserRole,item['id']);results.setItem(r,0,check);results.setItem(r,1,QTableWidgetItem(item['name']));results.setItem(r,2,QTableWidgetItem(item['category']));results.setItem(r,3,QTableWidgetItem(item['body_text']));results.setItem(r,4,QTableWidgetItem("Có" if item['has_affiliate_placeholder'] else "—"));results.setItem(r,5,QTableWidgetItem(""))
+    status.setText(f"Đã tạo {len(items)} mẫu; hãy chọn để duyệt.")
+   def fail(msg):status.setText(msg)
+   def done():go.set_loading(False);worker.deleteLater()
+   worker.succeeded.connect(ok);worker.failed.connect(fail);worker.finished.connect(done);worker.start()
+  go.clicked.connect(run);close=QPushButton("Đóng");close.clicked.connect(d.reject);layout.addWidget(go);layout.addWidget(results,1);layout.addWidget(status);layout.addWidget(close);d.exec()
