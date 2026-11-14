@@ -13,6 +13,7 @@ from app.services.auto_comment_comment_service import AutoCommentCommentService
 from app.services.auto_comment_service import AutoCommentService, AutoCommentValidationError, CommentItem, parse_comment_csv, select_comments
 from app.ui.facebook_worker import FacebookPublishWorker, FacebookRequestWorker
 from app.ui.widgets.loading_button import LoadingButton, LoadingSpinner
+from app.ui.widgets.comment_template_library_widget import CommentTemplateLibraryWidget
 
 TARGET_LABELS={"READY":"Sẵn sàng","TARGET_UNVERIFIED":"Chưa xác minh","TARGET_UNSUPPORTED":"Không hỗ trợ","PERMISSION_DENIED":"Thiếu quyền","TOKEN_MISSING":"Thiếu token","TOKEN_EXPIRED":"Token hết hạn","WRONG_PAGE":"Sai Fanpage","ERROR":"Lỗi"}
 
@@ -109,12 +110,19 @@ class AutoCommentPage(QWidget):
             self.history_page.setCurrentIndex(max(0,self.history_page.findData(current)));self.history_page.blockSignals(False);self.refresh_history()
         self._summary()
     def refresh_libraries(self):
+        if not hasattr(self,"open_template_library_button"):
+            self.open_template_library_button=QPushButton("Kho mẫu comment");self.open_template_library_button.clicked.connect(self.open_template_library);self.tabs.widget(1).layout().addWidget(self.open_template_library_button)
         self.library_picker.blockSignals(True);self.library_picker.clear();self.library_picker.addItem("Mở thư viện đã lưu…",None)
         for x in self.service.list_libraries():self.library_picker.addItem(x["name"],x["id"])
         self.library_picker.blockSignals(False);self.campaign_picker.blockSignals(True);self.campaign_picker.clear();self.campaign_picker.addItem("Mở campaign đã lưu…",None)
         active=self.page.currentData() if hasattr(self,"page") else None
         for x in self.service.list_campaigns(*(active or ())):self.campaign_picker.addItem(x["name"],x["id"])
         self.campaign_picker.blockSignals(False);self._summary()
+    def open_template_library(self):
+        active=self.page.currentData()
+        if not active:
+            QMessageBox.information(self,"Kho mẫu comment","Hãy chọn Fanpage trước khi quản lý mẫu comment.");return
+        dialog=QDialog(self);dialog.setWindowTitle("Kho mẫu comment");dialog.setMinimumSize(850,500);dialog.setWindowFlags(dialog.windowFlags()|Qt.WindowType.WindowMaximizeButtonHint);layout=QVBoxLayout(dialog);layout.addWidget(CommentTemplateLibraryWidget(self.database,*active,dialog));dialog.exec()
     def _workflow_step_changed(self,index):
         titles=("Chọn Fanpage & bài viết","Chuẩn bị thư viện comment","Chiến dịch & Preview","Thực hiện chiến dịch & Lịch sử");help_text=("Chọn Fanpage, tải dữ liệu Facebook, sau đó chọn bài viết.","Import CSV hoặc thêm comment cục bộ; bật các dòng hợp lệ cần dùng.","Tạo preview cục bộ, chọn các assignment được duyệt rồi lưu. Preview không đăng Facebook.","Campaign đã lưu chỉ có thể đăng đúng snapshot được duyệt sau khi bạn xác nhận rõ ràng.");self._workflow_step=index;self._workflow_titles=titles;self.workflow_help.setText(help_text[index]);self.workflow_message.setText("");self.back_button.setEnabled(index>0);self.next_button.setVisible(index<3);self._refresh_execution();self._workflow_counts()
     def _workflow_counts(self):
