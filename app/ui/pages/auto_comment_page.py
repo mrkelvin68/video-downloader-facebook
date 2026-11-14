@@ -138,7 +138,7 @@ class AutoCommentPage(QWidget):
         active=self.page.currentData()
         if not active:
             QMessageBox.information(self,"Tạo comment từ mẫu","Hãy chọn Fanpage trước khi tạo comment từ mẫu.");return None
-        dialog=CommentComposerDialog(self.database,active[0],active[1],self.page.currentText(),existing_comments_provider=lambda:[x.comment_text for x in self.items() if x.comment_text.strip()],parent=self);self.composer_widget=dialog.composer_widget;self.composer_dialog=dialog;dialog.exec();return dialog
+        dialog=CommentComposerDialog(self.database,active[0],active[1],self.page.currentText(),existing_comments_provider=lambda:[x.comment_text for x in self.items() if x.comment_text.strip()],active_scope_provider=lambda:self.page.currentData(),saved_callback=self.refresh_libraries,parent=self);self.composer_widget=dialog.composer_widget;self.composer_dialog=dialog;dialog.exec();return dialog
     def _workflow_step_changed(self,index):
         titles=("Chọn Fanpage & bài viết","Chuẩn bị thư viện comment","Chiến dịch & Preview","Thực hiện chiến dịch & Lịch sử");help_text=("Chọn Fanpage, tải dữ liệu Facebook, sau đó chọn bài viết.","Import CSV hoặc thêm comment cục bộ; bật các dòng hợp lệ cần dùng.","Tạo preview cục bộ, chọn các assignment được duyệt rồi lưu. Preview không đăng Facebook.","Campaign đã lưu chỉ có thể đăng đúng snapshot được duyệt sau khi bạn xác nhận rõ ràng.");self._workflow_step=index;self._workflow_titles=titles;self.workflow_help.setText(help_text[index]);self.workflow_message.setText("");self.back_button.setEnabled(index>0);self.next_button.setVisible(index<3);self._refresh_execution();self._workflow_counts()
     def _workflow_counts(self):
@@ -278,7 +278,10 @@ class AutoCommentPage(QWidget):
             self._changed()
     def clear_rows(self):self.comments.setRowCount(0);self.library_id=None;self._changed()
     def save_library(self):
-        try:self.library_id=self.service.save_library(self.library_name.text(),self.items(),self.library_id);self.refresh_libraries();self.csv_status.setText("Đã lưu thư viện.")
+        try:
+            active=self.page.currentData()
+            self.library_id=self.service.save_library(self.library_name.text(),self.items(),self.library_id,*(active or (None,None)))
+            self.refresh_libraries();self.csv_status.setText("Đã lưu thư viện.")
         except AutoCommentValidationError as e:self.csv_status.setText(f"Không thể lưu thư viện: {e}");QMessageBox.warning(self,"Thư viện",str(e))
     def open_library(self):
         if i:=self.library_picker.currentData():self.library_id=i;self.library_name.setText(self.library_picker.currentText());self.set_items(self.service.load_library(i))

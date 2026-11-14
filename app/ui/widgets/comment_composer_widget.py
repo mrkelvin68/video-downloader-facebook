@@ -4,6 +4,7 @@ from typing import Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFormLayout,
@@ -34,6 +35,8 @@ class CommentComposerWidget(QWidget):
         page_id: str | None = None,
         page_name: str = "",
         existing_comments_provider: Callable[[], list[str]] | None = None,
+        active_scope_provider: Callable[[], tuple[str, str] | None] | None = None,
+        saved_callback: Callable[[], None] | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -43,10 +46,13 @@ class CommentComposerWidget(QWidget):
         self.page_id = page_id
         self.page_name = page_name
         self._existing_comments_provider = existing_comments_provider
+        self._active_scope_provider = active_scope_provider
+        self._saved_callback = saved_callback
         self._scope_invalidated = False
         self._templates_by_id: dict[str, dict] = {}
         self._links_by_id: dict[str, dict] = {}
         self.current_draft: ComposedCommentDraft | None = None
+        self._draft_saved = False
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -97,6 +103,19 @@ class CommentComposerWidget(QWidget):
         self.composed_preview.textChanged.connect(self._on_composed_text_edited)
         layout.addWidget(self.composed_preview, 1)
 
+        self.library_combo = QComboBox()
+        self.library_combo.currentIndexChanged.connect(self._update_save_enabled)
+        form.addRow("Thư viện đích", self.library_combo)
+
+        self.approval_checkbox = QCheckBox("Duyệt comment này")
+        self.approval_checkbox.setChecked(False)
+        self.approval_checkbox.toggled.connect(self._update_save_enabled)
+        layout.addWidget(self.approval_checkbox)
+
+        self.save_button = QPushButton("Lưu vào thư viện comment")
+        self.save_button.clicked.connect(self.save_approved_draft)
+        layout.addWidget(self.save_button)
+
         self.warning_label = QLabel()
         self.warning_label.setWordWrap(True)
         layout.addWidget(self.warning_label)
@@ -106,6 +125,31 @@ class CommentComposerWidget(QWidget):
         layout.addWidget(self.status_label)
 
         self.reload_options()
+
+    def _reset_approval(self):
+        self.approval_checkbox.blockSignals(True)
+        self.approval_checkbox.setChecked(False)
+        self.approval_checkbox.blockSignals(False)
+        self._draft_saved = False
+        self._update_save_enabled()
+
+    def _update_save_enabled(self, *_):
+        self.save_button.setEnabled(bool(
+            self.current_draft and self._has_valid_scope() and not self._draft_saved
+            and self.approval_checkbox.isChecked() and self.library_combo.currentData()
+        ))
+
+    def _reload_destination_libraries(self):
+        selected = self.library_combo.currentData()
+        self.library_combo.blockSignals(True)
+        self.library_combo.clear()
+        self.library_combo.addItem("— Chọn thư viện comment đích —", None)
+        if self._has_valid_scope():
+            for library in self.service.list_destination_libraries(self.project_id, self.page_id):
+                self.library_combo.addItem(library["name"], library["id"])
+        self.library_combo.setCurrentIndex(max(0, self.library_combo.findData(selected)))
+        self.library_combo.blockSignals(False)
+        self._update_save_enabled()
 
     def _has_valid_scope(self) -> bool:
         return (
@@ -150,6 +194,7 @@ class CommentComposerWidget(QWidget):
             self.link_combo.setEnabled(False)
             self.compose_button.setEnabled(False)
             self.refresh_button.setEnabled(False)
+            self.library_combo.setEnabled(False)
             self.template_preview.setPlainText("")
             self.link_preview.setText("")
             self.composed_preview.blockSignals(True)
@@ -210,6 +255,8 @@ class CommentComposerWidget(QWidget):
         self.template_combo.setEnabled(True)
         self.link_combo.setEnabled(True)
         self.compose_button.setEnabled(True)
+        self.library_combo.setEnabled(True)
+        self._reload_destination_libraries()
         self._on_template_selected()
         self._on_link_selected()
 
@@ -235,11 +282,17 @@ class CommentComposerWidget(QWidget):
         return str(data) if data else None
 
     def _on_template_selected(self, *_):
+        if self.current_draft is not None:
+            self.current_draft = None
+            self._reset_approval()
         tid = self.selected_template_id()
         tpl = self._templates_by_id.get(tid) if tid else None
         self.template_preview.setPlainText(str(tpl.get("body_text") or "") if tpl else "")
 
     def _on_link_selected(self, *_):
+        if self.current_draft is not None:
+            self.current_draft = None
+            self._reset_approval()
         lid = self.selected_link_id()
         link = self._links_by_id.get(lid) if lid else None
         url = str(link.get("url") or "") if link else ""
@@ -279,6 +332,7 @@ class CommentComposerWidget(QWidget):
             return None
 
         self.current_draft = draft
+        self._reset_approval()
         self.composed_preview.blockSignals(True)
         self.composed_preview.setPlainText(draft.composed_text)
         self.composed_preview.blockSignals(False)
@@ -302,6 +356,7 @@ class CommentComposerWidget(QWidget):
             return
         edited = self.composed_preview.toPlainText()
         self.current_draft.edited_text = edited
+        self._reset_approval()
         try:
             warnings = evaluate_draft_warnings(edited, self._existing_comments())
             if not self.current_draft.has_placeholder and self.current_draft.affiliate_link_id:
@@ -314,6 +369,38 @@ class CommentComposerWidget(QWidget):
         except CommentComposerError as exc:
             self.warning_label.setText(str(exc))
 
+    def save_approved_draft(self):
+        if self._draft_saved:
+            self.status_label.setText("Bản nháp này đã được lưu; hãy tạo bản nháp mới để lưu thêm.")
+            return None
+        if not self.current_draft or not self._has_valid_scope():
+            self.status_label.setText("Bản nháp không còn hợp lệ; hãy tạo lại trước khi lưu.")
+            return None
+        active_scope = self._active_scope_provider() if self._active_scope_provider else self._captured_scope
+        if active_scope != self._captured_scope:
+            self.on_context_changed(*(active_scope or (None, None)))
+            return None
+        if not self.approval_checkbox.isChecked():
+            self.status_label.setText("Hãy tích 'Duyệt comment này' trước khi lưu.")
+            return None
+        library_id = self.library_combo.currentData()
+        if not library_id:
+            self.status_label.setText("Hãy chọn thư viện comment đích trước khi lưu.")
+            return None
+        try:
+            item_id = self.service.save_approved_draft(
+                self.current_draft, str(library_id), self.project_id, self.page_id
+            )
+        except CommentComposerError as exc:
+            self.status_label.setText(str(exc))
+            return None
+        self._draft_saved = True
+        self._update_save_enabled()
+        self.status_label.setText("Đã lưu chính xác một comment đã duyệt vào thư viện.")
+        if self._saved_callback:
+            self._saved_callback()
+        return item_id
+
 
 class CommentComposerDialog(QDialog):
     def __init__(
@@ -323,6 +410,8 @@ class CommentComposerDialog(QDialog):
         page_id: str,
         page_name: str = "",
         existing_comments_provider: Callable[[], list[str]] | None = None,
+        active_scope_provider: Callable[[], tuple[str, str] | None] | None = None,
+        saved_callback: Callable[[], None] | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -337,6 +426,8 @@ class CommentComposerDialog(QDialog):
             page_id=page_id,
             page_name=page_name,
             existing_comments_provider=existing_comments_provider,
+            active_scope_provider=active_scope_provider,
+            saved_callback=saved_callback,
             parent=self,
         )
         layout.addWidget(self.composer_widget, 1)

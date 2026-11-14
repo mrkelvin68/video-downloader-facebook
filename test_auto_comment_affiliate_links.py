@@ -127,11 +127,14 @@ class AffiliateLinkTests(unittest.TestCase):
     def test_05_existing_comment_library_rows_preserved(self):
         with self.db.connection:
             self.db.connection.execute(
-                "INSERT INTO auto_comment_libraries VALUES (?,?,?,?)",
+                """INSERT INTO auto_comment_libraries(id,name,created_at,updated_at)
+                   VALUES (?,?,?,?)""",
                 ("lib-1", "Thư viện mặc định", "2026-11-14T10:00:00Z", "2026-11-14T10:00:00Z"),
             )
             self.db.connection.execute(
-                "INSERT INTO auto_comment_library_items VALUES (?,?,?,?,?,?,?,?)",
+                """INSERT INTO auto_comment_library_items
+                   (id,library_id,source_row_id,comment_text,enabled,sort_order,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
                 (
                     "item-1",
                     "lib-1",

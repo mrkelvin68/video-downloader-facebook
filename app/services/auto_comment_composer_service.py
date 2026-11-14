@@ -9,7 +9,7 @@ from app.services.auto_comment_affiliate_link_service import (
     AutoCommentAffiliateLinkService,
     validate_affiliate_url,
 )
-from app.services.auto_comment_service import AutoCommentService
+from app.services.auto_comment_service import AutoCommentService, AutoCommentValidationError
 from app.services.auto_comment_template_service import (
     AutoCommentTemplateService,
     TemplateError,
@@ -98,7 +98,6 @@ def evaluate_draft_warnings(
 
 
 class AutoCommentComposerService:
-    """Read-only composer service for Phase 3C1; never writes composed comments to SQLite."""
 
     def __init__(self, database):
         self.database = database
@@ -205,3 +204,32 @@ class AutoCommentComposerService:
             has_placeholder=has_placeholder,
             warnings=warnings,
         )
+
+    def list_destination_libraries(self, project_id: str, page_id: str) -> list[dict]:
+        clean_project, clean_page = self._validate_scope(project_id, page_id)
+        return AutoCommentService(self.database).list_libraries(clean_project, clean_page)
+
+    def save_approved_draft(self, draft: ComposedCommentDraft, library_id: str,
+                            project_id: str, page_id: str) -> str:
+        clean_project, clean_page = self._validate_scope(project_id, page_id)
+        if (draft.project_id, draft.page_id) != (clean_project, clean_page):
+            raise CommentComposerError("Bản nháp thuộc Fanpage khác; hãy tạo lại bản nháp.")
+        # Re-read source records immediately before persistence so a stale draft cannot save.
+        try:
+            template = self.template_service.get_template(clean_project, clean_page, draft.template_id)
+            if int(template.get("enabled") or 0) != 1:
+                raise CommentComposerError("Mẫu comment đã bị tắt; không thể lưu bản nháp cũ.")
+            if draft.affiliate_link_id:
+                link = self.link_service.get_link(clean_project, clean_page, draft.affiliate_link_id)
+                if int(link.get("enabled") or 0) != 1:
+                    raise CommentComposerError("Affiliate URL đã bị tắt; không thể lưu bản nháp cũ.")
+        except (TemplateError, AffiliateLinkError) as exc:
+            raise CommentComposerError("Nguồn mẫu hoặc Affiliate URL không còn hợp lệ; hãy tạo lại bản nháp.") from exc
+        try:
+            evaluate_draft_warnings(draft.edited_text)
+            return AutoCommentService(self.database).append_library_item(
+                clean_project, clean_page, library_id, draft.edited_text,
+                draft.template_id, draft.affiliate_link_id,
+            )
+        except AutoCommentValidationError as exc:
+            raise CommentComposerError(str(exc)) from exc

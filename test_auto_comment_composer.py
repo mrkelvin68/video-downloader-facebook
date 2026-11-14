@@ -21,6 +21,7 @@ from app.services.auto_comment_composer_service import (
     validate_template_placeholders,
 )
 from app.services.auto_comment_template_service import AutoCommentTemplateService
+from app.services.auto_comment_service import AutoCommentService, CommentItem
 from app.services.facebook_publishing_service import FacebookPublishingService
 from app.services.logging_service import SETTINGS_APPLICATION, SETTINGS_ORGANIZATION
 from app.services.project_service import ProjectService
@@ -455,6 +456,125 @@ class CommentComposerTests(unittest.TestCase):
             settings.setValue("ai/model", old_model)
 
         page.close()
+
+    def test_approved_draft_appends_once_with_scope_provenance_and_rollback(self):
+        template_id = self.template_service.create_template(
+            "proj-1", "page-a", "Mẫu lưu", "Mua tại {affiliate_url}", enabled=True
+        )
+        link_id = self.link_service.create_link(
+            "proj-1", "page-a", "Link lưu", "https://s.shopee.vn/saveDraft01", enabled=True
+        )
+        libraries = AutoCommentService(self.db)
+        reopened_db = Database(self.db_path)
+        self.assertTrue({"project_id", "page_id"}.issubset({row["name"] for row in reopened_db.connection.execute("PRAGMA table_info(auto_comment_libraries)")}))
+        self.assertTrue({"source_template_id", "source_affiliate_link_id"}.issubset({row["name"] for row in reopened_db.connection.execute("PRAGMA table_info(auto_comment_library_items)")}))
+        reopened_db.close()
+        library_id = libraries.save_library(
+            "Thư viện A", [CommentItem("Giữ nguyên", False, "old-row", 0)],
+            project_id="proj-1", page_id="page-a",
+        )
+        before = dict(self.db.connection.execute(
+            "SELECT id,comment_text,enabled,sort_order,created_at,updated_at FROM auto_comment_library_items WHERE library_id=?",
+            (library_id,),
+        ).fetchone())
+        active_scope = [("proj-1", "page-a")]
+        composer = CommentComposerWidget(
+            self.db, "proj-1", "page-a", "Fanpage A",
+            active_scope_provider=lambda: active_scope[0],
+        )
+        composer.template_combo.setCurrentIndex(composer.template_combo.findData(template_id))
+        composer.link_combo.setCurrentIndex(composer.link_combo.findData(link_id))
+        self.assertIsNotNone(composer.compose_draft())
+        composer.library_combo.setCurrentIndex(composer.library_combo.findData(library_id))
+        composer.approval_checkbox.setChecked(True)
+        composer.composed_preview.setPlainText("Nội dung cuối đã sửa https://s.shopee.vn/saveDraft01")
+        self.assertFalse(composer.approval_checkbox.isChecked())
+        composer.approval_checkbox.setChecked(True)
+        with patch("app.services.auto_comment_comment_service.AutoCommentCommentService.publish_one") as publish:
+            saved_id = composer.save_approved_draft()
+            publish.assert_not_called()
+        self.assertTrue(saved_id)
+        self.assertFalse(composer.save_button.isEnabled())
+        self.assertIsNone(composer.save_approved_draft())
+        rows = self.db.connection.execute(
+            "SELECT * FROM auto_comment_library_items WHERE library_id=? ORDER BY sort_order,id", (library_id,)
+        ).fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(dict(rows[0])["id"], before["id"])
+        self.assertEqual(dict(rows[0])["updated_at"], before["updated_at"])
+        self.assertEqual(rows[1]["comment_text"], "Nội dung cuối đã sửa https://s.shopee.vn/saveDraft01")
+        self.assertEqual(rows[1]["source_template_id"], template_id)
+        self.assertEqual(rows[1]["source_affiliate_link_id"], link_id)
+        self.assertEqual(rows[1]["sort_order"], 1)
+        composer.close()
+
+        reopened = CommentComposerWidget(self.db, "proj-1", "page-a", "Fanpage A")
+        self.assertEqual(reopened.library_combo.findData(library_id) >= 0, True)
+        self.assertEqual(len(libraries.load_library(library_id)), 2)
+
+        # A draft cannot cross the active Fanpage boundary.
+        reopened.template_combo.setCurrentIndex(reopened.template_combo.findData(template_id))
+        reopened.link_combo.setCurrentIndex(reopened.link_combo.findData(link_id))
+        draft = reopened.compose_draft()
+        self.assertIsNotNone(draft)
+        with self.assertRaises(CommentComposerError):
+            self.composer_service.save_approved_draft(draft, library_id, "proj-1", "page-b")
+
+        switched_scope = [("proj-1", "page-a")]
+        switched = CommentComposerWidget(
+            self.db, "proj-1", "page-a", "Fanpage A",
+            active_scope_provider=lambda: switched_scope[0],
+        )
+        switched.template_combo.setCurrentIndex(switched.template_combo.findData(template_id))
+        switched.link_combo.setCurrentIndex(switched.link_combo.findData(link_id))
+        self.assertIsNotNone(switched.compose_draft())
+        switched.library_combo.setCurrentIndex(switched.library_combo.findData(library_id))
+        switched.approval_checkbox.setChecked(True)
+        switched_scope[0] = ("proj-1", "page-b")
+        self.assertIsNone(switched.save_approved_draft())
+        self.assertEqual(self.db.connection.execute(
+            "SELECT COUNT(*) FROM auto_comment_library_items WHERE library_id=?", (library_id,)
+        ).fetchone()[0], 2)
+        switched.close()
+
+        # Deleted/disabled provenance blocks stale drafts.
+        self.template_service.delete_template("proj-1", "page-a", template_id)
+        with self.assertRaises(CommentComposerError):
+            self.composer_service.save_approved_draft(draft, library_id, "proj-1", "page-a")
+
+        link_template = self.template_service.create_template(
+            "proj-1", "page-a", "Mẫu link cũ", "Link {affiliate_url}", enabled=True
+        )
+        link_draft = self.composer_service.compose_draft("proj-1", "page-a", link_template, link_id)
+        self.link_service.delete_link("proj-1", "page-a", link_id)
+        with self.assertRaises(CommentComposerError):
+            self.composer_service.save_approved_draft(link_draft, library_id, "proj-1", "page-a")
+
+        # Legacy libraries stay unowned and are not eligible destinations.
+        legacy_id = libraries.save_library("Thư viện cũ", [CommentItem("legacy")])
+        self.assertNotIn(legacy_id, [x["id"] for x in libraries.list_libraries("proj-1", "page-a")])
+        with self.assertRaises(Exception):
+            libraries.append_library_item("proj-1", "page-a", legacy_id, "Không được lưu")
+
+        # A SQLite error rolls back the insert and leaves the draft retryable.
+        self.db.connection.execute(
+            "CREATE TRIGGER fail_composer_insert BEFORE INSERT ON auto_comment_library_items "
+            "WHEN NEW.library_id='{}' BEGIN SELECT RAISE(ABORT, 'forced'); END".format(library_id)
+        )
+        fresh_template = self.template_service.create_template(
+            "proj-1", "page-a", "Mẫu rollback", "Xem {affiliate_url}", enabled=True
+        )
+        fresh_link = self.link_service.create_link(
+            "proj-1", "page-a", "Link rollback", "https://s.shopee.vn/rollback01", enabled=True
+        )
+        rollback_draft = self.composer_service.compose_draft("proj-1", "page-a", fresh_template, fresh_link)
+        with self.assertRaises(CommentComposerError):
+            self.composer_service.save_approved_draft(rollback_draft, library_id, "proj-1", "page-a")
+        self.assertEqual(self.db.connection.execute(
+            "SELECT COUNT(*) FROM auto_comment_library_items WHERE library_id=?", (library_id,)
+        ).fetchone()[0], 2)
+        self.db.connection.execute("DROP TRIGGER fail_composer_insert")
+        reopened.close()
 
 
 if __name__ == "__main__":

@@ -466,12 +466,22 @@ def _create_facebook_publishing_tables(connection: sqlite3.Connection) -> None:
 def _create_auto_comment_tables(connection: sqlite3.Connection) -> None:
     """Local-only data for the Auto Comment planning screen (no credentials)."""
     connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_libraries (
-        id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, project_id TEXT, page_id TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    library_columns = {row["name"] for row in connection.execute("PRAGMA table_info(auto_comment_libraries)")}
+    for name in ("project_id", "page_id"):
+        if name not in library_columns:
+            connection.execute(f"ALTER TABLE auto_comment_libraries ADD COLUMN {name} TEXT")
     connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_library_items (
         id TEXT PRIMARY KEY, library_id TEXT NOT NULL, source_row_id TEXT,
         comment_text TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+        source_template_id TEXT, source_affiliate_link_id TEXT,
         sort_order INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
         FOREIGN KEY(library_id) REFERENCES auto_comment_libraries(id) ON DELETE CASCADE)""")
+    library_item_columns = {row["name"] for row in connection.execute("PRAGMA table_info(auto_comment_library_items)")}
+    for name in ("source_template_id", "source_affiliate_link_id"):
+        if name not in library_item_columns:
+            connection.execute(f"ALTER TABLE auto_comment_library_items ADD COLUMN {name} TEXT")
     connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_library_items_order
         ON auto_comment_library_items(library_id, sort_order, id)""")
     connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_campaigns (

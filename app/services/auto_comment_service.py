@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import sqlite3
 import re
 from dataclasses import dataclass
 import io
@@ -390,7 +391,8 @@ class AutoCommentService:
             raise AutoCommentPageAccessError(f"Facebook từ chối yêu cầu đọc ({detail}).")
         return payload
 
-    def save_library(self, name: str, items: list[CommentItem], library_id: str | None = None) -> str:
+    def save_library(self, name: str, items: list[CommentItem], library_id: str | None = None,
+                     project_id: str | None = None, page_id: str | None = None) -> str:
         if not name.strip():
             raise AutoCommentValidationError("Hãy nhập tên thư viện comment.")
         if not items:
@@ -406,10 +408,16 @@ class AutoCommentService:
         library_id = library_id or str(uuid.uuid4())
         now = _now()
         with self.database.connection:
+            existing = self.database.connection.execute(
+                "SELECT project_id,page_id FROM auto_comment_libraries WHERE id=?", (library_id,)
+            ).fetchone()
+            if existing is not None and (existing["project_id"] or existing["page_id"]):
+                if (existing["project_id"], existing["page_id"]) != (project_id, page_id):
+                    raise AutoCommentValidationError("Thư viện comment không thuộc Fanpage đang chọn.")
             self.database.connection.execute(
-                """INSERT INTO auto_comment_libraries(id,name,created_at,updated_at) VALUES (?,?,?,?)
+                """INSERT INTO auto_comment_libraries(id,name,project_id,page_id,created_at,updated_at) VALUES (?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at""",
-                (library_id, name.strip(), now, now),
+                (library_id, name.strip(), project_id, page_id, now, now),
             )
             self.database.connection.execute("DELETE FROM auto_comment_library_items WHERE library_id=?", (library_id,))
             self.database.connection.executemany(
@@ -421,10 +429,58 @@ class AutoCommentService:
             )
         return library_id
 
-    def list_libraries(self) -> list[dict]:
+    def list_libraries(self, project_id: str | None = None, page_id: str | None = None) -> list[dict]:
+        if project_id is None and page_id is None:
+            query, params = "SELECT * FROM auto_comment_libraries", ()
+        elif project_id and page_id:
+            query, params = "SELECT * FROM auto_comment_libraries WHERE project_id=? AND page_id=?", (project_id, page_id)
+        else:
+            raise AutoCommentValidationError("Phạm vi thư viện comment không hợp lệ.")
         return [dict(row) for row in self.database.connection.execute(
-            "SELECT * FROM auto_comment_libraries ORDER BY updated_at DESC, name COLLATE NOCASE"
+            query + " ORDER BY updated_at DESC, name COLLATE NOCASE", params
         )]
+
+    def append_library_item(self, project_id: str, page_id: str, library_id: str,
+                            comment_text: str, source_template_id: str | None = None,
+                            source_affiliate_link_id: str | None = None) -> str:
+        """Append one approved composer draft without replacing existing library rows."""
+        clean_project, clean_page = str(project_id or "").strip(), str(page_id or "").strip()
+        clean_library, clean_text = str(library_id or "").strip(), str(comment_text or "").strip()
+        if not clean_project or not clean_page:
+            raise AutoCommentValidationError("Hãy chọn Dự án và Fanpage hợp lệ trước khi lưu comment.")
+        if not clean_library or not clean_text:
+            raise AutoCommentValidationError("Hãy chọn thư viện và nhập nội dung comment hợp lệ.")
+        try:
+            with self.database.connection:
+                if self.database.connection.execute("SELECT 1 FROM projects WHERE uuid=?", (clean_project,)).fetchone() is None:
+                    raise AutoCommentValidationError("Dự án đang chọn không còn tồn tại.")
+                if self.database.connection.execute(
+                    "SELECT 1 FROM facebook_pages WHERE project_id=? AND page_id=?", (clean_project, clean_page)
+                ).fetchone() is None:
+                    raise AutoCommentValidationError("Fanpage đang chọn không còn tồn tại trong Dự án.")
+                library = self.database.connection.execute(
+                    "SELECT project_id,page_id FROM auto_comment_libraries WHERE id=?", (clean_library,)
+                ).fetchone()
+                if library is None:
+                    raise AutoCommentValidationError("Thư viện comment đã chọn không còn tồn tại.")
+                if not library["project_id"] or not library["page_id"]:
+                    raise AutoCommentValidationError("Thư viện cũ chưa có quyền sở hữu Fanpage; hãy tạo hoặc chọn thư viện của Fanpage hiện tại.")
+                if (library["project_id"], library["page_id"]) != (clean_project, clean_page):
+                    raise AutoCommentValidationError("Thư viện comment không thuộc Fanpage đang chọn.")
+                next_order = self.database.connection.execute(
+                    "SELECT COALESCE(MAX(sort_order), -1)+1 FROM auto_comment_library_items WHERE library_id=?", (clean_library,)
+                ).fetchone()[0]
+                item_id = str(uuid.uuid4())
+                now = _now()
+                self.database.connection.execute(
+                    """INSERT INTO auto_comment_library_items
+                       (id,library_id,source_row_id,comment_text,enabled,source_template_id,source_affiliate_link_id,sort_order,created_at,updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (item_id, clean_library, None, clean_text, 1, source_template_id, source_affiliate_link_id, next_order, now, now),
+                )
+        except sqlite3.Error as exc:
+            raise AutoCommentValidationError("Không thể lưu comment do lỗi cơ sở dữ liệu.") from exc
+        return item_id
 
     def load_library(self, library_id: str) -> list[CommentItem]:
         return [CommentItem(str(row["comment_text"]), bool(row["enabled"]), row["source_row_id"], int(row["sort_order"]))
