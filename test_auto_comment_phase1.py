@@ -331,7 +331,7 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         self.assertEqual(AutoCommentService(self.database).campaign_execution(campaign_id)[0]["preflight_status"], "TARGET_ID_MISMATCH")
         with self.database.connection:
             self.database.connection.execute("UPDATE auto_comment_targets SET target_id=? WHERE project_id=? AND page_id=? AND source_id=?", (target_id, self.project_id, page_id, source_id))
-        reopened = AutoCommentPage(self.database); reopened.campaign_picker.setCurrentIndex(reopened.campaign_picker.findData(campaign_id))
+        reopened = AutoCommentPage(self.database); reopened.page.setCurrentIndex(next(index for index in range(reopened.page.count()) if reopened.page.itemData(index) and reopened.page.itemData(index)[1] == page_id)); reopened.campaign_picker.setCurrentIndex(reopened.campaign_picker.findData(campaign_id))
         reopened.tabs.setCurrentIndex(3)
         self.assertEqual(reopened.approved_preview_assignments, {(source_id, 1)})
         self.assertIn(source_id, reopened.test_target_info.text()); self.assertIn(target_id, reopened.test_target_info.text())

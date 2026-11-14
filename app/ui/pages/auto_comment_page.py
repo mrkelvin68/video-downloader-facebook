@@ -70,7 +70,8 @@ class AutoCommentPage(QWidget):
         self.library_picker.blockSignals(True);self.library_picker.clear();self.library_picker.addItem("Mở thư viện đã lưu…",None)
         for x in self.service.list_libraries():self.library_picker.addItem(x["name"],x["id"])
         self.library_picker.blockSignals(False);self.campaign_picker.blockSignals(True);self.campaign_picker.clear();self.campaign_picker.addItem("Mở campaign đã lưu…",None)
-        for x in self.service.list_campaigns():self.campaign_picker.addItem(x["name"],x["id"])
+        active=self.page.currentData() if hasattr(self,"page") else None
+        for x in self.service.list_campaigns(*(active or ())):self.campaign_picker.addItem(x["name"],x["id"])
         self.campaign_picker.blockSignals(False);self._summary()
     def _workflow_step_changed(self,index):
         titles=("Chọn Fanpage & bài viết","Chuẩn bị thư viện comment","Chiến dịch & Preview","Thực hiện chiến dịch & Lịch sử");help_text=("Chọn Fanpage, tải dữ liệu Facebook, sau đó chọn bài viết.","Import CSV hoặc thêm comment cục bộ; bật các dòng hợp lệ cần dùng.","Tạo preview cục bộ, chọn các assignment được duyệt rồi lưu. Preview không đăng Facebook.","Campaign đã lưu chỉ có thể đăng đúng snapshot được duyệt sau khi bạn xác nhận rõ ràng.");self._workflow_step=index;self._workflow_titles=titles;self.workflow_help.setText(help_text[index]);self.workflow_message.setText("");self.back_button.setEnabled(index>0);self.next_button.setVisible(index<3);self._refresh_execution();self._workflow_counts()
@@ -197,8 +198,11 @@ class AutoCommentPage(QWidget):
     def open_campaign(self):
         i=self.campaign_picker.currentData()
         if not i:return
-        c,rows=self.service.load_campaign_preview(i);self.campaign_name.setText(c["name"]);idx=next((j for j in range(self.page.count()) if self.page.itemData(j) and self.page.itemData(j)[1]==c["page_id"]),-1)
-        if idx>=0:self.page.setCurrentIndex(idx)
+        active=self.page.currentData()
+        if not active:self.preview_status.setText("Hãy chọn Fanpage trước khi mở campaign.");return
+        try:c,rows=self.service.load_campaign_preview(i,*active)
+        except AutoCommentValidationError as exc:self.preview_status.setText(str(exc));return
+        self.campaign_name.setText(c["name"])
         self.campaign_id=i
         self.start_date.setDate(date.fromisoformat(c["post_start_date"]));self.end_date.setDate(date.fromisoformat(c["post_end_date"]));self.content_type.setCurrentText(c["content_type"]);self.three.setChecked(c["comments_per_post"]==3);self.one.setChecked(c["comments_per_post"]!=3);self.sequential_mode.setChecked(c["selection_mode"]=="sequential");self.random_mode.setChecked(c["selection_mode"]!="sequential");self.prevent_duplicates.setChecked(bool(c["prevent_duplicates"]));grouped={}
         for row in rows:grouped.setdefault(row["post_id"],[]).append(row)
@@ -208,7 +212,7 @@ class AutoCommentPage(QWidget):
     def _preview_post_selected(self,pid):return any(self.preview.item(r,1).text()==pid and self.preview.item(r,0).checkState()==Qt.CheckState.Checked for r in range(self.preview.rowCount()))
     def _preview_changed(self,item):
         if item.column()==0:self.approved_preview_assignments={tuple(self.preview.item(r,0).data(Qt.ItemDataRole.UserRole)) for r in range(self.preview.rowCount()) if self.preview.item(r,0).checkState()==Qt.CheckState.Checked};self.preview_status.setText(f"Preview: {len(self.approved_preview_assignments)} assignment được duyệt.");self._summary()
-    def _page_changed(self,*_):self.campaign_id=None;self.posts=[];self.selected_post_ids.clear();self.approved_preview_assignments.clear();self.preview_comments={};self.target_states={};self._render_posts();self._invalidate()
+    def _page_changed(self,*_):self.campaign_id=None;self.posts=[];self.selected_post_ids.clear();self.approved_preview_assignments.clear();self.preview_comments={};self.target_states={};self._render_posts();self._render_preview([]);self.refresh_libraries();self._invalidate()
     def _invalidate(self,*_):
         if self.preview_comments:self.approved_preview_assignments={key for key in self.approved_preview_assignments if key[0] in self.selected_post_ids};self.preview_status.setText("Cấu hình đã thay đổi; hãy tạo lại preview.")
     def _summary(self):

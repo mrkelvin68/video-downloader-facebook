@@ -443,17 +443,26 @@ class AutoCommentService:
         )
         return [dict(row) for row in rows]
 
-    def list_campaigns(self) -> list[dict]:
-        return [dict(row) for row in self.database.connection.execute(
-            "SELECT * FROM auto_comment_campaigns ORDER BY updated_at DESC, name COLLATE NOCASE"
-        )]
+    def list_campaigns(self, project_id: str | None = None, page_id: str | None = None) -> list[dict]:
+        """List campaigns only in an explicit project/Page context when supplied."""
+        query = "SELECT DISTINCT c.* FROM auto_comment_campaigns c"
+        values: list[str] = []
+        if project_id and page_id:
+            query += " JOIN auto_comment_preview_items p ON p.campaign_id=c.id WHERE p.project_id=? AND c.page_id=?"
+            values = [project_id, page_id]
+        query += " ORDER BY c.updated_at DESC, c.name COLLATE NOCASE"
+        return [dict(row) for row in self.database.connection.execute(query, values)]
 
-    def load_campaign_preview(self, campaign_id: str) -> tuple[dict, list[dict]]:
+    def load_campaign_preview(self, campaign_id: str, project_id: str | None = None, page_id: str | None = None) -> tuple[dict, list[dict]]:
         campaign = self.database.connection.execute(
             "SELECT * FROM auto_comment_campaigns WHERE id=?", (campaign_id,)
         ).fetchone()
         if campaign is None:
             raise AutoCommentValidationError("Không tìm thấy campaign đã lưu.")
+        if project_id and page_id:
+            owner = self.database.connection.execute("SELECT 1 FROM auto_comment_preview_items WHERE campaign_id=? AND project_id=? AND page_id=?", (campaign_id, project_id, page_id)).fetchone()
+            if campaign["page_id"] != page_id or owner is None:
+                raise AutoCommentValidationError("Campaign không thuộc Fanpage đang chọn.")
         rows = [dict(row) for row in self.database.connection.execute(
             "SELECT * FROM auto_comment_preview_items WHERE campaign_id=? ORDER BY post_id, selection_order", (campaign_id,)
         )]
