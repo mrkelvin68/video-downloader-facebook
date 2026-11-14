@@ -83,30 +83,49 @@ class LoadingSpinner(QWidget):
 class LoadingButton(QPushButton):
     """A QPushButton with an in-place spinner that does not affect its size hint."""
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, loading_text: str | None = None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._loading = False
         self._enabled_before_loading = True
+        self._loading_text: str | None = loading_text
+        self._original_text: str | None = None
         self._spinner = LoadingSpinner(16, self)
 
     @property
     def is_loading(self) -> bool:
         return self._loading
 
-    def set_loading(self, loading: bool) -> None:
+    def set_loading_text(self, text: str | None) -> None:
+        self._loading_text = text
+
+    def set_loading(self, loading: bool, loading_text: str | None = None) -> None:
         loading = bool(loading)
         if loading == self._loading:
             return
+        effective_loading_text = loading_text or self._loading_text
         if loading:
             self._enabled_before_loading = self.isEnabled()
             self._loading = True
             self.setEnabled(False)
-            self._position_spinner()
-            self._spinner.set_running(True)
+            if effective_loading_text:
+                self._original_text = self.text()
+                self.setText(effective_loading_text)
+                self._spinner.set_running(False)
+            else:
+                self._position_spinner()
+                self._spinner.set_running(True)
         else:
             self._loading = False
             self._spinner.set_running(False)
+            if self._original_text is not None:
+                self.setText(self._original_text)
+                self._original_text = None
             self.setEnabled(self._enabled_before_loading)
+
+    def setText(self, text: str) -> None:
+        super().setText(text)
+        if self._loading:
+            self._position_spinner()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -119,9 +138,6 @@ class LoadingButton(QPushButton):
         self.initStyleOption(option)
         contents = self.style().subElementRect(QStyle.SubElement.SE_PushButtonContents, option, self)
         text_width = self.fontMetrics().horizontalAdvance(self.text())
-        icon_width = self.iconSize().width() if not self.icon().isNull() else 0
-        spacing = 4 if icon_width else 0
-        group_width = text_width + spacing + max(icon_width, 16)
-        x = contents.center().x() - group_width // 2
+        x = max(contents.left() + 4, contents.center().x() - (text_width // 2) - 22)
         self._spinner.move(x, contents.center().y() - 8)
 

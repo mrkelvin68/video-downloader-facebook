@@ -18,6 +18,8 @@ class Sidebar(QFrame):
     projectsRequested = Signal()
     queueRequested = Signal()
     viralReelsRequested = Signal()
+    autoCommentRequested = Signal()
+    pageManagementRequested = Signal()
     settingsRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -48,6 +50,8 @@ class Sidebar(QFrame):
             ("Quản lý dự án", QStyle.StandardPixmap.SP_FileDialogContentsView, True, True),
             ("Hàng đợi tải video", QStyle.StandardPixmap.SP_ArrowDown, False, True),
             ("🔥 Viral Reels Finder", QStyle.StandardPixmap.SP_DialogYesButton, False, True),
+            ("Auto Comment", QStyle.StandardPixmap.SP_MessageBoxInformation, False, True),
+            ("Quản lý Fanpage", QStyle.StandardPixmap.SP_DriveNetIcon, False, True),
             ("Live Logs", QStyle.StandardPixmap.SP_FileDialogDetailedView, False, False),
             ("Cài đặt", QStyle.StandardPixmap.SP_FileDialogInfoView, False, True),
         ):
@@ -56,6 +60,12 @@ class Sidebar(QFrame):
             button.setProperty("active", active)
             button.setProperty("comingSoon", not available)
             button.setEnabled(available)
+            if text == "Auto Comment":
+                self.auto_comment_button = button
+                button.clicked.connect(self.autoCommentRequested.emit)
+            if text == "Quản lý Fanpage":
+                self.page_management_button = button
+                button.clicked.connect(self.pageManagementRequested.emit)
             if not available:
                 button.setToolTip("Chức năng sẽ có ở giai đoạn sau")
             elif text == "Quản lý dự án":
@@ -87,6 +97,8 @@ class Sidebar(QFrame):
         self.projects_button.setProperty("active", section == "projects")
         self.queue_button.setProperty("active", section == "queue")
         self.viral_reels_button.setProperty("active", section == "viral-reels")
-        for button in (self.projects_button, self.queue_button, self.viral_reels_button):
+        self.auto_comment_button.setProperty("active", section == "auto-comment")
+        self.page_management_button.setProperty("active", section == "page-management")
+        for button in (self.projects_button, self.queue_button, self.viral_reels_button, self.auto_comment_button, self.page_management_button):
             button.style().unpolish(button)
             button.style().polish(button)

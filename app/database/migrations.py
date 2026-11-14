@@ -356,6 +356,8 @@ def _create_facebook_publishing_tables(connection: sqlite3.Connection) -> None:
             page_name TEXT NOT NULL,
             page_url TEXT NOT NULL DEFAULT '',
             permissions_json TEXT NOT NULL DEFAULT '[]',
+            read_access_status TEXT NOT NULL DEFAULT 'UNVERIFIED',
+            read_access_verified_at TEXT,
             is_default INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0, 1)),
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -406,6 +408,13 @@ def _create_facebook_publishing_tables(connection: sqlite3.Connection) -> None:
         """CREATE INDEX IF NOT EXISTS ix_facebook_publish_schedule
            ON facebook_publishing_jobs(project_id, status, scheduled_at)"""
     )
+    page_columns = {row["name"] for row in connection.execute("PRAGMA table_info(facebook_pages)")}
+    for name, definition in (
+        ("read_access_status", "TEXT NOT NULL DEFAULT 'UNVERIFIED'"),
+        ("read_access_verified_at", "TEXT"),
+    ):
+        if name not in page_columns:
+            connection.execute(f"ALTER TABLE facebook_pages ADD COLUMN {name} {definition}")
     job_columns = {row["name"] for row in connection.execute("PRAGMA table_info(facebook_publishing_jobs)")}
     for name, definition in (
         ("upload_session_id", "TEXT"),
@@ -452,6 +461,100 @@ def _create_facebook_publishing_tables(connection: sqlite3.Connection) -> None:
         """CREATE INDEX IF NOT EXISTS ix_facebook_drafts_project
            ON facebook_drafts(project_id, updated_at DESC)"""
     )
+
+
+def _create_auto_comment_tables(connection: sqlite3.Connection) -> None:
+    """Local-only data for the Auto Comment planning screen (no credentials)."""
+    connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_libraries (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, project_id TEXT, page_id TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    library_columns = {row["name"] for row in connection.execute("PRAGMA table_info(auto_comment_libraries)")}
+    for name in ("project_id", "page_id"):
+        if name not in library_columns:
+            connection.execute(f"ALTER TABLE auto_comment_libraries ADD COLUMN {name} TEXT")
+    connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_library_items (
+        id TEXT PRIMARY KEY, library_id TEXT NOT NULL, source_row_id TEXT,
+        comment_text TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+        source_template_id TEXT, source_affiliate_link_id TEXT,
+        sort_order INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        FOREIGN KEY(library_id) REFERENCES auto_comment_libraries(id) ON DELETE CASCADE)""")
+    library_item_columns = {row["name"] for row in connection.execute("PRAGMA table_info(auto_comment_library_items)")}
+    for name in ("source_template_id", "source_affiliate_link_id"):
+        if name not in library_item_columns:
+            connection.execute(f"ALTER TABLE auto_comment_library_items ADD COLUMN {name} TEXT")
+    connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_library_items_order
+        ON auto_comment_library_items(library_id, sort_order, id)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_campaigns (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, page_id TEXT NOT NULL,
+        post_start_date TEXT NOT NULL, post_end_date TEXT NOT NULL, content_type TEXT NOT NULL,
+        selection_mode TEXT NOT NULL, comments_per_post INTEGER NOT NULL CHECK(comments_per_post IN (1,3)),
+        prevent_duplicates INTEGER NOT NULL DEFAULT 1 CHECK(prevent_duplicates IN (0,1)),
+        status TEXT NOT NULL CHECK(status IN ('DRAFT','PREVIEW_READY','INVALID')),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_preview_items (
+        id TEXT PRIMARY KEY, campaign_id TEXT NOT NULL, post_id TEXT NOT NULL,
+        post_type TEXT NOT NULL, published_at TEXT NOT NULL, comment_text TEXT NOT NULL,
+        selection_order INTEGER NOT NULL, selected INTEGER NOT NULL DEFAULT 1 CHECK(selected IN (0,1)),
+        project_id TEXT, page_id TEXT, source_id TEXT, approved_target_id TEXT,
+        target_status_snapshot TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(campaign_id) REFERENCES auto_comment_campaigns(id) ON DELETE CASCADE)""")
+    preview_columns = {row["name"] for row in connection.execute("PRAGMA table_info(auto_comment_preview_items)")}
+    for name in ("project_id", "page_id", "source_id", "approved_target_id", "target_status_snapshot"):
+        if name not in preview_columns:
+            connection.execute(f"ALTER TABLE auto_comment_preview_items ADD COLUMN {name} TEXT")
+    connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_preview_campaign
+        ON auto_comment_preview_items(campaign_id, post_id, selection_order)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_campaign_executions (
+        id TEXT PRIMARY KEY, campaign_id TEXT NOT NULL, preview_item_id TEXT NOT NULL UNIQUE,
+        execution_status TEXT NOT NULL CHECK(execution_status IN
+            ('PENDING','RUNNING','PUBLISHED','FAILED','UNCERTAIN','CANCELLED')),
+        operation_id TEXT UNIQUE, remote_comment_id TEXT, message TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        FOREIGN KEY(campaign_id) REFERENCES auto_comment_campaigns(id) ON DELETE CASCADE,
+        FOREIGN KEY(preview_item_id) REFERENCES auto_comment_preview_items(id) ON DELETE CASCADE)""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_execution_campaign
+        ON auto_comment_campaign_executions(campaign_id, execution_status)""")
+    # These records are intentionally separate from previews: resolving a target is
+    # evidence from a read-only Graph request, while a submission is an auditable
+    # one-shot operation.  No credential material is stored here.
+    connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_targets (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, page_id TEXT NOT NULL,
+        source_id TEXT NOT NULL, target_id TEXT, target_type TEXT,
+        status TEXT NOT NULL, evidence_json TEXT NOT NULL DEFAULT '{}',
+        checked_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(project_id, page_id, source_id))""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_targets_page
+        ON auto_comment_targets(project_id, page_id, status)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_submission_attempts (
+        id TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE,
+        project_id TEXT NOT NULL, page_id TEXT NOT NULL, source_id TEXT NOT NULL,
+        target_id TEXT NOT NULL, comment_text TEXT NOT NULL,
+        remote_comment_id TEXT, status TEXT NOT NULL, error_category TEXT,
+        error_message TEXT, verification_status TEXT NOT NULL DEFAULT 'NOT_ATTEMPTED',
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_submission_history
+        ON auto_comment_submission_attempts(project_id, page_id, source_id, created_at DESC)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_templates (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, page_id TEXT NOT NULL,
+        name TEXT NOT NULL, body_text TEXT NOT NULL, category TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(project_id,page_id,name))""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_templates_scope
+        ON auto_comment_templates(project_id,page_id,updated_at DESC)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS auto_comment_affiliate_links (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, page_id TEXT NOT NULL,
+        name TEXT NOT NULL, url TEXT NOT NULL, description TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(project_id,page_id,url))""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_affiliate_links_scope
+        ON auto_comment_affiliate_links(project_id,page_id,updated_at DESC)""")
+    connection.execute("""CREATE UNIQUE INDEX IF NOT EXISTS ux_auto_comment_affiliate_links_url
+        ON auto_comment_affiliate_links(project_id,page_id,url)""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS ix_auto_comment_affiliate_links_name
+        ON auto_comment_affiliate_links(project_id,page_id,name COLLATE NOCASE)""")
 def migrate(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("BEGIN IMMEDIATE")
@@ -538,6 +641,7 @@ def migrate(connection: sqlite3.Connection) -> None:
         _create_export_history_table(connection)
         _create_provider_configuration_table(connection)
         _create_facebook_publishing_tables(connection)
+        _create_auto_comment_tables(connection)
         connection.commit()
     except BaseException:
         connection.rollback()

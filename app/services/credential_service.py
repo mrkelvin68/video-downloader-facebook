@@ -7,6 +7,7 @@ from app.services.logging_service import redactor
 SERVICE_NAME = "video-downloader-facebook"
 TOKEN_KEY = "apify_token"
 META_TOKEN_KEY = "meta_graph_token"
+AI_TOKEN_KEY = "ai_provider_api_key"
 
 
 def _page_token_key(project_id: str, page_id: str) -> str:
@@ -77,4 +78,14 @@ def delete_apify_token() -> None:
         keyring.delete_password(SERVICE_NAME, TOKEN_KEY)
     except keyring.errors.PasswordDeleteError:
         pass
+
+def get_ai_provider_key() -> str:
+    value = keyring.get_password(SERVICE_NAME, AI_TOKEN_KEY) or ""
+    if value: redactor.add(value)
+    return value
+
+def set_ai_provider_key(token: str) -> None:
+    value = token.strip()
+    if not value: raise ValueError("AI API key is required")
+    redactor.add(value); keyring.set_password(SERVICE_NAME, AI_TOKEN_KEY, value)
 

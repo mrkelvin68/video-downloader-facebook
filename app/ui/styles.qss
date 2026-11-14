@@ -63,7 +63,9 @@ QDialog#facebookComposerDialog { background:#0f1b2d; }
 QDialog#facebookComposerDialog #facebookCard { border-radius:8px; }
 #facebookSectionTitle { color:#f8fafc; font-size:16px; font-weight:650; }
 QFrame#facebookCard QLabel { background:transparent; }
-QTableWidget#facebookVideoTable, QTableWidget#facebookJobTable { background:#0c1729; alternate-background-color:#101c30; border:1px solid #284365; color:#d7e0ef; gridline-color:#1c2d46; selection-background-color:#1d3c66; }
+QTableWidget#facebookVideoTable, QTableWidget#facebookJobTable { background:#0c1729; alternate-background-color:#101c30; border:1px solid #284365; color:#d7e0ef; gridline-color:#1c2d46; selection-background-color:#1d3c66; outline:none; }
+QTableWidget, QTableView { outline:none; }
+QTableWidget::item:focus, QTableView::item:focus { outline:none; border:none; }
 QTableWidget#facebookVideoTable::item, QTableWidget#facebookJobTable::item { padding:4px 6px; }
 #dropZone { border:2px dashed #304766; border-radius:8px; color:#8ea1bb; background:#0c1729; }
 #dropZone:hover { border-color:#3b82f6; color:#d7e0ef; }

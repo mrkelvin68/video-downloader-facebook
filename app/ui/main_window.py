@@ -80,6 +80,8 @@ from app.ui.pages.project_page import ProjectPage
 from app.ui.pages.download_queue_page import DownloadQueuePage
 from app.ui.pages.matrix_page import MatrixPage
 from app.ui.pages.viral_reels_page import ViralReelsPage
+from app.ui.pages.auto_comment_page import AutoCommentPage
+from app.ui.pages.facebook_page_management_page import FacebookPageManagementPage
 from app.ui.widgets.sidebar import Sidebar
 from app.ui.download_worker import DownloadWorker
 from app.ui.facebook_worker import FacebookPublishWorker, FacebookRequestWorker
@@ -229,11 +231,15 @@ class MainWindow(QMainWindow):
         self.queue_page = DownloadQueuePage()
         self.matrix_page = MatrixPage()
         self.viral_reels_page = ViralReelsPage()
+        self.auto_comment_page = AutoCommentPage(database)
+        self.page_management_page = FacebookPageManagementPage(database)
         self.pages.addWidget(self.project_page)
         self.pages.addWidget(self.detail_page)
         self.pages.addWidget(self.queue_page)
         self.pages.addWidget(self.matrix_page)
         self.pages.addWidget(self.viral_reels_page)
+        self.pages.addWidget(self.auto_comment_page)
+        self.pages.addWidget(self.page_management_page)
         workspace_layout.addWidget(self.pages, 1)
         root_layout.addWidget(workspace, 1)
         self.setCentralWidget(root)
@@ -252,6 +258,7 @@ class MainWindow(QMainWindow):
         self.detail_page.facebookRefreshRequested.connect(self._refresh_facebook_async)
         self.detail_page.facebookDisconnectRequested.connect(self._disconnect_facebook)
         self.detail_page.facebookDefaultPageRequested.connect(self._set_facebook_default)
+        self.detail_page.facebookManagementRequested.connect(self.show_page_management)
         self.detail_page.facebookSaveDraftRequested.connect(self._save_facebook_draft)
         self.detail_page.facebookPrepareRequested.connect(self._prepare_facebook_video)
         self.detail_page.facebookPublishNowRequested.connect(self._publish_facebook_now)
@@ -264,6 +271,14 @@ class MainWindow(QMainWindow):
         self.sidebar.projectsRequested.connect(self.show_projects)
         self.sidebar.queueRequested.connect(self.show_queue)
         self.sidebar.viralReelsRequested.connect(self.show_viral_reels)
+        self.sidebar.autoCommentRequested.connect(self.show_auto_comment)
+        self.auto_comment_page.pageManagementRequested.connect(self.show_page_management)
+        self.sidebar.pageManagementRequested.connect(self.show_page_management)
+        self.page_management_page.connectRequested.connect(self._page_management_connect)
+        self.page_management_page.testRequested.connect(self._page_management_test)
+        self.page_management_page.syncRequested.connect(self._page_management_sync)
+        self.page_management_page.defaultRequested.connect(self._page_management_default)
+        self.page_management_page.disconnectRequested.connect(self._page_management_disconnect)
         self.sidebar.settingsRequested.connect(self.show_settings)
         self.viral_reels_page.findPagesRequested.connect(self.find_viral_pages)
         self.viral_reels_page.providerRequested.connect(self.configure_viral_provider)
@@ -929,6 +944,99 @@ class MainWindow(QMainWindow):
     def show_viral_reels(self) -> None:
         self.pages.setCurrentWidget(self.viral_reels_page)
         self.sidebar.set_active("viral-reels")
+
+    def show_auto_comment(self) -> None:
+        self.auto_comment_page.refresh_pages()
+        self.auto_comment_page.refresh_libraries()
+        self.pages.setCurrentWidget(self.auto_comment_page)
+        self.sidebar.set_active("auto-comment")
+
+    def show_page_management(self) -> None:
+        self.page_management_page.refresh_projects()
+        if self.current_project is not None:
+            index = self.page_management_page.project.findData(self.current_project.uuid)
+            if index >= 0:
+                self.page_management_page.project.setCurrentIndex(index)
+        self.pages.setCurrentWidget(self.page_management_page)
+        self.sidebar.set_active("page-management")
+
+    def _run_page_management_request(self, key: str, operation, on_success) -> None:
+        if key in self._facebook_workers:
+            return
+        worker = FacebookRequestWorker(operation, self)
+        self._facebook_workers[key] = worker
+        self.page_management_page.set_status("Đang xử lý kết nối Facebook…")
+
+        def succeeded(value) -> None:
+            on_success(value)
+            self.page_management_page.refresh_projects()
+            self.auto_comment_page.refresh_pages()
+            if self.current_project is not None:
+                self._refresh_facebook()
+
+        def failed(message: str) -> None:
+            self.page_management_page.set_status(f"Không thể xác minh Facebook: {message}")
+
+        def finished() -> None:
+            self._facebook_workers.pop(key, None)
+            worker.deleteLater()
+
+        worker.succeeded.connect(succeeded)
+        worker.failed.connect(failed)
+        worker.finished.connect(finished)
+        worker.start()
+
+    def _page_management_connect(self, project_id: str, token: str) -> None:
+        database_path = self.database.path
+        self._run_page_management_request(
+            "page-management-connect",
+            lambda: self._facebook_connection_in_worker(database_path, project_id, token, "connect"),
+            lambda pages: self.page_management_page.set_verified(project_id, pages),
+        )
+
+    def _page_management_test(self, project_id: str) -> None:
+        database_path = self.database.path
+        self._run_page_management_request(
+            "page-management-test",
+            lambda: self._facebook_connection_in_worker(database_path, project_id, None, "test"),
+            lambda pages: self.page_management_page.set_verified(project_id, pages),
+        )
+
+    def _page_management_sync(self, project_id: str) -> None:
+        database_path = self.database.path
+
+        def sync():
+            worker_database = Database(database_path)
+            try:
+                return FacebookConnectionService(worker_database).sync_pages(project_id)
+            finally:
+                worker_database.close()
+
+        self._run_page_management_request(
+            "page-management-sync", sync,
+            lambda pages: self.page_management_page.set_verified(project_id, pages),
+        )
+
+    def _page_management_default(self, project_id: str, page_id: str) -> None:
+        try:
+            self.facebook_connection.set_default_page(project_id, page_id)
+            self.page_management_page.set_status("Đã chọn Fanpage mặc định.")
+            self.page_management_page.refresh_pages()
+            if self.current_project is not None and self.current_project.uuid == project_id:
+                self._refresh_facebook()
+        except FacebookConnectionError as exc:
+            self.page_management_page.set_status(str(exc))
+
+    def _page_management_disconnect(self, project_id: str, page_id: str) -> None:
+        try:
+            self.facebook_connection.disconnect_page(project_id, page_id)
+            self.page_management_page.set_status("Đã ngắt kết nối Fanpage.")
+            self.page_management_page.refresh_pages()
+            self.auto_comment_page.refresh_pages()
+            if self.current_project is not None and self.current_project.uuid == project_id:
+                self._refresh_facebook()
+        except FacebookConnectionError as exc:
+            self.page_management_page.set_status(str(exc))
 
     @staticmethod
     def _viral_schedule(value: str) -> str:
