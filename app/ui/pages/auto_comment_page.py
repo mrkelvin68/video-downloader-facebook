@@ -53,7 +53,7 @@ class AutoCommentPage(QWidget):
         for text,fn in (("Tạo lại preview",self.generate_preview),("Lưu campaign",self.save_campaign),("Chọn tất cả",lambda:self._all_preview(True)),("Bỏ chọn",lambda:self._all_preview(False))):x=QPushButton(text);x.clicked.connect(fn);r.addWidget(x)
         l.addLayout(r);self.preview=self._table(["Chọn","Post","Loại","Published At","Số comment","Comments","Target","Preview"],"autoCommentPreviewTable");self.preview.setColumnWidth(0,58);self.preview.setColumnWidth(1,200);self.preview.setColumnWidth(2,70);self.preview.setColumnWidth(3,150);self.preview.setColumnWidth(4,90);self.preview.setColumnWidth(5,300);self.preview.itemChanged.connect(self._preview_changed);l.addWidget(self.preview,1);self.preview_status=QLabel("Chưa có preview.");l.addWidget(self.preview_status);l.addWidget(QLabel("Preview chỉ là kế hoạch cục bộ; không có comment nào được đăng từ bước này."));return w
     def _testing(self):
-        w=QWidget();l=QVBoxLayout(w);box=QGroupBox("Bước 4 · Thực hiện chiến dịch & Lịch sử");f=QFormLayout(box);self.test_target_info=QLabel("Mở campaign đã lưu để kiểm tra snapshot được duyệt.",wordWrap=True);self.manual_comment=QLineEdit();self.manual_comment.hide();self.execution_button=LoadingButton("Xác nhận đăng campaign");self.execution_button.clicked.connect(self.confirm_campaign_execution);self.publish_one_button=self.execution_button;self.test_status=QLabel();f.addRow("Campaign",self.test_target_info);f.addRow(self.execution_button);l.addWidget(box)
+        w=QWidget();l=QVBoxLayout(w);box=QGroupBox("Bước 4 · Thực hiện chiến dịch & Lịch sử");f=QFormLayout(box);self.test_target_info=QLabel("Mở campaign đã lưu để kiểm tra snapshot được duyệt.",wordWrap=True);self.manual_comment=QLineEdit();self.manual_comment.hide();self.execution_button=LoadingButton("Thực hiện chiến dịch (0 comment)");self.execution_button.clicked.connect(self.confirm_campaign_execution);self.publish_one_button=self.execution_button;self.open_campaign_button=QPushButton("Lưu hoặc mở campaign ở Bước 3");self.open_campaign_button.clicked.connect(lambda:self._go_to_step(2));self.test_status=QLabel();f.addRow("Campaign",self.test_target_info);f.addRow(self.execution_button);f.addRow(self.open_campaign_button);l.addWidget(box)
         history=QGroupBox("Lịch sử comment");h=QVBoxLayout(history);filters=QHBoxLayout();self.history_page=QComboBox();self.history_type=QComboBox();self.history_type.addItem("Tất cả loại","");self.history_type.addItems(["POST","REEL"]);self.history_status=QComboBox();self.history_status.addItem("Tất cả trạng thái","");self.history_status.addItems(["SUCCESS","FAILED","UNCERTAIN"]);self.history_from=QLineEdit(placeholderText="Từ ngày YYYY-MM-DD");self.history_to=QLineEdit(placeholderText="Đến ngày YYYY-MM-DD");refresh=QPushButton("Làm mới lịch sử");refresh.clicked.connect(self.refresh_history)
         for x in (self.history_page,self.history_type,self.history_status,self.history_from,self.history_to,refresh):filters.addWidget(x)
         h.addLayout(filters);self.history_table=self._table(["Thời gian","Fanpage","Loại","Nguồn","Target","Comment","Comment ID","Xuất bản","Lỗi","Link"],"autoCommentHistoryTable");self.history_table.setColumnWidth(0,145);self.history_table.setColumnWidth(1,150);self.history_table.setColumnWidth(3,145);self.history_table.setColumnWidth(4,145);self.history_table.setColumnWidth(5,220);self.history_table.setColumnWidth(6,210);h.addWidget(self.history_table,1);actions=QHBoxLayout();copy=QPushButton("Sao chép Comment ID");copy.clicked.connect(self.copy_history_comment_id);self.open_history_link=QPushButton("Không có liên kết trực tiếp");self.open_history_link.setEnabled(False);actions.addWidget(copy);actions.addWidget(self.open_history_link);actions.addStretch();h.addLayout(actions);l.addWidget(history,1);l.addWidget(self.test_status);return w
@@ -218,21 +218,26 @@ class AutoCommentPage(QWidget):
     def _refresh_execution(self):
         if not hasattr(self,"execution_button"):return
         if not self.campaign_id:
+            approved=len(self.approved_preview_assignments)
+            self.test_target_info.setText(f"Bạn có {approved} assignment đã duyệt nhưng chưa lưu chiến dịch. Vui lòng lưu campaign ở Bước 3." if approved else "Chưa có campaign đã lưu. Hãy tạo Preview, duyệt assignment và lưu campaign ở Bước 3.")
+            self.execution_button.setText("Thực hiện chiến dịch (0 comment)");self.execution_button.setEnabled(False);self.open_campaign_button.setVisible(True)
             return
         rows=self.service.campaign_execution(self.campaign_id)
-        selected=self.page.currentData();ready=[];blocked=[];pending=[];published=[]
+        selected=self.page.currentData();ready=[];blocked=[];pending=[];published=[];failed_uncertain=[]
         for row in rows:
             identity_matches=bool(selected and row.get("project_id")==selected[0] and row.get("page_id")==selected[1] and row.get("source_id"))
             row["ui_preflight_status"]=row["preflight_status"] if identity_matches else "PAGE_OR_SOURCE_MISMATCH"
             (ready if row["ui_preflight_status"]=="READY" else blocked).append(row)
             if row["execution_status"]=="PENDING":pending.append(row)
             if row["execution_status"]=="PUBLISHED":published.append(row)
+            if row["execution_status"] in {"FAILED","UNCERTAIN"}:failed_uncertain.append(row)
         eligible=[row for row in pending if row["ui_preflight_status"] not in {"IDENTITY_MISSING","PAGE_OR_SOURCE_MISMATCH","TARGET_ID_MISMATCH"}]
-        details=[f"Campaign: {self.campaign_name.text()}",f"Fanpage: {self.page.currentText()}",f"Assignment đã duyệt: {len(rows)} · READY: {len(ready)} · Bị chặn: {len(blocked)} · Chờ gửi: {len(pending)} · Đã gửi: {len(published)}"]
+        details=[f"Campaign: {self.campaign_name.text()}",f"Fanpage: {self.page.currentText()}",f"Assignment đã duyệt: {len(rows)} · READY: {len(ready)} · Chờ gửi: {len(pending)} · Đã gửi: {len(published)} · FAILED/UNCERTAIN: {len(failed_uncertain)}"]
         for row in rows:
             details.append(f"{row['post_type']} {row.get('source_id') or row['post_id']} → {row['comment_text']} [Target: {row.get('approved_target_id') or 'chưa lưu'} · {row['ui_preflight_status']} · {row['execution_status']}]")
         self.test_target_info.setText("\n".join(details))
         self.execution_button.setEnabled(bool(eligible) and self._publish_worker is None)
+        self.execution_button.setText(f"Thực hiện chiến dịch ({len(eligible)} comment)");self.open_campaign_button.setVisible(False)
         self.execution_button.setToolTip("Tự xác minh GET-only từng assignment trước khi gửi tuần tự. Assignment PUBLISHED/UNCERTAIN không được gửi lại.")
     def confirm_campaign_execution(self):
         if not self.campaign_id or not self.page.currentData():self._send_status("Hãy mở campaign đã lưu trước khi thực hiện.");return

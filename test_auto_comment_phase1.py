@@ -286,6 +286,22 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         self.assertIn("Chờ gửi: 2", page.test_target_info.text())
         page.close()
 
+    def test_step_four_explains_unsaved_36_assignment_preview_then_updates_after_save(self):
+        page = AutoCommentPage(self.database); page.page.setCurrentIndex(1)
+        page.posts = [{"post_id": f"reel:{index}", "post_type": "Reel", "published_at": "2026-11-10T00:00:00+00:00"} for index in range(12)]
+        page.selected_post_ids = {post["post_id"] for post in page.posts}
+        page.preview_comments = {post["post_id"]: ["A", "B", "C"] for post in page.posts}
+        page.target_states = {post["post_id"]: {"status": "READY", "target_id": f"target-{index}"} for index, post in enumerate(page.posts)}
+        page.approved_preview_assignments = {(post["post_id"], order) for post in page.posts for order in range(1, 4)}
+        page._render_preview(page.posts); page.tabs.setCurrentIndex(3)
+        self.assertIn("36 assignment đã duyệt nhưng chưa lưu", page.test_target_info.text())
+        self.assertFalse(page.execution_button.isEnabled())
+        page.save_campaign(); page.tabs.setCurrentIndex(3)
+        self.assertIn("Assignment đã duyệt: 36", page.test_target_info.text())
+        self.assertIn("Chờ gửi: 36", page.test_target_info.text())
+        self.assertEqual(page.execution_button.text(), "Thực hiện chiến dịch (36 comment)")
+        page.close()
+
     def test_11_reel_preview_saves_one_canonical_ready_assignment_and_reopens_it(self):
         page_id = "1490753847447865"; source_id = "122108499879536255"; target_id = "4703374409946917"
         FacebookPublishingService(self.database).save_pages(self.project_id, [{"id": page_id, "name": "Đậu Đậu Review"}])
@@ -532,7 +548,7 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         page.posts = [{"post_id": "reel:7", "reel_id": "reel-7", "post_type": "Reel", "published_at": "2026-11-01T00:00:00+00:00"}]
         page.selected_post_ids = {"reel:7"}; page._restore_target_states(); page.manual_comment.setText("Bình luận thử"); page._render_posts()
         page.tabs.setCurrentIndex(3)
-        self.assertIn("Target comment: video-9", page.test_target_info.text())
+        self.assertIn("Chưa có campaign đã lưu", page.test_target_info.text())
         self.assertTrue(page.publish_one_button.isEnabled())
         page.history_page.setCurrentIndex(page.history_page.findData((self.project_id, "page-1"))); page.history_type.setCurrentText("REEL"); page.refresh_history()
         self.assertEqual(page.history_table.rowCount(), 1)
