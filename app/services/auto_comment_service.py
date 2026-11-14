@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from dataclasses import dataclass
 import io
 import random
@@ -602,6 +603,23 @@ class AutoCommentService:
             results.append({"assignment_id": row["id"], **result})
             if progress:
                 progress(index, len(queue), row, result)
-            if result.get("status") == "UNCERTAIN" or result.get("error_category") in {"RATE_LIMIT", "PERMISSION_DENIED"}:
+            if result.get("status") == "UNCERTAIN" or result.get("error_category") in {"RATE_LIMIT", "PERMISSION_DENIED", "TOKEN_EXPIRED", "SPAM_RESTRICTION"}:
                 break
         return results
+
+    @staticmethod
+    def campaign_safety_review(rows: list[dict]) -> dict[str, list[str]]:
+        """Local review only; it never rewrites content or submits comments."""
+        warnings: dict[str, list[str]] = {}; texts: list[str] = []; urls: set[str] = set()
+        for row in rows:
+            reasons: list[str] = []; text = str(row.get("comment_text") or "")
+            normalized = " ".join(re.sub(r"[^\w\s]", " ", text.casefold()).split())
+            if normalized in texts: reasons.append("Nội dung trùng hoàn toàn với assignment khác.")
+            elif normalized and any(normalized in prior or prior in normalized for prior in texts): reasons.append("Nội dung gần trùng, cần kiểm tra thủ công.")
+            texts.append(normalized)
+            found = set(re.findall(r"https?://[^\s]+", text.casefold()))
+            if found & urls: reasons.append("URL quảng bá lặp lại.")
+            urls |= found
+            if row.get("execution_status") in {"PUBLISHED", "UNCERTAIN"}: reasons.append("Đã xuất bản hoặc chưa chắc kết quả; không tự gửi lại.")
+            if reasons: warnings[str(row["id"])] = reasons
+        return warnings

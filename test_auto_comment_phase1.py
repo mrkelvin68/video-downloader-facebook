@@ -234,6 +234,15 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         restored = {row["post_id"]: row["execution_status"] for row in service.campaign_execution(campaign_id)}
         self.assertEqual(restored, {"reel:1": "FAILED", "reel:2": "PENDING"})
 
+    def test_campaign_safety_review_flags_duplicate_near_duplicate_and_url(self):
+        rows = [{"id": "a", "comment_text": "Mua ngay https://example.com/a", "execution_status": "PENDING"},
+                {"id": "b", "comment_text": "Mua ngay https://example.com/a", "execution_status": "PENDING"},
+                {"id": "c", "comment_text": "Mua ngay hôm nay", "execution_status": "UNCERTAIN"}]
+        warnings = AutoCommentService.campaign_safety_review(rows)
+        self.assertIn("trùng", " ".join(warnings["b"]).casefold())
+        self.assertIn("URL", " ".join(warnings["b"]))
+        self.assertIn("không tự gửi lại", " ".join(warnings["c"]))
+
     def test_queue_reuses_target_validation_for_three_approved_comments(self):
         service = AutoCommentService(self.database)
         posts = [{"post_id": f"reel:{number}", "reel_id": str(number), "post_type": "Reel",
