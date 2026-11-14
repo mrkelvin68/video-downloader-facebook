@@ -117,7 +117,7 @@ class AutoCommentPage(QWidget):
         if not hasattr(self,"open_affiliate_library_button"):
             self.open_affiliate_library_button=QPushButton("Kho link AFF");self.open_affiliate_library_button.clicked.connect(self.open_affiliate_library);self.tabs.widget(1).layout().addWidget(self.open_affiliate_library_button)
         if not hasattr(self,"open_composer_button"):
-            self.open_composer_button=QPushButton("Tạo comment từ mẫu");self.open_composer_button.clicked.connect(self.open_comment_composer);self.tabs.widget(1).layout().addWidget(self.open_composer_button)
+            self.open_composer_button=QPushButton("Trộn Comment + Link");self.open_composer_button.clicked.connect(self.open_comment_composer);self.tabs.widget(1).layout().addWidget(self.open_composer_button)
         self.library_picker.blockSignals(True);self.library_picker.clear();self.library_picker.addItem("Mở thư viện đã lưu…",None)
         for x in self.service.list_libraries():self.library_picker.addItem(x["name"],x["id"])
         self.library_picker.blockSignals(False);self.campaign_picker.blockSignals(True);self.campaign_picker.clear();self.campaign_picker.addItem("Mở campaign đã lưu…",None)
@@ -137,7 +137,7 @@ class AutoCommentPage(QWidget):
     def open_comment_composer(self):
         active=self.page.currentData()
         if not active:
-            QMessageBox.information(self,"Tạo comment từ mẫu","Hãy chọn Fanpage trước khi tạo comment từ mẫu.");return None
+            QMessageBox.information(self,"Trộn Comment + Link","Hãy chọn Fanpage trước khi trộn comment và link.");return None
         dialog=CommentComposerDialog(self.database,active[0],active[1],self.page.currentText(),existing_comments_provider=lambda:[x.comment_text for x in self.items() if x.comment_text.strip()],active_scope_provider=lambda:self.page.currentData(),saved_callback=self.refresh_libraries,parent=self);self.composer_widget=dialog.composer_widget;self.composer_dialog=dialog;dialog.exec();return dialog
     def _workflow_step_changed(self,index):
         titles=("Chọn Fanpage & bài viết","Chuẩn bị thư viện comment","Chiến dịch & Preview","Thực hiện chiến dịch & Lịch sử");help_text=("Chọn Fanpage, tải dữ liệu Facebook, sau đó chọn bài viết.","Import CSV hoặc thêm comment cục bộ; bật các dòng hợp lệ cần dùng.","Tạo preview cục bộ, chọn các assignment được duyệt rồi lưu. Preview không đăng Facebook.","Campaign đã lưu chỉ có thể đăng đúng snapshot được duyệt sau khi bạn xác nhận rõ ràng.");self._workflow_step=index;self._workflow_titles=titles;self.workflow_help.setText(help_text[index]);self.workflow_message.setText("");self.back_button.setEnabled(index>0);self.next_button.setVisible(index<3);self._refresh_execution();self._workflow_counts()

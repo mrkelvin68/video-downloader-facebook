@@ -3,448 +3,82 @@ from __future__ import annotations
 from typing import Callable
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
-    QDialog,
-    QFormLayout,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QPlainTextEdit,
-    QPushButton,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QRadioButton, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QPushButton
 
-from app.services.auto_comment_composer_service import (
-    AutoCommentComposerService,
-    CommentComposerError,
-    ComposedCommentDraft,
-    evaluate_draft_warnings,
-)
+from app.services.auto_comment_composer_service import AutoCommentComposerService, CommentComposerError, ComposedCommentDraft, evaluate_draft_warnings
 
 
 class CommentComposerWidget(QWidget):
-    """Local Comment Composer UI (Phase 3C1); never writes composed comments to SQLite."""
-
-    def __init__(
-        self,
-        database,
-        project_id: str | None = None,
-        page_id: str | None = None,
-        page_name: str = "",
-        existing_comments_provider: Callable[[], list[str]] | None = None,
-        active_scope_provider: Callable[[], tuple[str, str] | None] | None = None,
-        saved_callback: Callable[[], None] | None = None,
-        parent=None,
-    ):
+    """Local bulk mixer; it never posts to Facebook or creates a campaign."""
+    def __init__(self, database, project_id=None, page_id=None, page_name="", existing_comments_provider: Callable[[], list[str]] | None = None, active_scope_provider=None, saved_callback=None, parent=None):
         super().__init__(parent)
-        self.service = AutoCommentComposerService(database)
-        self._captured_scope = (project_id, page_id)
-        self.project_id = project_id
-        self.page_id = page_id
-        self.page_name = page_name
-        self._existing_comments_provider = existing_comments_provider
-        self._active_scope_provider = active_scope_provider
-        self._saved_callback = saved_callback
-        self._scope_invalidated = False
-        self._templates_by_id: dict[str, dict] = {}
-        self._links_by_id: dict[str, dict] = {}
-        self.current_draft: ComposedCommentDraft | None = None
-        self._draft_saved = False
-
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
-
-        self.page_display = QLabel()
-        self.page_display.setWordWrap(True)
-
-        self.template_combo = QComboBox()
-        self.template_combo.currentIndexChanged.connect(self._on_template_selected)
-
-        self.link_combo = QComboBox()
-        self.link_combo.currentIndexChanged.connect(self._on_link_selected)
-
-        self.template_preview = QPlainTextEdit()
-        self.template_preview.setReadOnly(True)
-        self.template_preview.setMaximumHeight(95)
-        self.template_preview.setPlaceholderText("Nội dung mẫu comment sẽ hiển thị tại đây…")
-
-        self.link_preview = QLineEdit()
-        self.link_preview.setReadOnly(True)
-        self.link_preview.setPlaceholderText("Affiliate URL nguyên bản sẽ hiển thị tại đây…")
-
-        form.addRow("Fanpage đang chọn", self.page_display)
-        form.addRow("Mẫu comment (đang bật)", self.template_combo)
-        form.addRow("Xem trước mẫu", self.template_preview)
-        form.addRow("Affiliate URL (đang bật)", self.link_combo)
-        form.addRow("Xem trước URL", self.link_preview)
-        layout.addLayout(form)
-
-        action_bar = QHBoxLayout()
-        self.compose_button = QPushButton("Tạo bản nháp")
-        self.compose_button.clicked.connect(self.compose_draft)
-        self.refresh_button = QPushButton("Làm mới danh sách")
-        self.refresh_button.clicked.connect(self.reload_options)
-        action_bar.addWidget(self.compose_button)
-        action_bar.addWidget(self.refresh_button)
-        action_bar.addStretch()
-        layout.addLayout(action_bar)
-
-        self.source_info_label = QLabel("Chưa tạo bản nháp.")
-        self.source_info_label.setWordWrap(True)
-        layout.addWidget(self.source_info_label)
-
-        self.composed_preview = QPlainTextEdit()
-        self.composed_preview.setPlaceholderText(
-            "Nhấn 'Tạo bản nháp' để ghép mẫu và Affiliate URL. Bạn có thể chỉnh sửa nội dung cục bộ tại đây…"
-        )
-        self.composed_preview.textChanged.connect(self._on_composed_text_edited)
-        layout.addWidget(self.composed_preview, 1)
-
-        self.library_combo = QComboBox()
-        self.library_combo.currentIndexChanged.connect(self._update_save_enabled)
-        form.addRow("Thư viện đích", self.library_combo)
-
-        self.approval_checkbox = QCheckBox("Duyệt comment này")
-        self.approval_checkbox.setChecked(False)
-        self.approval_checkbox.toggled.connect(self._update_save_enabled)
-        layout.addWidget(self.approval_checkbox)
-
-        self.save_button = QPushButton("Lưu vào thư viện comment")
-        self.save_button.clicked.connect(self.save_approved_draft)
-        layout.addWidget(self.save_button)
-
-        self.warning_label = QLabel()
-        self.warning_label.setWordWrap(True)
-        layout.addWidget(self.warning_label)
-
-        self.status_label = QLabel()
-        self.status_label.setWordWrap(True)
-        layout.addWidget(self.status_label)
-
+        self.service = AutoCommentComposerService(database); self.project_id = project_id; self.page_id = page_id; self._scope = (project_id, page_id)
+        self._existing = existing_comments_provider or (lambda: []); self._active_scope = active_scope_provider or (lambda: self._scope); self._saved_callback = saved_callback; self._saved = False; self.drafts: list[ComposedCommentDraft] = []
+        root = QVBoxLayout(self); root.addWidget(QLabel(f"Fanpage: {page_name or page_id or 'Chưa chọn'}"))
+        sources = QHBoxLayout(); self.template_list, self.template_toggle, self.template_count = self._source_box("Kho comment / mẫu", sources); self.link_list, self.link_toggle, self.link_count = self._source_box("Kho link AFF", sources); root.addLayout(sources)
+        form = QFormLayout(); modes = QHBoxLayout(); self.round_robin = QRadioButton("Lần lượt — xoay vòng link"); self.combinations = QRadioButton("Tất cả kết hợp"); self.round_robin.setChecked(True); modes.addWidget(self.round_robin); modes.addWidget(self.combinations)
+        placements = QHBoxLayout(); self.end_placement = QRadioButton("Cuối comment"); self.placeholder_placement = QRadioButton("Dùng {affiliate_url}"); self.end_placement.setChecked(True); placements.addWidget(self.end_placement); placements.addWidget(self.placeholder_placement)
+        self.limit = QSpinBox(); self.limit.setRange(1, 500); self.limit.setValue(10); self.potential = QLabel()
+        form.addRow("Cách trộn", modes); form.addRow("Vị trí link", placements); form.addRow("Giới hạn bản nháp", self.limit); form.addRow("Dự kiến", self.potential); root.addLayout(form)
+        self.mix_button = QPushButton("Trộn comment"); self.mix_button.clicked.connect(self.mix); root.addWidget(self.mix_button)
+        self.results = QTableWidget(0, 5); self.results.setHorizontalHeaderLabels(["Chọn", "Nội dung sau trộn", "Mẫu", "Link", "Cảnh báo"]); self.results.setColumnWidth(0, 55); self.results.setColumnWidth(2, 150); self.results.setColumnWidth(3, 150); self.results.horizontalHeader().setStretchLastSection(True); self.results.itemChanged.connect(self._result_changed); root.addWidget(self.results, 1)
+        actions = QHBoxLayout(); self.select_results = QPushButton("Chọn tất cả"); self.select_results.clicked.connect(self.toggle_results); self.destination = QComboBox(); self.destination.currentIndexChanged.connect(self._update_save); self.save_button = QPushButton("Lưu comment đã chọn"); self.save_button.clicked.connect(self.save_selected); actions.addWidget(self.select_results); actions.addWidget(QLabel("Thư viện đích")); actions.addWidget(self.destination, 1); actions.addWidget(self.save_button); root.addLayout(actions)
+        self.status_label = QLabel(); self.status_label.setWordWrap(True); root.addWidget(self.status_label)
+        for control in (self.round_robin, self.combinations, self.end_placement, self.placeholder_placement, self.limit): (control.toggled if hasattr(control, "toggled") else control.valueChanged).connect(self._update_potential)
         self.reload_options()
 
-    def _reset_approval(self):
-        self.approval_checkbox.blockSignals(True)
-        self.approval_checkbox.setChecked(False)
-        self.approval_checkbox.blockSignals(False)
-        self._draft_saved = False
-        self._update_save_enabled()
+    def _source_box(self, title, parent):
+        column = QVBoxLayout(); column.addWidget(QLabel(title)); bar = QHBoxLayout(); toggle = QPushButton("Chọn tất cả"); count = QLabel(); bar.addWidget(toggle); bar.addWidget(count); bar.addStretch(); column.addLayout(bar); listing = QListWidget(); listing.itemChanged.connect(self._update_potential); toggle.clicked.connect(lambda: self._toggle_sources(listing, toggle)); column.addWidget(listing, 1); parent.addLayout(column, 1); return listing, toggle, count
 
-    def _update_save_enabled(self, *_):
-        self.save_button.setEnabled(bool(
-            self.current_draft and self._has_valid_scope() and not self._draft_saved
-            and self.approval_checkbox.isChecked() and self.library_combo.currentData()
-        ))
-
-    def _reload_destination_libraries(self):
-        selected = self.library_combo.currentData()
-        self.library_combo.blockSignals(True)
-        self.library_combo.clear()
-        self.library_combo.addItem("— Chọn thư viện comment đích —", None)
-        if self._has_valid_scope():
-            for library in self.service.list_destination_libraries(self.project_id, self.page_id):
-                self.library_combo.addItem(library["name"], library["id"])
-        self.library_combo.setCurrentIndex(max(0, self.library_combo.findData(selected)))
-        self.library_combo.blockSignals(False)
-        self._update_save_enabled()
-
-    def _has_valid_scope(self) -> bool:
-        return (
-            not self._scope_invalidated
-            and bool(str(self.project_id or "").strip())
-            and bool(str(self.page_id or "").strip())
-            and (self.project_id, self.page_id) == self._captured_scope
-        )
-
-    def _update_page_header(self):
-        if self._scope_invalidated:
-            self.page_display.setText(
-                f"{self.page_name or self.page_id or 'Chưa chọn'} (Fanpage đã thay đổi — cần mở lại)"
-            )
-        elif self.project_id and self.page_id:
-            label = f"{self.page_name} · {self.page_id}" if self.page_name else str(self.page_id)
-            self.page_display.setText(label)
-        else:
-            self.page_display.setText("Chưa chọn Fanpage")
-
-    def on_context_changed(
-        self,
-        new_project_id: str | None,
-        new_page_id: str | None,
-        new_page_name: str = "",
-    ):
-        """Invalidate stale selections when the active Page changes without silently switching scope."""
-        if (new_project_id, new_page_id) != self._captured_scope:
-            self._scope_invalidated = True
-            self.current_draft = None
-            self._templates_by_id.clear()
-            self._links_by_id.clear()
-            self.template_combo.blockSignals(True)
-            self.link_combo.blockSignals(True)
-            self.template_combo.clear()
-            self.template_combo.addItem("Fanpage đã thay đổi — vui lòng đóng hộp thoại", None)
-            self.link_combo.clear()
-            self.link_combo.addItem("Fanpage đã thay đổi — vui lòng đóng hộp thoại", None)
-            self.template_combo.blockSignals(False)
-            self.link_combo.blockSignals(False)
-            self.template_combo.setEnabled(False)
-            self.link_combo.setEnabled(False)
-            self.compose_button.setEnabled(False)
-            self.refresh_button.setEnabled(False)
-            self.library_combo.setEnabled(False)
-            self.template_preview.setPlainText("")
-            self.link_preview.setText("")
-            self.composed_preview.blockSignals(True)
-            self.composed_preview.setPlainText("")
-            self.composed_preview.blockSignals(False)
-            self.source_info_label.setText("Đã vô hiệu hóa lựa chọn cũ do đổi Fanpage.")
-            self.warning_label.setText("")
-            self.status_label.setText(
-                "Fanpage đang chọn đã thay đổi. Vui lòng đóng hộp thoại và mở lại 'Tạo comment từ mẫu' cho Fanpage mới."
-            )
-            self._update_page_header()
-
+    @staticmethod
+    def _ids(listing): return [str(listing.item(i).data(Qt.ItemDataRole.UserRole)) for i in range(listing.count()) if listing.item(i).checkState() == Qt.CheckState.Checked]
+    def _toggle_sources(self, listing, button):
+        items = [listing.item(i) for i in range(listing.count())]; checked = bool(items) and all(item.checkState() == Qt.CheckState.Checked for item in items)
+        for item in items: item.setCheckState(Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked)
+        button.setText("Chọn tất cả" if checked else "Bỏ chọn tất cả")
     def reload_options(self):
-        self._update_page_header()
-        if not self._has_valid_scope():
-            self.template_combo.setEnabled(False)
-            self.link_combo.setEnabled(False)
-            self.compose_button.setEnabled(False)
-            if not self._scope_invalidated:
-                self.status_label.setText(
-                    "Hãy chọn Fanpage trước khi tạo comment từ mẫu."
-                )
-            return
-
-        prev_template_id = self.selected_template_id()
-        prev_link_id = self.selected_link_id()
-
-        templates = self.service.list_enabled_templates(self.project_id, self.page_id)
-        links = self.service.list_enabled_links(self.project_id, self.page_id)
-        self._templates_by_id = {str(t["id"]): t for t in templates}
-        self._links_by_id = {str(l["id"]): l for l in links}
-
-        self.template_combo.blockSignals(True)
-        self.template_combo.clear()
-        self.template_combo.addItem("— Chọn mẫu comment —", None)
-        restored_t_idx = 0
-        for idx, t in enumerate(templates, start=1):
-            tid = str(t["id"])
-            tag = " [có {affiliate_url}]" if "{affiliate_url}" in str(t.get("body_text") or "") else ""
-            self.template_combo.addItem(f"{t['name']}{tag}", tid)
-            if prev_template_id and tid == prev_template_id:
-                restored_t_idx = idx
-        self.template_combo.setCurrentIndex(restored_t_idx)
-        self.template_combo.blockSignals(False)
-
-        self.link_combo.blockSignals(True)
-        self.link_combo.clear()
-        self.link_combo.addItem("— Không chọn / Chọn Affiliate URL —", None)
-        restored_l_idx = 0
-        for idx, link in enumerate(links, start=1):
-            lid = str(link["id"])
-            self.link_combo.addItem(f"{link['name']} ({link['url']})", lid)
-            if prev_link_id and lid == prev_link_id:
-                restored_l_idx = idx
-        self.link_combo.setCurrentIndex(restored_l_idx)
-        self.link_combo.blockSignals(False)
-
-        self.template_combo.setEnabled(True)
-        self.link_combo.setEnabled(True)
-        self.compose_button.setEnabled(True)
-        self.library_combo.setEnabled(True)
-        self._reload_destination_libraries()
-        self._on_template_selected()
-        self._on_link_selected()
-
-        if not templates and not links:
-            self.status_label.setText(
-                "Fanpage này chưa có mẫu comment hoặc Affiliate URL đang bật."
-            )
-        elif not templates:
-            self.status_label.setText(
-                "Fanpage này chưa có mẫu comment đang bật. Hãy thêm hoặc bật mẫu trong 'Kho mẫu comment'."
-            )
-        else:
-            self.status_label.setText(
-                f"Đã tải {len(templates)} mẫu đang bật và {len(links)} Affiliate URL đang bật."
-            )
-
-    def selected_template_id(self) -> str | None:
-        data = self.template_combo.currentData()
-        return str(data) if data else None
-
-    def selected_link_id(self) -> str | None:
-        data = self.link_combo.currentData()
-        return str(data) if data else None
-
-    def _on_template_selected(self, *_):
-        if self.current_draft is not None:
-            self.current_draft = None
-            self._reset_approval()
-        tid = self.selected_template_id()
-        tpl = self._templates_by_id.get(tid) if tid else None
-        self.template_preview.setPlainText(str(tpl.get("body_text") or "") if tpl else "")
-
-    def _on_link_selected(self, *_):
-        if self.current_draft is not None:
-            self.current_draft = None
-            self._reset_approval()
-        lid = self.selected_link_id()
-        link = self._links_by_id.get(lid) if lid else None
-        url = str(link.get("url") or "") if link else ""
-        self.link_preview.setText(url)
-        self.link_preview.setToolTip(url)
-
-    def _existing_comments(self) -> list[str]:
-        if self._existing_comments_provider is None:
-            return []
-        try:
-            return list(self._existing_comments_provider() or [])
-        except Exception:
-            return []
-
-    def compose_draft(self) -> ComposedCommentDraft | None:
-        if not self._has_valid_scope():
-            self.current_draft = None
-            self.status_label.setText(
-                "Fanpage đang chọn đã thay đổi hoặc không hợp lệ; không thể tạo bản nháp bằng dữ liệu cũ."
-            )
-            return None
-
-        tid = self.selected_template_id()
-        lid = self.selected_link_id()
-        try:
-            draft = self.service.compose_draft(
-                self.project_id,
-                self.page_id,
-                tid or "",
-                lid,
-                existing_comments=self._existing_comments(),
-            )
-        except CommentComposerError as exc:
-            self.current_draft = None
-            self.warning_label.setText("")
-            self.status_label.setText(str(exc))
-            return None
-
-        self.current_draft = draft
-        self._reset_approval()
-        self.composed_preview.blockSignals(True)
-        self.composed_preview.setPlainText(draft.composed_text)
-        self.composed_preview.blockSignals(False)
-
-        link_info = (
-            f"{draft.affiliate_link_name} ({draft.affiliate_link_id})"
-            if draft.affiliate_link_id and draft.has_placeholder
-            else "Không gắn link"
-        )
-        self.source_info_label.setText(
-            f"Nguồn mẫu: {draft.template_name} ({draft.template_id}) · Nguồn link: {link_info}"
-        )
-        self.warning_label.setText(" | ".join(draft.warnings) if draft.warnings else "")
-        self.status_label.setText(
-            "Đã tạo bản nháp cục bộ. Bạn có thể chỉnh sửa nội dung; chưa lưu vào thư viện hay chiến dịch."
-        )
-        return draft
-
-    def _on_composed_text_edited(self):
-        if self.current_draft is None or not self._has_valid_scope():
-            return
-        edited = self.composed_preview.toPlainText()
-        self.current_draft.edited_text = edited
-        self._reset_approval()
-        try:
-            warnings = evaluate_draft_warnings(edited, self._existing_comments())
-            if not self.current_draft.has_placeholder and self.current_draft.affiliate_link_id:
-                notice = "Mẫu không có placeholder {affiliate_url}; hệ thống giữ nguyên văn bản mẫu và không tự động chèn link."
-                if notice not in warnings:
-                    warnings.append(notice)
-            self.current_draft.warnings = warnings
-            self.warning_label.setText(" | ".join(warnings) if warnings else "")
-            self.status_label.setText("Bản nháp đã được chỉnh sửa cục bộ (chưa lưu SQLite).")
-        except CommentComposerError as exc:
-            self.warning_label.setText(str(exc))
-
-    def save_approved_draft(self):
-        if self._draft_saved:
-            self.status_label.setText("Bản nháp này đã được lưu; hãy tạo bản nháp mới để lưu thêm.")
-            return None
-        if not self.current_draft or not self._has_valid_scope():
-            self.status_label.setText("Bản nháp không còn hợp lệ; hãy tạo lại trước khi lưu.")
-            return None
-        active_scope = self._active_scope_provider() if self._active_scope_provider else self._captured_scope
-        if active_scope != self._captured_scope:
-            self.on_context_changed(*(active_scope or (None, None)))
-            return None
-        if not self.approval_checkbox.isChecked():
-            self.status_label.setText("Hãy tích 'Duyệt comment này' trước khi lưu.")
-            return None
-        library_id = self.library_combo.currentData()
-        if not library_id:
-            self.status_label.setText("Hãy chọn thư viện comment đích trước khi lưu.")
-            return None
-        try:
-            item_id = self.service.save_approved_draft(
-                self.current_draft, str(library_id), self.project_id, self.page_id
-            )
-        except CommentComposerError as exc:
-            self.status_label.setText(str(exc))
-            return None
-        self._draft_saved = True
-        self._update_save_enabled()
-        self.status_label.setText("Đã lưu chính xác một comment đã duyệt vào thư viện.")
-        if self._saved_callback:
-            self._saved_callback()
-        return item_id
+        self.template_list.clear(); self.link_list.clear(); self.destination.clear(); self.destination.addItem("— Chọn thư viện đích —", None)
+        if not self.project_id or not self.page_id: self.mix_button.setEnabled(False); return
+        for listing, rows in ((self.template_list, self.service.list_enabled_templates(self.project_id, self.page_id)), (self.link_list, self.service.list_enabled_links(self.project_id, self.page_id))):
+            for row in rows:
+                item = QListWidgetItem(str(row["name"])); item.setData(Qt.ItemDataRole.UserRole, row["id"]); item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable); item.setCheckState(Qt.CheckState.Unchecked); listing.addItem(item)
+        for library in self.service.list_destination_libraries(self.project_id, self.page_id): self.destination.addItem(library["name"], library["id"])
+        self._update_potential()
+    def _update_potential(self, *_):
+        templates, links = self._ids(self.template_list), self._ids(self.link_list); total = len(templates) * (len(links) if self.combinations.isChecked() else 1)
+        self.template_count.setText(f"{len(templates)} đã chọn"); self.link_count.setText(f"{len(links)} đã chọn"); self.potential.setText(f"{min(total, self.limit.value())} / {total} bản nháp"); self._update_save()
+    def mix(self):
+        if self._active_scope() != self._scope: self.status_label.setText("Fanpage đã thay đổi; hãy mở lại hộp thoại."); return
+        try: self.drafts = self.service.mix_drafts(self.project_id, self.page_id, self._ids(self.template_list), self._ids(self.link_list), "all" if self.combinations.isChecked() else "round_robin", "placeholder" if self.placeholder_placement.isChecked() else "end", self.limit.value(), list(self._existing() or []))
+        except CommentComposerError as exc: self.status_label.setText(str(exc)); return
+        self._saved = False; self.results.blockSignals(True); self.results.setRowCount(0)
+        for draft in self.drafts:
+            row = self.results.rowCount(); self.results.insertRow(row); check = QTableWidgetItem(); check.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable); check.setCheckState(Qt.CheckState.Checked); self.results.setItem(row, 0, check); self.results.setItem(row, 1, QTableWidgetItem(draft.edited_text)); self.results.setItem(row, 2, QTableWidgetItem(draft.template_name)); self.results.setItem(row, 3, QTableWidgetItem(draft.affiliate_link_name or "")); self.results.setItem(row, 4, QTableWidgetItem(" | ".join(draft.warnings)))
+        self.results.blockSignals(False); self.status_label.setText(f"Đã tạo {len(self.drafts)} bản nháp cục bộ; chưa lưu."); self._update_save()
+    def _result_changed(self, item):
+        if item.column() == 1 and item.row() < len(self.drafts):
+            draft = self.drafts[item.row()]; draft.edited_text = item.text()
+            try: draft.warnings = evaluate_draft_warnings(draft.edited_text, list(self._existing() or []))
+            except CommentComposerError as exc: draft.warnings = [str(exc)]
+            self.results.item(item.row(), 4).setText(" | ".join(draft.warnings))
+        self._update_save()
+    def toggle_results(self):
+        checked = self.results.rowCount() and all(self.results.item(r, 0).checkState() == Qt.CheckState.Checked for r in range(self.results.rowCount()))
+        for row in range(self.results.rowCount()): self.results.item(row, 0).setCheckState(Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked)
+        self.select_results.setText("Chọn tất cả" if checked else "Bỏ chọn tất cả")
+    def _update_save(self, *_):
+        selected = any(self.results.item(r, 0) and self.results.item(r, 0).checkState() == Qt.CheckState.Checked for r in range(self.results.rowCount())); self.save_button.setEnabled(bool(selected and self.destination.currentData() and not self._saved and self._active_scope() == self._scope))
+    def save_selected(self):
+        if self._saved or self._active_scope() != self._scope: self.status_label.setText("Bản nháp không còn hợp lệ hoặc đã được lưu."); return None
+        chosen = [draft for row, draft in enumerate(self.drafts) if self.results.item(row, 0).checkState() == Qt.CheckState.Checked]
+        try: ids = self.service.save_selected_drafts(chosen, str(self.destination.currentData() or ""), self.project_id, self.page_id)
+        except CommentComposerError as exc: self.status_label.setText(str(exc)); return None
+        self._saved = True; self.status_label.setText(f"Đã lưu {len(ids)} comment vào thư viện."); self._update_save()
+        if self._saved_callback: self._saved_callback()
+        return ids
 
 
 class CommentComposerDialog(QDialog):
-    def __init__(
-        self,
-        database,
-        project_id: str,
-        page_id: str,
-        page_name: str = "",
-        existing_comments_provider: Callable[[], list[str]] | None = None,
-        active_scope_provider: Callable[[], tuple[str, str] | None] | None = None,
-        saved_callback: Callable[[], None] | None = None,
-        parent=None,
-    ):
-        super().__init__(parent)
-        self.setWindowTitle("Tạo comment từ mẫu")
-        self.setMinimumSize(820, 560)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
-
-        layout = QVBoxLayout(self)
-        self.composer_widget = CommentComposerWidget(
-            database,
-            project_id=project_id,
-            page_id=page_id,
-            page_name=page_name,
-            existing_comments_provider=existing_comments_provider,
-            active_scope_provider=active_scope_provider,
-            saved_callback=saved_callback,
-            parent=self,
-        )
-        layout.addWidget(self.composer_widget, 1)
-
-        footer = QHBoxLayout()
-        footer.addStretch()
-        self.close_button = QPushButton("Đóng")
-        self.close_button.clicked.connect(self.reject)
-        footer.addWidget(self.close_button)
-        layout.addLayout(footer)
-
-    def on_context_changed(
-        self,
-        new_project_id: str | None,
-        new_page_id: str | None,
-        new_page_name: str = "",
-    ):
-        self.composer_widget.on_context_changed(
-            new_project_id, new_page_id, new_page_name
-        )
+    def __init__(self, database, project_id, page_id, page_name="", existing_comments_provider=None, active_scope_provider=None, saved_callback=None, parent=None):
+        super().__init__(parent); self.setWindowTitle("Trộn Comment + Link"); self.setMinimumSize(980, 700); self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint); layout = QVBoxLayout(self); self.composer_widget = CommentComposerWidget(database, project_id, page_id, page_name, existing_comments_provider, active_scope_provider, saved_callback, self); layout.addWidget(self.composer_widget, 1); close = QPushButton("Đóng"); close.clicked.connect(self.reject); layout.addWidget(close)
+    def on_context_changed(self, *_): self.composer_widget.save_button.setEnabled(False); self.composer_widget.status_label.setText("Fanpage đã thay đổi; không thể lưu bản nháp cũ.")

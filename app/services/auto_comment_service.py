@@ -482,6 +482,35 @@ class AutoCommentService:
             raise AutoCommentValidationError("Không thể lưu comment do lỗi cơ sở dữ liệu.") from exc
         return item_id
 
+    def append_library_items(self, project_id: str, page_id: str, library_id: str,
+                             items: list[dict]) -> list[str]:
+        """Atomically append reviewed mixer rows without replacing library contents."""
+        if not items:
+            raise AutoCommentValidationError("Hãy chọn ít nhất một comment để lưu.")
+        clean_project, clean_page, clean_library = str(project_id or "").strip(), str(page_id or "").strip(), str(library_id or "").strip()
+        try:
+            with self.database.connection:
+                if not self.database.connection.execute("SELECT 1 FROM projects WHERE uuid=?", (clean_project,)).fetchone() or not self.database.connection.execute("SELECT 1 FROM facebook_pages WHERE project_id=? AND page_id=?", (clean_project, clean_page)).fetchone():
+                    raise AutoCommentValidationError("Dự án hoặc Fanpage đang chọn không còn hợp lệ.")
+                library = self.database.connection.execute("SELECT project_id,page_id FROM auto_comment_libraries WHERE id=?", (clean_library,)).fetchone()
+                if library is None or not library["project_id"] or not library["page_id"]:
+                    raise AutoCommentValidationError("Thư viện cũ chưa có quyền sở hữu Fanpage; hãy chọn thư viện của Fanpage hiện tại.")
+                if (library["project_id"], library["page_id"]) != (clean_project, clean_page):
+                    raise AutoCommentValidationError("Thư viện comment không thuộc Fanpage đang chọn.")
+                order = self.database.connection.execute("SELECT COALESCE(MAX(sort_order),-1)+1 FROM auto_comment_library_items WHERE library_id=?", (clean_library,)).fetchone()[0]
+                now = _now(); ids = []
+                for offset, item in enumerate(items):
+                    text = str(item.get("comment_text") or "").strip()
+                    if not text:
+                        raise AutoCommentValidationError("Nội dung comment không được để trống.")
+                    item_id = str(uuid.uuid4()); ids.append(item_id)
+                    self.database.connection.execute("""INSERT INTO auto_comment_library_items
+                        (id,library_id,source_row_id,comment_text,enabled,source_template_id,source_affiliate_link_id,sort_order,created_at,updated_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?)""", (item_id, clean_library, None, text, 1, item.get("template_id"), item.get("link_id"), order + offset, now, now))
+        except sqlite3.Error as exc:
+            raise AutoCommentValidationError("Không thể lưu comment do lỗi cơ sở dữ liệu.") from exc
+        return ids
+
     def load_library(self, library_id: str) -> list[CommentItem]:
         return [CommentItem(str(row["comment_text"]), bool(row["enabled"]), row["source_row_id"], int(row["sort_order"]))
                 for row in self.database.connection.execute(

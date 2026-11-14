@@ -209,6 +209,55 @@ class AutoCommentComposerService:
         clean_project, clean_page = self._validate_scope(project_id, page_id)
         return AutoCommentService(self.database).list_libraries(clean_project, clean_page)
 
+    def mix_drafts(self, project_id: str, page_id: str, template_ids: list[str], link_ids: list[str],
+                   mode: str = "round_robin", placement: str = "end", limit: int = 10,
+                   existing_comments: list[str] | None = None) -> list[ComposedCommentDraft]:
+        project_id, page_id = self._validate_scope(project_id, page_id)
+        if not template_ids or not link_ids:
+            raise CommentComposerError("Hãy chọn ít nhất một mẫu comment và một Affiliate URL.")
+        if mode not in {"round_robin", "all"} or placement not in {"end", "placeholder"} or limit < 1:
+            raise CommentComposerError("Cấu hình trộn comment không hợp lệ.")
+        templates = [self.template_service.get_template(project_id, page_id, str(tid)) for tid in template_ids]
+        links = [self.link_service.get_link(project_id, page_id, str(lid)) for lid in link_ids]
+        if any(not int(row.get("enabled") or 0) for row in templates + links):
+            raise CommentComposerError("Mẫu comment hoặc Affiliate URL đã bị tắt.")
+        for link in links: validate_affiliate_url(str(link["url"]))
+        pairs = [(template, links[index % len(links)]) for index, template in enumerate(templates)] if mode == "round_robin" else [(template, link) for template in templates for link in links]
+        drafts = []
+        for template, link in pairs[:limit]:
+            body = str(template["body_text"]); has_placeholder = validate_template_placeholders(body)
+            if has_placeholder:
+                text = body.replace("{affiliate_url}", str(link["url"]))
+                warnings = evaluate_draft_warnings(text, existing_comments)
+            elif placement == "end":
+                text = f"{body.rstrip()}\n{link['url']}"
+                warnings = evaluate_draft_warnings(text, existing_comments)
+            else:
+                text = body
+                warnings = ["Mẫu không có {affiliate_url}; chưa chèn link."]
+            drafts.append(ComposedCommentDraft(project_id, page_id, str(template["id"]), str(template["name"]), body, str(link["id"]), str(link["name"]), str(link["url"]), text, text, has_placeholder, warnings))
+        return drafts
+
+    def save_selected_drafts(self, drafts: list[ComposedCommentDraft], library_id: str, project_id: str, page_id: str) -> list[str]:
+        project_id, page_id = self._validate_scope(project_id, page_id)
+        payload = []
+        for draft in drafts:
+            if (draft.project_id, draft.page_id) != (project_id, page_id):
+                raise CommentComposerError("Bản nháp thuộc Fanpage khác; hãy trộn lại.")
+            try:
+                template = self.template_service.get_template(project_id, page_id, draft.template_id)
+                link = self.link_service.get_link(project_id, page_id, str(draft.affiliate_link_id))
+            except (TemplateError, AffiliateLinkError) as exc:
+                raise CommentComposerError("Nguồn mẫu hoặc Affiliate URL không còn hợp lệ; hãy trộn lại.") from exc
+            if not int(template.get("enabled") or 0) or not int(link.get("enabled") or 0):
+                raise CommentComposerError("Nguồn mẫu hoặc Affiliate URL đã bị tắt; hãy trộn lại.")
+            evaluate_draft_warnings(draft.edited_text)
+            payload.append({"comment_text": draft.edited_text, "template_id": draft.template_id, "link_id": draft.affiliate_link_id})
+        try:
+            return AutoCommentService(self.database).append_library_items(project_id, page_id, library_id, payload)
+        except AutoCommentValidationError as exc:
+            raise CommentComposerError(str(exc)) from exc
+
     def save_approved_draft(self, draft: ComposedCommentDraft, library_id: str,
                             project_id: str, page_id: str) -> str:
         clean_project, clean_page = self._validate_scope(project_id, page_id)
