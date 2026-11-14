@@ -16,6 +16,7 @@ from app.services.facebook_publishing_service import FacebookPublishingService
 from app.services.project_service import ProjectService
 from app.ui.pages.auto_comment_page import AutoCommentPage
 from app.ui.widgets.comment_template_library_widget import CommentTemplateLibraryWidget
+from app.ui.widgets.comment_composer_widget import CommentComposerDialog
 
 
 class _ManualWorker(QObject):
@@ -436,6 +437,75 @@ class TemplateTests(unittest.TestCase):
         page.save_library()
         self.assertIsNotNone(page.library_id)
         self.assertIn("Đã lưu thư viện", page.csv_status.text())
+        page.close()
+
+    def test_comment_studio_dialog_layout_presets_and_bulk_actions(self):
+        page = AutoCommentPage(self.db)
+        page._go_to_step(1)
+        page.page.setCurrentIndex(1)
+        with patch.object(QDialog, "exec", return_value=0):
+            outer = page.open_template_library()
+        lib = page.template_library_widget
+        ai = lib.create_ai_generator_dialog()
+        editor = lib.create_editor_dialog()
+        composer = CommentComposerDialog(self.db, "proj-1", "page-a", "Fanpage A")
+        for dialog in (outer, ai, editor, composer):
+            self.assertTrue(bool(dialog.windowFlags() & Qt.WindowType.WindowMaximizeButtonHint))
+            dialog.show()
+            dialog.showMaximized()
+            self.assertTrue(dialog.isMaximized())
+            dialog.showNormal()
+            self.assertFalse(dialog.isMaximized())
+
+        expected_default = (
+            "Viết mẫu bình luận tự nhiên, thân thiện để giới thiệu sản phẩm hoặc ủng hộ shop. "
+            "Không khẳng định trải nghiệm chưa được cung cấp."
+        )
+        self.assertEqual(ai.preset_combo.currentText(), "Ủng hộ shop / Giới thiệu sản phẩm")
+        self.assertEqual(ai.context_edit.toPlainText(), expected_default)
+        ai.context_edit.setPlainText("Ngữ cảnh do người dùng nhập")
+        ai.tone_combo.setCurrentIndex(1)
+        ai.count_combo.setCurrentText("5")
+        self.assertEqual(ai.context_edit.toPlainText(), "Ngữ cảnh do người dùng nhập")
+        ai.preset_combo.setCurrentText("Khen sản phẩm")
+        self.assertIn("khen sản phẩm", ai.context_edit.toPlainText())
+        ai.context_edit.setPlainText("Ngữ cảnh cần giữ khi mở lại")
+        ai.close()
+        ai = lib.create_ai_generator_dialog()
+        self.assertEqual(ai.context_edit.toPlainText(), "Ngữ cảnh cần giữ khi mở lại")
+
+        drafts = [
+            {"id": "u1", "name": "Mẫu UX 1", "category": "UX", "body_text": "Nội dung 1", "has_affiliate_placeholder": False},
+            {"id": "u2", "name": "Mẫu UX 2", "category": "UX", "body_text": "Nội dung 2", "has_affiliate_placeholder": False},
+        ]
+        with patch("app.ui.widgets.comment_template_library_widget.FacebookRequestWorker", _ManualWorker):
+            ai.run_generation()
+            _ManualWorker.instances[-1].succeeded.emit(drafts)
+            _ManualWorker.instances[-1].finished.emit()
+        QTest.mouseClick(ai.select_all_button, Qt.MouseButton.LeftButton)
+        self.assertEqual(ai.approved_count, 2)
+        self.assertEqual(ai.select_all_button.text(), "Bỏ chọn tất cả")
+        QTest.mouseClick(ai.select_all_button, Qt.MouseButton.LeftButton)
+        self.assertEqual(ai.approved_count, 0)
+        self.assertFalse(ai.save_button.isEnabled())
+        ai.select_all_button.click()
+        ai.save_selected()
+        self.assertEqual(len(self.s.list_templates("proj-1", "page-a")), 2)
+
+        self.assertEqual(lib.table.rowCount(), 2)
+        lib.select_all_button.click()
+        self.assertEqual(lib.select_all_button.text(), "Bỏ chọn tất cả")
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No) as question:
+            lib.delete_selected()
+            self.assertIn("2", question.call_args.args[2])
+        self.assertEqual(lib.table.rowCount(), 2)
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+            lib.delete_selected()
+        self.assertEqual(lib.table.rowCount(), 0)
+        self.assertEqual(self.s.list_templates("proj-1", "page-b"), [])
+
+        for dialog in (ai, editor, composer, outer):
+            dialog.close()
         page.close()
 
 

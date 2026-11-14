@@ -52,6 +52,7 @@ class _AIGeneratorDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._cleanup_callback = None
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
 
     def closeEvent(self, event):
         if self._cleanup_callback is not None:
@@ -72,6 +73,7 @@ class CommentTemplateLibraryWidget(QWidget):
         self.page_id = page_id
         self.ai_dialog = None
         self.editor_dialog = None
+        self._ai_context_text = ""
         self.setStyleSheet(_TABLE_STYLE)
         layout = QVBoxLayout(self)
         bar = QHBoxLayout()
@@ -84,22 +86,49 @@ class CommentTemplateLibraryWidget(QWidget):
         self.edit_button = QPushButton("Sửa mẫu")
         self.edit_button.clicked.connect(lambda: self.edit_selected_template())
         self.delete_button = QPushButton("Xóa mẫu")
-        self.delete_button.clicked.connect(lambda: self.delete())
+        self.delete_button.setText("Xóa đã chọn")
+        self.delete_button.clicked.connect(self.delete_selected)
+        self.select_all_button = QPushButton("Chọn tất cả")
+        self.select_all_button.clicked.connect(self.toggle_select_all)
         self.refresh_button = QPushButton("Làm mới")
         self.refresh_button.clicked.connect(lambda: self.reload())
-        for x in (self.ai_button, self.add_button, self.edit_button, self.delete_button, self.refresh_button, self.search):
+        for x in (self.ai_button, self.add_button, self.edit_button, self.select_all_button, self.delete_button, self.refresh_button, self.search):
             bar.addWidget(x)
         layout.addLayout(bar)
         self.table = _TemplateTable(0, 6)
         self.table.setHorizontalHeaderLabels(["Bật", "Tên mẫu", "Phân loại", "Nội dung", "Placeholder", "Cập nhật"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header.setStretchLastSection(True)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        for column in (1, 2, 4, 5):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setColumnWidth(0, 52)
         self.table.itemChanged.connect(self.toggle)
+        self.table.itemSelectionChanged.connect(self._update_bulk_actions)
         layout.addWidget(self.table)
         self.reload()
+
+    def _selected_template_ids(self):
+        return [
+            self.table.item(index.row(), 0).data(Qt.ItemDataRole.UserRole)
+            for index in self.table.selectionModel().selectedRows()
+            if self.table.item(index.row(), 0) is not None
+        ]
+
+    def _update_bulk_actions(self):
+        count = len(self._selected_template_ids())
+        self.delete_button.setEnabled(bool(count))
+        self.select_all_button.setText("Bỏ chọn tất cả" if self.table.rowCount() and count == self.table.rowCount() else "Chọn tất cả")
+
+    def toggle_select_all(self):
+        if self.table.rowCount() and len(self._selected_template_ids()) == self.table.rowCount():
+            self.table.clearSelection()
+        else:
+            self.table.selectAll()
+        self._update_bulk_actions()
 
     def set_context(self, project_id, page_id):
         self.project_id = project_id
@@ -133,6 +162,7 @@ class CommentTemplateLibraryWidget(QWidget):
         self.table.blockSignals(False)
         if restored_row >= 0:
             self.table.setCurrentCell(restored_row, 0)
+        self._update_bulk_actions()
 
     def selected(self):
         row = self.table.currentRow()
@@ -159,11 +189,14 @@ class CommentTemplateLibraryWidget(QWidget):
     def create_editor_dialog(self, tid=None):
         old = self.service.get_template(self.project_id, self.page_id, tid) if tid else {}
         d = QDialog(self)
-        d.setWindowTitle("Mẫu comment")
+        d.setWindowTitle("Sửa mẫu comment" if tid else "Thêm mẫu comment")
+        d.setMinimumSize(640, 440)
+        d.setWindowFlags(d.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
         f = QFormLayout(d)
         name = QLineEdit(old.get("name", ""))
         cat = QLineEdit(old.get("category", "") or "")
         body = QPlainTextEdit(old.get("body_text", ""))
+        body.setMinimumHeight(180)
         enabled = QCheckBox("Bật mẫu")
         enabled.setChecked(old.get("enabled", True))
         f.addRow("Tên mẫu", name)
@@ -205,16 +238,24 @@ class CommentTemplateLibraryWidget(QWidget):
         d.exec()
         return d
 
-    def delete(self):
-        tid = self.selected()
-        if tid and QMessageBox.question(
-            self, "Xóa mẫu", "Xóa mẫu đã chọn?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+    def delete_selected(self):
+        ids = self._selected_template_ids()
+        if ids and QMessageBox.question(
+            self, "Xóa mẫu", f"Xóa {len(ids)} mẫu đã chọn?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         ) == QMessageBox.StandardButton.Yes:
             try:
-                self.service.delete_template(self.project_id, self.page_id, tid)
+                for tid in ids:
+                    self.service.delete_template(self.project_id, self.page_id, tid)
                 self.reload()
             except TemplateError:
                 pass
+
+    def delete(self):
+        tid = self.selected()
+        if tid:
+            self.table.clearSelection()
+            self.table.selectRow(self.table.currentRow())
+            self.delete_selected()
 
     def create_ai_generator_dialog(self):
         if not self.project_id or not self.page_id:
@@ -229,6 +270,20 @@ class CommentTemplateLibraryWidget(QWidget):
         layout = QVBoxLayout(d)
         form = QFormLayout()
         context = QPlainTextEdit()
+        context.setMaximumHeight(105)
+        presets = QComboBox()
+        preset_values = {
+            "Ủng hộ shop / Giới thiệu sản phẩm": "Viết mẫu bình luận tự nhiên, thân thiện để giới thiệu sản phẩm hoặc ủng hộ shop. Không khẳng định trải nghiệm chưa được cung cấp.",
+            "Ủng hộ shop": "Viết mẫu bình luận tự nhiên, thân thiện để ủng hộ shop. Không khẳng định trải nghiệm chưa được cung cấp.",
+            "Giới thiệu sản phẩm": "Viết mẫu bình luận tự nhiên, thân thiện để giới thiệu sản phẩm. Không khẳng định trải nghiệm chưa được cung cấp.",
+            "Khen sản phẩm": "Viết mẫu bình luận lịch sự để khen sản phẩm dựa trên thông tin đã được cung cấp. Không khẳng định trải nghiệm chưa được cung cấp.",
+            "Tham khảo sản phẩm": "Viết mẫu bình luận tự nhiên để mời người xem tham khảo sản phẩm. Không khẳng định trải nghiệm chưa được cung cấp.",
+            "Tùy chỉnh": "",
+        }
+        presets.addItems(["Ủng hộ shop / Giới thiệu sản phẩm", "Ủng hộ shop", "Giới thiệu sản phẩm", "Khen sản phẩm", "Tham khảo sản phẩm", "Tùy chỉnh"])
+        default_context = "Viết mẫu bình luận tự nhiên, thân thiện để giới thiệu sản phẩm hoặc ủng hộ shop. Không khẳng định trải nghiệm chưa được cung cấp."
+        context.setPlainText(self._ai_context_text or default_context)
+        context.textChanged.connect(lambda: setattr(self, "_ai_context_text", context.toPlainText()))
         category = QLineEdit()
         tone = QComboBox()
         tone.addItems(["Tự nhiên", "Thân thiện", "Ngắn gọn"])
@@ -236,6 +291,7 @@ class CommentTemplateLibraryWidget(QWidget):
         count.addItems(["3", "5", "10"])
         placeholder = QCheckBox("Có placeholder {affiliate_url}")
         for label, field in (
+            ("Gợi ý ngữ cảnh", presets),
             ("Chủ đề / ngữ cảnh", context),
             ("Phân loại", category),
             ("Phong cách", tone),
@@ -256,6 +312,7 @@ class CommentTemplateLibraryWidget(QWidget):
         save_button = QPushButton("Lưu mẫu đã chọn")
         save_button.setEnabled(False)
         close = QPushButton("Đóng")
+        toggle_all = QPushButton("Chọn tất cả")
 
         saved_draft_ids: set[str] = set()
         state = {"worker": None, "saving": False, "updating": False}
@@ -343,9 +400,30 @@ class CommentTemplateLibraryWidget(QWidget):
                 d.saved_count = saved
                 counts_label.setText(f"Đã tạo: {generated} · Đã duyệt: {approved} · Đã lưu: {saved}")
                 save_button.setEnabled((not go.is_loading) and (not state["saving"]) and unsaved_approved > 0)
+                unsaved_rows = [
+                    r for r in range(generated)
+                    if str(results.item(r, 0).data(Qt.ItemDataRole.UserRole)) not in saved_draft_ids
+                ]
+                toggle_all.setEnabled(bool(unsaved_rows))
+                toggle_all.setText("Bỏ chọn tất cả" if unsaved_rows and all(results.item(r, 0).checkState() == Qt.CheckState.Checked for r in unsaved_rows) else "Chọn tất cả")
             finally:
                 results.blockSignals(False)
                 state["updating"] = False
+
+        def toggle_all_drafts():
+            unsaved_rows = [
+                r for r in range(results.rowCount())
+                if str(results.item(r, 0).data(Qt.ItemDataRole.UserRole)) not in saved_draft_ids
+            ]
+            select = any(results.item(r, 0).checkState() != Qt.CheckState.Checked for r in unsaved_rows)
+            for r in unsaved_rows:
+                results.item(r, 0).setCheckState(Qt.CheckState.Checked if select else Qt.CheckState.Unchecked)
+            update_state()
+
+        def apply_preset(name):
+            value = preset_values[str(name)]
+            if value:
+                context.setPlainText(value)
 
         def on_context_changed():
             if (self.project_id, self.page_id) != captured_context and results.rowCount() > 0:
@@ -512,8 +590,14 @@ class CommentTemplateLibraryWidget(QWidget):
         results.itemChanged.connect(update_state)
         save_button.clicked.connect(save)
         go.clicked.connect(run)
+        toggle_all.clicked.connect(toggle_all_drafts)
+        presets.currentTextChanged.connect(apply_preset)
         close.clicked.connect(d.reject)
-        layout.addWidget(go)
+        actions = QHBoxLayout()
+        actions.addWidget(go)
+        actions.addWidget(toggle_all)
+        actions.addStretch()
+        layout.addLayout(actions)
         layout.addWidget(results, 1)
         layout.addWidget(counts_label)
         layout.addWidget(save_button)
@@ -522,6 +606,7 @@ class CommentTemplateLibraryWidget(QWidget):
 
         d.captured_context = captured_context
         d.context_edit = context
+        d.preset_combo = presets
         d.category_edit = category
         d.tone_combo = tone
         d.count_combo = count
@@ -529,6 +614,7 @@ class CommentTemplateLibraryWidget(QWidget):
         d.results_table = results
         d.generate_button = go
         d.save_button = save_button
+        d.select_all_button = toggle_all
         d.close_button = close
         d.status_label = status
         d.counts_label = counts_label
