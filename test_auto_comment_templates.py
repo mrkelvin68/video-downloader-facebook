@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QMessageBox
 
 from app.database.connection import Database
 from app.services.auto_comment_template_service import AutoCommentTemplateService, TemplateError
+from app.services.auto_comment_service import CommentItem
 from app.services.facebook_publishing_service import FacebookPublishingService
 from app.services.project_service import ProjectService
 from app.ui.pages.auto_comment_page import AutoCommentPage
@@ -433,7 +434,7 @@ class TemplateTests(unittest.TestCase):
         page._go_to_step(1)
         page.library_name.setText("Thư viện kiểm thử")
         page.add_row()
-        page.comments.item(0, 2).setText("Bình luận thông thường")
+        page.comments.item(0, 3).setText("Bình luận thông thường")
         page.save_library()
         self.assertIsNotNone(page.library_id)
         self.assertIn("Đã lưu thư viện", page.csv_status.text())
@@ -506,6 +507,32 @@ class TemplateTests(unittest.TestCase):
 
         for dialog in (ai, editor, composer, outer):
             dialog.close()
+        page.close()
+
+    def test_comment_row_checkboxes_delete_exact_rows(self):
+        page = AutoCommentPage(self.db)
+        page.set_items([
+            CommentItem(f"Comment {number}")
+            for number in range(4)
+        ])
+        self.assertEqual(page.comments.columnCount(), 4)
+        for row in range(4):
+            page.comments.item(row, 0).setCheckState(Qt.CheckState.Checked)
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes) as question:
+            page.delete_rows()
+            self.assertIn("4", question.call_args.args[2])
+        self.assertEqual(page.comments.rowCount(), 0)
+
+        page.set_items([
+            CommentItem(f"Comment {number}")
+            for number in range(4)
+        ])
+        page.comments.item(1, 0).setCheckState(Qt.CheckState.Checked)
+        page.comments.item(3, 0).setCheckState(Qt.CheckState.Checked)
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No):
+            page.delete_rows()
+        self.assertEqual(page.comments.rowCount(), 4)
+        self.assertTrue(all(page.comments.item(row, 1).checkState() == Qt.CheckState.Checked for row in range(4)))
         page.close()
 
 
