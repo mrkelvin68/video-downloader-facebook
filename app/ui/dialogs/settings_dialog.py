@@ -18,6 +18,7 @@ from app.services.logging_service import (
     logging_service,
     validate_log_dir_writable,
 )
+from app.services.credential_service import get_ai_provider_key, set_ai_provider_key
 
 PLATFORMS = ("youtube", "facebook", "instagram")
 PLATFORM_LABELS = {"youtube": "YouTube", "facebook": "Facebook", "instagram": "Instagram"}
@@ -62,6 +63,7 @@ class SettingsDialog(QDialog):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_auth_tab(), "Xác thực tải video")
         self.tabs.addTab(self._build_log_management_tab(), "Quản lý Log")
+        self.tabs.addTab(self._build_ai_tab(), "Cấu hình AI")
         main_layout.addWidget(self.tabs)
 
         self.buttons = QDialogButtonBox(
@@ -72,6 +74,19 @@ class SettingsDialog(QDialog):
         main_layout.addWidget(self.buttons)
 
         self._refresh_dir_size()
+
+    def _build_ai_tab(self) -> QWidget:
+        container = QWidget(); layout = QVBoxLayout(container)
+        layout.addWidget(QLabel("<b>Cấu hình AI</b><br>API key chỉ được lưu trong Windows Credential Manager."))
+        self.ai_provider = QComboBox(); self.ai_provider.addItems(["OpenAI-compatible", "Ollama local"])
+        self.ai_provider.setCurrentText(self.settings.value("ai/provider", "OpenAI-compatible", type=str))
+        self.ai_base_url = QLineEdit(self.settings.value("ai/base_url", "http://localhost:20128/v1", type=str))
+        self.ai_key = QLineEdit(); self.ai_key.setEchoMode(QLineEdit.EchoMode.Password); self.ai_key.setPlaceholderText("Để trống để giữ API key đã lưu")
+        self.ai_model = QLineEdit(self.settings.value("ai/model", "", type=str))
+        self.ai_timeout = QSpinBox(); self.ai_timeout.setRange(1, 300); self.ai_timeout.setValue(self.settings.value("ai/timeout", 30, type=int))
+        for label, widget in (("Provider", self.ai_provider), ("Base URL", self.ai_base_url), ("API Key", self.ai_key), ("Model", self.ai_model), ("Timeout (giây)", self.ai_timeout)):
+            row = QHBoxLayout(); row.addWidget(QLabel(label)); row.addWidget(widget, 1); layout.addLayout(row)
+        self.ai_status = QLabel("Đã lưu" if get_ai_provider_key() else "Chưa cấu hình"); layout.addWidget(self.ai_status); layout.addStretch(); return container
 
     # --- TAB 1: Authentication ---
     def _build_auth_tab(self) -> QWidget:
@@ -370,6 +385,8 @@ class SettingsDialog(QDialog):
         logging_service.set_level(self.log_level_combo.currentText())
         logging_service.set_max_size_mb(self.max_size_spin.value())
         logging_service.set_retention_days(self.retention_spin.value())
+        self.settings.setValue("ai/provider", self.ai_provider.currentText()); self.settings.setValue("ai/base_url", self.ai_base_url.text().strip()); self.settings.setValue("ai/model", self.ai_model.text().strip()); self.settings.setValue("ai/timeout", self.ai_timeout.value())
+        if self.ai_key.text().strip(): set_ai_provider_key(self.ai_key.text())
 
         self.settings.sync()
         self.accept()
