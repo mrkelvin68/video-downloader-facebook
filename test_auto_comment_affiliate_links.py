@@ -960,7 +960,7 @@ class AffiliateLinkUITests(unittest.TestCase):
                 self.assertIn(expected_label, step2_buttons)
 
             page.add_row()
-            page.comments.item(0, 2).setText("Comment thử nghiệm Step 2")
+            page.comments.item(0, 3).setText("Comment thử nghiệm Step 2")
             page.save_library()
             self.assertIsNotNone(page.library_id)
 
