@@ -15,6 +15,7 @@ from app.ui.facebook_worker import FacebookPublishWorker, FacebookRequestWorker
 from app.ui.widgets.loading_button import LoadingButton, LoadingSpinner
 from app.ui.widgets.comment_template_library_widget import CommentTemplateLibraryWidget
 from app.ui.widgets.comment_affiliate_link_library_widget import CommentAffiliateLinkLibraryWidget
+from app.ui.widgets.comment_composer_widget import CommentComposerDialog
 
 TARGET_LABELS={"READY":"Sẵn sàng","TARGET_UNVERIFIED":"Chưa xác minh","TARGET_UNSUPPORTED":"Không hỗ trợ","PERMISSION_DENIED":"Thiếu quyền","TOKEN_MISSING":"Thiếu token","TOKEN_EXPIRED":"Token hết hạn","WRONG_PAGE":"Sai Fanpage","ERROR":"Lỗi"}
 
@@ -115,6 +116,8 @@ class AutoCommentPage(QWidget):
             self.open_template_library_button=QPushButton("Kho mẫu comment");self.open_template_library_button.clicked.connect(self.open_template_library);self.tabs.widget(1).layout().addWidget(self.open_template_library_button)
         if not hasattr(self,"open_affiliate_library_button"):
             self.open_affiliate_library_button=QPushButton("Kho link AFF");self.open_affiliate_library_button.clicked.connect(self.open_affiliate_library);self.tabs.widget(1).layout().addWidget(self.open_affiliate_library_button)
+        if not hasattr(self,"open_composer_button"):
+            self.open_composer_button=QPushButton("Tạo comment từ mẫu");self.open_composer_button.clicked.connect(self.open_comment_composer);self.tabs.widget(1).layout().addWidget(self.open_composer_button)
         self.library_picker.blockSignals(True);self.library_picker.clear();self.library_picker.addItem("Mở thư viện đã lưu…",None)
         for x in self.service.list_libraries():self.library_picker.addItem(x["name"],x["id"])
         self.library_picker.blockSignals(False);self.campaign_picker.blockSignals(True);self.campaign_picker.clear();self.campaign_picker.addItem("Mở campaign đã lưu…",None)
@@ -131,6 +134,11 @@ class AutoCommentPage(QWidget):
         if not active:
             QMessageBox.information(self,"Kho link AFF","Hãy chọn Fanpage trước khi quản lý kho link Affiliate.");return None
         dialog=QDialog(self);dialog.setWindowTitle("Kho link AFF");dialog.setMinimumSize(850,500);dialog.setWindowFlags(dialog.windowFlags()|Qt.WindowType.WindowMaximizeButtonHint);layout=QVBoxLayout(dialog);self.affiliate_library_widget=CommentAffiliateLinkLibraryWidget(self.database,*active,dialog);layout.addWidget(self.affiliate_library_widget);self.affiliate_library_dialog=dialog;dialog.exec();return dialog
+    def open_comment_composer(self):
+        active=self.page.currentData()
+        if not active:
+            QMessageBox.information(self,"Tạo comment từ mẫu","Hãy chọn Fanpage trước khi tạo comment từ mẫu.");return None
+        dialog=CommentComposerDialog(self.database,active[0],active[1],self.page.currentText(),existing_comments_provider=lambda:[x.comment_text for x in self.items() if x.comment_text.strip()],parent=self);self.composer_widget=dialog.composer_widget;self.composer_dialog=dialog;dialog.exec();return dialog
     def _workflow_step_changed(self,index):
         titles=("Chọn Fanpage & bài viết","Chuẩn bị thư viện comment","Chiến dịch & Preview","Thực hiện chiến dịch & Lịch sử");help_text=("Chọn Fanpage, tải dữ liệu Facebook, sau đó chọn bài viết.","Import CSV hoặc thêm comment cục bộ; bật các dòng hợp lệ cần dùng.","Tạo preview cục bộ, chọn các assignment được duyệt rồi lưu. Preview không đăng Facebook.","Campaign đã lưu chỉ có thể đăng đúng snapshot được duyệt sau khi bạn xác nhận rõ ràng.");self._workflow_step=index;self._workflow_titles=titles;self.workflow_help.setText(help_text[index]);self.workflow_message.setText("");self.back_button.setEnabled(index>0);self.next_button.setVisible(index<3);self._refresh_execution();self._workflow_counts()
     def _workflow_counts(self):
@@ -326,6 +334,9 @@ class AutoCommentPage(QWidget):
         if hasattr(self,"affiliate_library_widget") and self.affiliate_library_widget is not None:
             active=self.page.currentData() or (None,None)
             self.affiliate_library_widget.set_context(*active)
+        if hasattr(self,"composer_dialog") and self.composer_dialog is not None:
+            active=self.page.currentData() or (None,None)
+            self.composer_dialog.on_context_changed(active[0],active[1],self.page.currentText() if active[0] else "")
     def _invalidate(self,*_):
         if self.preview_comments:self.approved_preview_assignments={key for key in self.approved_preview_assignments if key[0] in self.selected_post_ids};self.preview_status.setText("Cấu hình đã thay đổi; hãy tạo lại preview.")
     def _summary(self):
