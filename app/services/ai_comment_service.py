@@ -10,9 +10,10 @@ from app.services.logging_service import SETTINGS_APPLICATION, SETTINGS_ORGANIZA
 class AICommentError(ValueError): pass
 
 def generate_comment_drafts(context: str, urls: list[str], count: int, tone: str) -> list[dict]:
-    settings=QSettings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION); base=str(settings.value("ai/base_url", "", type=str)).rstrip("/"); model=str(settings.value("ai/model", "", type=str)); key=get_ai_provider_key()
+    settings=QSettings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION); base=str(settings.value("ai/base_url", "", type=str)).rstrip("/"); model=str(settings.value("ai/model", "", type=str)); key=get_ai_provider_key(); provider=str(settings.value("ai/provider", "OpenAI-compatible", type=str))
     if not context.strip(): raise AICommentError("Hãy nhập ngữ cảnh Reel/sản phẩm.")
     if not base or not model: raise AICommentError("Chưa cấu hình AI. Vui lòng vào Cài đặt → Cấu hình AI.")
+    if provider == "OpenAI-compatible" and not key: raise AICommentError("Chưa cấu hình AI API key.")
     if len(urls)>count: raise AICommentError("Số URL không được lớn hơn số mẫu cần tạo.")
     prompt={"context":context,"affiliate_urls":urls,"count":count,"tone":tone,"rules":"Return JSON object {drafts:[{text,url}]}. Every url must be one supplied URL or empty. Be truthful; do not invent claims."}
     headers={"Content-Type":"application/json"};
