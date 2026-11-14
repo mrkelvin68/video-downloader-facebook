@@ -73,7 +73,8 @@ class AutoCommentPage(QWidget):
         w=QWidget();l=QVBoxLayout(w);l.addWidget(QLabel("Bước 2 · Import CSV hoặc chỉnh sửa thư viện cục bộ. Thay đổi chưa lưu vẫn được giữ khi chuyển bước."));r=QHBoxLayout();self.library_picker=QComboBox();self.library_picker.currentIndexChanged.connect(self.open_library);self.library_name=QLineEdit("Thư viện comment");self.search=QLineEdit(placeholderText="Tìm comment…");self.search.textChanged.connect(self._filter)
         for x in (self.library_picker,self.library_name,self.search):r.addWidget(x,1)
         l.addLayout(r);r=QHBoxLayout()
-        for text,fn in (("✨ AI tạo comment",self.open_ai_comment_generator),("Import CSV",self.import_csv),("Thêm dòng",self.add_row),("Xóa đã chọn",self.delete_rows),("Lưu thư viện",self.save_library),("Xóa import",self.clear_rows)):x=QPushButton(text);x.clicked.connect(fn);r.addWidget(x)
+        self.select_all_comments=QPushButton("Chọn tất cả");self.select_all_comments.clicked.connect(self.toggle_all_comment_rows);r.addWidget(self.select_all_comments)
+        for text,fn in (("Import CSV",self.import_csv),("Thêm dòng",self.add_row),("Xóa đã chọn",self.delete_rows),("Lưu thư viện",self.save_library),("Xóa khỏi màn hình",self.clear_rows),("Xóa toàn bộ thư viện",self.clear_saved_library)):x=QPushButton(text);x.clicked.connect(fn);r.addWidget(x)
         self.csv_status=QLabel();r.addWidget(self.csv_status,1);l.addLayout(r);self.comments=self._table(["Chọn","Bật","ID","Comment"],"autoCommentCommentsTable",editable=True);self.comments.setColumnWidth(0,58);self.comments.setColumnWidth(1,58);self.comments.setColumnWidth(2,100);self.comments.itemChanged.connect(self._comment_item_changed);l.addWidget(self.comments,1);l.addWidget(QLabel("Chọn các dòng cần xóa; chỉ comment bật và hợp lệ được đưa vào preview."));return w
     def _campaign(self):
         w=QWidget();l=QVBoxLayout(w);box=QGroupBox("Bước 3 · Cấu hình & xem trước");f=QFormLayout(box);self.campaign_name=QLineEdit("Auto Comment draft");self.summary=QLabel()
@@ -281,7 +282,22 @@ class AutoCommentPage(QWidget):
         if rows and QMessageBox.question(self,"Xóa comment",f"Xóa {len(rows)} dòng?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No)==QMessageBox.StandardButton.Yes:
             for r in rows:self.comments.removeRow(r)
             self._changed()
+    def toggle_all_comment_rows(self):
+        checked=any(self.comments.item(r,0).checkState()!=Qt.CheckState.Checked for r in range(self.comments.rowCount()))
+        for r in range(self.comments.rowCount()):self.comments.item(r,0).setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        self.select_all_comments.setText("Bỏ chọn tất cả" if checked else "Chọn tất cả")
     def clear_rows(self):self.comments.setRowCount(0);self.library_id=None;self._changed()
+    def clear_saved_library(self):
+        active=self.page.currentData()
+        if not self.library_id or not active:
+            QMessageBox.information(self,"Xóa thư viện","Hãy mở một thư viện của Fanpage trước khi xóa.");return
+        count=self.comments.rowCount()
+        if not count:return
+        if QMessageBox.question(self,"Xóa toàn bộ thư viện",f"Xóa vĩnh viễn {count} comment trong thư viện này?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
+        try:
+            deleted=self.service.clear_library_items(active[0],active[1],self.library_id);self.comments.setRowCount(0);self.csv_status.setText(f"Đã xóa {deleted} comment khỏi thư viện.");self.refresh_libraries();self._changed()
+        except AutoCommentValidationError as exc:
+            QMessageBox.warning(self,"Xóa thư viện",str(exc))
     def save_library(self):
         try:
             active=self.page.currentData()

@@ -525,6 +525,19 @@ class AutoCommentService:
                 for row in self.database.connection.execute(
                     "SELECT * FROM auto_comment_library_items WHERE library_id=? ORDER BY sort_order,id", (library_id,))]
 
+    def clear_library_items(self, project_id: str, page_id: str, library_id: str) -> int:
+        """Delete only items in the explicitly opened, Page-owned library."""
+        with self.database.connection:
+            library = self.database.connection.execute(
+                "SELECT project_id,page_id FROM auto_comment_libraries WHERE id=?", (library_id,)
+            ).fetchone()
+            if library is None or (library["project_id"], library["page_id"]) != (project_id, page_id):
+                raise AutoCommentValidationError("Thư viện comment không thuộc Fanpage đang chọn.")
+            cursor = self.database.connection.execute(
+                "DELETE FROM auto_comment_library_items WHERE library_id=?", (library_id,)
+            )
+        return cursor.rowcount
+
     def local_posts(self, page_id: str, start_date: str, end_date: str, content_type: str) -> list[dict]:
         # Publishing jobs have no reliable Reel discriminator. Only completed jobs with a real post ID qualify.
         if content_type == "reels":

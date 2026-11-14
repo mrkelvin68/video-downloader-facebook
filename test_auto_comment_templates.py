@@ -535,6 +535,24 @@ class TemplateTests(unittest.TestCase):
         self.assertTrue(all(page.comments.item(row, 1).checkState() == Qt.CheckState.Checked for row in range(4)))
         page.close()
 
+    def test_comment_library_select_all_and_clear_saved_rows(self):
+        page = AutoCommentPage(self.db)
+        page.page.setCurrentIndex(1)
+        page.set_items([CommentItem("A"), CommentItem("B")])
+        page.library_name.setText("Kho để xóa")
+        page.save_library()
+        library_id = page.library_id
+        page.toggle_all_comment_rows()
+        self.assertTrue(all(page.comments.item(row, 0).checkState() == Qt.CheckState.Checked for row in range(2)))
+        self.assertEqual(page.select_all_comments.text(), "Bỏ chọn tất cả")
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No):
+            page.clear_saved_library()
+        self.assertEqual(len(page.service.load_library(library_id)), 2)
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+            page.clear_saved_library()
+        self.assertEqual(page.service.load_library(library_id), [])
+        page.close()
+
 
 if __name__ == "__main__":
     unittest.main()
