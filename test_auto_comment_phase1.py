@@ -549,7 +549,7 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         page.selected_post_ids = {"reel:7"}; page._restore_target_states(); page.manual_comment.setText("Bình luận thử"); page._render_posts()
         page.tabs.setCurrentIndex(3)
         self.assertIn("Chưa có campaign đã lưu", page.test_target_info.text())
-        self.assertTrue(page.publish_one_button.isEnabled())
+        self.assertFalse(page.publish_one_button.isEnabled())
         page.history_page.setCurrentIndex(page.history_page.findData((self.project_id, "page-1"))); page.history_type.setCurrentText("REEL"); page.refresh_history()
         self.assertEqual(page.history_table.rowCount(), 1)
         self.assertEqual(page.history_table.item(0, 6).text(), "comment-1")
