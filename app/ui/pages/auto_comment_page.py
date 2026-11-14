@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QApplication, QAbstractItemView, QButtonGroup, QCh
 from PySide6.QtCore import QSettings
 from app.services.logging_service import SETTINGS_APPLICATION, SETTINGS_ORGANIZATION
 from app.services.credential_service import get_ai_provider_key
+from app.services.ai_comment_service import generate_comment_drafts, AICommentError
 from app.database.connection import Database
 from app.services.auto_comment_comment_service import AutoCommentCommentService
 from app.services.auto_comment_service import AutoCommentService, AutoCommentValidationError, CommentItem, parse_comment_csv, select_comments
@@ -216,7 +217,29 @@ class AutoCommentPage(QWidget):
             if row>=0:urls.removeRow(row)
         actions=QHBoxLayout();add=QPushButton("Thêm AFF URL");add.clicked.connect(add_url);remove=QPushButton("Xóa URL đã chọn");remove.clicked.connect(remove_url);actions.addWidget(add);actions.addWidget(remove);actions.addStretch()
         for label,field in (("Ngữ cảnh Reel/sản phẩm",context),("Phong cách",style),("Số mẫu",count)):form.addRow(label,field)
-        layout.addLayout(form);layout.addWidget(urls);layout.addLayout(actions);layout.addWidget(QLabel("Draft AI chỉ để xem xét; không tự duyệt hoặc đăng Facebook."));close=QPushButton("Đóng");close.clicked.connect(dialog.reject);layout.addWidget(close);dialog.exec()
+        results=QTableWidget(0,3);results.setHorizontalHeaderLabels(["Chọn","Nội dung comment","Affiliate URL"]);results.horizontalHeader().setStretchLastSection(True)
+        status=QLabel();generate=LoadingButton("✨ Xử lý AI / Tạo comment")
+        def run():
+            urls.closePersistentEditor(urls.currentItem()) if urls.currentItem() else None
+            values=[urls.item(i,0).text().strip() for i in range(urls.rowCount()) if urls.item(i,0) and urls.item(i,0).text().strip()]
+            if len(values)!=len(set(values)) or any(not x.startswith(("http://","https://")) for x in values):status.setText("Affiliate URL không hợp lệ hoặc bị trùng.");return
+            generate.set_loading(True);status.setText("AI đang tạo bản nháp…")
+            worker=FacebookRequestWorker(lambda:generate_comment_drafts(context.text(),values,int(count.currentText()),style.currentText()),dialog)
+            def ok(drafts):
+                results.setRowCount(0)
+                for d in drafts:
+                    r=results.rowCount();results.insertRow(r);results.setItem(r,0,self._check_item(False));results.setItem(r,1,QTableWidgetItem(d["text"]));results.setItem(r,2,QTableWidgetItem(d["url"]))
+                status.setText(f"Đã tạo {len(drafts)} bản nháp; hãy chọn để lưu.")
+            def bad(message):status.setText(message)
+            def done():generate.set_loading(False);worker.deleteLater()
+            worker.succeeded.connect(ok);worker.failed.connect(bad);worker.finished.connect(done);worker.start()
+        generate.clicked.connect(run)
+        def save():
+            chosen=[CommentItem(results.item(r,1).text(),True,None,len(self.items())+r) for r in range(results.rowCount()) if results.item(r,0).checkState()==Qt.CheckState.Checked]
+            if not chosen:status.setText("Hãy chọn ít nhất một bản nháp để lưu.");return
+            self.set_items(self.items()+chosen);self.save_library();status.setText(f"Đã lưu {len(chosen)} mẫu vào thư viện.")
+        save_button=QPushButton("Lưu mẫu đã chọn vào thư viện");save_button.clicked.connect(save)
+        dialog.setMinimumSize(900,650);dialog.setWindowFlags(dialog.windowFlags()|Qt.WindowType.WindowMaximizeButtonHint);layout.addLayout(form);layout.addWidget(urls);layout.addLayout(actions);layout.addWidget(generate);layout.addWidget(results,1);layout.addWidget(save_button);layout.addWidget(status);layout.addWidget(QLabel("Draft AI chỉ để xem xét; không tự duyệt hoặc đăng Facebook."));close=QPushButton("Đóng");close.clicked.connect(dialog.reject);layout.addWidget(close);dialog.exec()
     def import_csv(self):
         p,_=QFileDialog.getOpenFileName(self,"Chọn CSV comment","","CSV (*.csv)")
         if p:self.load_csv(Path(p))
