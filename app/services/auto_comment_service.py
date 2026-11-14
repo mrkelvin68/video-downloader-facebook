@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+from dataclasses import dataclass
 import io
 import random
 import uuid
@@ -36,6 +37,28 @@ class CsvImport:
 
 class AutoCommentValidationError(ValueError):
     pass
+
+@dataclass(frozen=True)
+class AutoCommentWorkflowValidation:
+    can_continue: bool
+    can_save: bool
+    can_execute: bool
+    error_code: str = ""
+    message: str = ""
+    affected_step: int = 0
+
+def validate_auto_comment_workflow(*, page_selected: bool, date_valid: bool, selected_posts: int,
+                                   enabled_comments: int, preview_count: int, approved_count: int,
+                                   campaign_id: str | None, save_state: str) -> AutoCommentWorkflowValidation:
+    if not page_selected: return AutoCommentWorkflowValidation(False, False, False, "PAGE_NOT_SELECTED", "Hãy chọn Fanpage.", 1)
+    if not date_valid: return AutoCommentWorkflowValidation(False, False, False, "INVALID_DATE_RANGE", "Ngày bắt đầu không được lớn hơn ngày kết thúc.", 1)
+    if not selected_posts: return AutoCommentWorkflowValidation(False, False, False, "NO_POST_SELECTED", "Hãy chọn ít nhất một bài viết hoặc Reel.", 1)
+    if not enabled_comments: return AutoCommentWorkflowValidation(True, False, False, "NO_ENABLED_COMMENT", "Hãy bật ít nhất một comment hợp lệ.", 2)
+    if not preview_count: return AutoCommentWorkflowValidation(True, False, False, "PREVIEW_MISSING", "Hãy tạo Preview ở Bước 3.", 3)
+    if not approved_count: return AutoCommentWorkflowValidation(True, False, False, "NO_APPROVED_ASSIGNMENTS", "Chưa duyệt comment nào. Hãy tích chọn assignment muốn thực hiện.", 3)
+    if save_state == "MODIFIED": return AutoCommentWorkflowValidation(True, True, False, "CAMPAIGN_DIRTY", "Preview đã thay đổi sau khi lưu. Vui lòng lưu lại chiến dịch.", 3)
+    if not campaign_id: return AutoCommentWorkflowValidation(True, True, False, "CAMPAIGN_NOT_SAVED", "Chiến dịch chưa được lưu. Hãy quay về Bước 3 và chọn Lưu campaign.", 3)
+    return AutoCommentWorkflowValidation(True, True, True)
 
 
 class AutoCommentPageAccessError(AutoCommentValidationError):
