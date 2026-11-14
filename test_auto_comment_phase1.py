@@ -234,6 +234,43 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         restored = {row["post_id"]: row["execution_status"] for row in service.campaign_execution(campaign_id)}
         self.assertEqual(restored, {"reel:1": "FAILED", "reel:2": "PENDING"})
 
+    def test_queue_reuses_target_validation_for_three_approved_comments(self):
+        service = AutoCommentService(self.database)
+        posts = [{"post_id": f"reel:{number}", "reel_id": str(number), "post_type": "Reel",
+                  "published_at": "2026-11-10T00:00:00+00:00"} for number in range(11)]
+        values = {"name": "11 reels", "project_id": self.project_id, "page_id": "page-1",
+                  "start_date": "2026-11-01", "end_date": "2026-11-13", "content_type": "Reels",
+                  "selection_mode": "random", "count": 3, "prevent_duplicates": True,
+                  "targets_by_post": {post["post_id"]: {"status": "READY", "target_id": f"target-{index}"}
+                                      for index, post in enumerate(posts)}}
+        campaign_id = service.save_preview(values, posts,
+            {post["post_id"]: ["A", "B", "C"] for post in posts}, approved_post_ids={post["post_id"] for post in posts})
+        validations = []; publishes = []
+        def validate(row):
+            validations.append(row["source_id"])
+            return {"status": "READY", "target_id": row["approved_target_id"]}
+        service.execute_campaign_queue(campaign_id, validate,
+            lambda row, _operation: publishes.append(row["id"]) or {"status": "SUCCESS", "comment_id": row["id"]})
+        self.assertEqual((len(validations), len(publishes)), (11, 33))
+
+    def test_verification_session_and_persisted_cache_count_graph_gets(self):
+        self._grant_page_read(); calls = []
+        def graph_get(path, _params, _token):
+            calls.append(path)
+            if path == "page-1": return {"id": "page-1"}
+            if path.endswith("/comments"): return {"data": []}
+            return {"id": path}
+        with patch("app.services.auto_comment_comment_service.get_page_token", return_value="page-token"), patch("app.services.auto_comment_service.get_page_token", return_value="page-token"):
+            resolver = AutoCommentCommentService(self.database, graph_get=graph_get)
+            session = resolver.begin_verification_session(self.project_id, "page-1")
+            sources = [{"post_id": f"reel:{number}", "video_id": f"target-{number}", "owner_page_id": "page-1", "post_type": "Reel"}
+                       for number in range(11)]
+            for source in sources:
+                self.assertEqual(resolver.resolve_target(self.project_id, "page-1", source, session=session)["status"], "READY")
+            fresh_call_count = len(calls)
+            self.assertTrue(resolver.resolve_target(self.project_id, "page-1", sources[0], session=session).get("cached"))
+        self.assertEqual((fresh_call_count, len(calls), calls.count("page-1")), (23, 23, 1))
+
     def test_execution_ui_enables_multi_assignment_queue(self):
         target_service = AutoCommentCommentService(self.database)
         for index in (1, 2):

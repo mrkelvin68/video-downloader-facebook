@@ -460,7 +460,7 @@ class AutoCommentService:
                FROM auto_comment_preview_items p
                LEFT JOIN auto_comment_campaign_executions e ON e.preview_item_id=p.id
                LEFT JOIN auto_comment_targets t ON t.project_id=p.project_id AND t.page_id=p.page_id
-                    AND t.source_id=p.post_id
+                    AND t.source_id=p.source_id
                WHERE p.campaign_id=? AND p.selected=1 ORDER BY p.selection_order,p.post_id""", (campaign_id,)
         )]
         for row in rows:
@@ -512,9 +512,18 @@ class AutoCommentService:
         """Run approved assignments sequentially; publisher and validation stay injectable."""
         queue = [row for row in self.campaign_execution(campaign_id) if row["execution_status"] == "PENDING"]
         results: list[dict] = []
+        verification_cache: dict[tuple[str, str, str, str], dict] = {}
         for index, row in enumerate(queue, start=1):
             try:
-                validation = validate(row)
+                key = (str(row.get("project_id") or ""), str(row.get("page_id") or ""),
+                       str(row.get("source_id") or ""), str(row.get("approved_target_id") or ""))
+                if key in verification_cache:
+                    validation = verification_cache[key]
+                else:
+                    validation = validate(row)
+                    # Transient failures are deliberately not cached.
+                    if validation.get("status") == "READY":
+                        verification_cache[key] = validation
             except Exception as exc:
                 validation = {"status": "TARGET_UNVERIFIED", "message": f"Không thể xác minh target: {exc}"}
             if validation.get("status") != "READY" or validation.get("target_id") != row.get("approved_target_id"):

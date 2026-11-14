@@ -7,8 +7,9 @@ flag supplied by the UI after its confirmation dialog has been accepted.
 from __future__ import annotations
 
 import json
+import hashlib
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -41,7 +42,23 @@ class AutoCommentCommentService:
         self._graph_get = graph_get or AutoCommentService._live_graph_get
         self._graph_post = graph_post or self._live_graph_post
 
-    def resolve_target(self, project_id: str, page_id: str, source: dict[str, Any]) -> dict[str, Any]:
+    TARGET_CACHE_TTL = timedelta(minutes=15)
+
+    def begin_verification_session(self, project_id: str, page_id: str) -> dict[str, str]:
+        """Validate a Page credential once; this context is execution-scoped."""
+        access = AutoCommentService(self.database).page_access(project_id, page_id)
+        if not access["has_token"]:
+            raise AutoCommentTargetError("TOKEN_MISSING", "Fanpage chưa có Page Access Token.")
+        AutoCommentService._require_verified_read_access(access)
+        token = get_page_token(project_id, page_id)
+        identity = self._graph_get(page_id, {"fields": "id"}, token)
+        if str(identity.get("id") or "") != page_id:
+            raise AutoCommentTargetError("WRONG_PAGE", "Page Access Token không thuộc Fanpage đang chọn.")
+        return {"project_id": project_id, "page_id": page_id, "token": token,
+                "credential_fingerprint": hashlib.sha256(token.encode()).hexdigest()}
+
+    def resolve_target(self, project_id: str, page_id: str, source: dict[str, Any], *,
+                       session: dict[str, str] | None = None) -> dict[str, Any]:
         """Use GET only to establish an actual, Page-owned comment endpoint.
 
         IDs are candidates, never transformations of one another.  A Reel with
@@ -53,17 +70,17 @@ class AutoCommentCommentService:
             raise AutoCommentTargetError("TARGET_UNVERIFIED", "Bài viết không có ID nguồn để xác minh.")
         now = _now()
         try:
-            access = AutoCommentService(self.database).page_access(project_id, page_id)
-            if not access["has_token"]:
-                raise AutoCommentTargetError("TOKEN_MISSING", "Fanpage chưa có Page Access Token.")
-            AutoCommentService._require_verified_read_access(access)
-            token = get_page_token(project_id, page_id)
-            identity = self._graph_get(page_id, {"fields": "id"}, token)
-            if str(identity.get("id") or "") != page_id:
-                raise AutoCommentTargetError("WRONG_PAGE", "Page Access Token không thuộc Fanpage đang chọn.")
+            if session is None:
+                session = self.begin_verification_session(project_id, page_id)
+            if session.get("project_id") != project_id or session.get("page_id") != page_id:
+                raise AutoCommentTargetError("WRONG_PAGE", "Verification session does not match this Page.")
+            token = session["token"]
             candidates = self._candidates(source)
             if not candidates:
                 raise AutoCommentTargetError("TARGET_UNVERIFIED", "Reel chưa có target comment được Facebook xác minh.")
+            cached = self._load_fresh_target(project_id, page_id, source_id, candidates, session)
+            if cached is not None:
+                return cached
             last_error: AutoCommentTargetError | None = None
             for candidate in candidates:
                 try:
@@ -84,7 +101,8 @@ class AutoCommentCommentService:
                     self._graph_get(f"{candidate}/comments", {"limit": "1", "summary": "true"}, token)
                     result = {"source_id": source_id, "target_id": candidate,
                               "target_type": "REEL" if source.get("post_type") == "Reel" else "POST",
-                              "status": "READY", "evidence": {"owner_id": owner_id or edge_owner_id, "checked": "comments"}}
+                              "status": "READY", "evidence": {"owner_id": owner_id or edge_owner_id, "checked": "comments",
+                              "candidates": candidates, "credential_fingerprint": session["credential_fingerprint"]}}
                     self._save_target(project_id, page_id, result, now)
                     return result
                 except AutoCommentTargetError as exc:
@@ -104,6 +122,30 @@ class AutoCommentCommentService:
                       "status": category, "evidence": {"message": str(exc)}}
             self._save_target(project_id, page_id, result, now)
             return result
+
+    def _load_fresh_target(self, project_id: str, page_id: str, source_id: str,
+                           candidates: list[str], session: dict[str, str]) -> dict[str, Any] | None:
+        """Use recent evidence only for the same Page, credential, source and target."""
+        row = self.database.connection.execute(
+            "SELECT source_id,target_id,target_type,status,evidence_json,checked_at FROM auto_comment_targets "
+            "WHERE project_id=? AND page_id=? AND source_id=?", (project_id, page_id, source_id),
+        ).fetchone()
+        if row is None or row["status"] != "READY" or str(row["target_id"] or "") not in candidates:
+            return None
+        try:
+            checked = datetime.fromisoformat(str(row["checked_at"]).replace("Z", "+00:00"))
+            evidence = json.loads(row["evidence_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if checked < datetime.now(UTC) - self.TARGET_CACHE_TTL:
+            return None
+        if evidence.get("owner_id") != page_id or evidence.get("credential_fingerprint") != session["credential_fingerprint"]:
+            return None
+        stored_candidates = evidence.get("candidates")
+        if not isinstance(stored_candidates, list) or str(row["target_id"]) not in stored_candidates:
+            return None
+        return {"source_id": source_id, "target_id": row["target_id"], "target_type": row["target_type"],
+                "status": "READY", "evidence": evidence, "cached": True}
 
     @staticmethod
     def _candidates(source: dict[str, Any]) -> list[str]:

@@ -219,7 +219,7 @@ class AutoCommentPage(QWidget):
             (ready if row["ui_preflight_status"]=="READY" else blocked).append(row)
             if row["execution_status"]=="PENDING":pending.append(row)
             if row["execution_status"]=="PUBLISHED":published.append(row)
-        eligible=[row for row in pending if row["ui_preflight_status"] not in {"IDENTITY_MISSING","SNAPSHOT_UNVERIFIED","PAGE_OR_SOURCE_MISMATCH","TARGET_ID_MISMATCH"}]
+        eligible=[row for row in pending if row["ui_preflight_status"] not in {"IDENTITY_MISSING","PAGE_OR_SOURCE_MISMATCH","TARGET_ID_MISMATCH"}]
         details=[f"Campaign: {self.campaign_name.text()}",f"Fanpage: {self.page.currentText()}",f"Assignment đã duyệt: {len(rows)} · READY: {len(ready)} · Bị chặn: {len(blocked)} · Chờ gửi: {len(pending)} · Đã gửi: {len(published)}"]
         for row in rows:
             details.append(f"{row['post_type']} {row.get('source_id') or row['post_id']} → {row['comment_text']} [Target: {row.get('approved_target_id') or 'chưa lưu'} · {row['ui_preflight_status']} · {row['execution_status']}]")
@@ -232,7 +232,7 @@ class AutoCommentPage(QWidget):
         selected=self.page.currentData();eligible=[]
         for row in rows:
             same_identity=bool(row.get("project_id")==selected[0] and row.get("page_id")==selected[1] and row.get("source_id"))
-            if row["execution_status"]=="PENDING" and same_identity and row["preflight_status"] not in {"IDENTITY_MISSING","SNAPSHOT_UNVERIFIED","TARGET_ID_MISMATCH"}:eligible.append(row)
+            if row["execution_status"]=="PENDING" and same_identity and row["preflight_status"] not in {"IDENTITY_MISSING","TARGET_ID_MISMATCH"}:eligible.append(row)
         if not eligible:self._send_status("Không có assignment hợp lệ để tự xác minh và gửi.");self._refresh_execution();return
         preview="\n".join(f"• {row['source_id']} → {row['comment_text']}" for row in eligible[:20])
         if len(eligible)>20:preview+=f"\n… và {len(eligible)-20} assignment khác"
@@ -244,10 +244,10 @@ class AutoCommentPage(QWidget):
         def operation(report_progress):
             db=Database(path)
             try:
-                comment_service=AutoCommentCommentService(db);campaign_service=AutoCommentService(db)
+                comment_service=AutoCommentCommentService(db);campaign_service=AutoCommentService(db);session=comment_service.begin_verification_session(project_id,page_id)
                 def validate(row):
                     source={"post_id":row["post_id"],"comment_target_id":row["approved_target_id"],"source_post_id":row.get("source_id"),"owner_page_id":row["page_id"],"post_type":row["post_type"]}
-                    return comment_service.resolve_target(row["project_id"],row["page_id"],source)
+                    return comment_service.resolve_target(row["project_id"],row["page_id"],source,session=session)
                 def publish(row,operation_id):return comment_service.publish_one(row["project_id"],row["page_id"],row["post_id"],row["approved_target_id"],row["comment_text"],confirmed=True,operation_id=operation_id)
                 def progress(index,count,_row,_result):report_progress(index / count * 100)
                 return campaign_service.execute_campaign_queue(campaign_id,validate,publish,progress)
