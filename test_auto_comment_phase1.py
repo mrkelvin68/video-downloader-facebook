@@ -476,7 +476,7 @@ class AutoCommentPhase1Tests(unittest.TestCase):
                        "post_type": "Reel", "published_at": "2026-11-01T00:00:00+00:00"}]
         page.selected_post_ids = {"reel:7"}; page._restore_target_states(); page._render_posts()
         self.assertEqual(page.target_states["reel:7"]["target_id"], "video-9")
-        self.assertEqual(page.posts_table.item(0, 4).text(), "Sẵn sàng")
+        self.assertEqual(page.posts_table.item(0, 6).text(), "Sẵn sàng")
         page.tabs.setCurrentIndex(2)
         self.assertIn("Target sẵn sàng: 1", page.summary.text())
         page.close()

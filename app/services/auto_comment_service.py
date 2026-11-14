@@ -234,6 +234,27 @@ class AutoCommentService:
             record["owner_page_id"] = page_id
         return normalized
 
+    def fetch_reel_views(self, project_id: str, page_id: str, posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Best-effort Page-owned Reel play counts; unavailable insight data stays unknown."""
+        access = self.page_access(project_id, page_id)
+        if not access["has_token"]:
+            return posts
+        token = get_page_token(project_id, page_id)
+        for post in posts:
+            video_id = str(post.get("video_id") or "")
+            if not video_id:
+                continue
+            try:
+                payload = self._graph_get(f"{video_id}/video_insights", {"metric": "fb_reels_total_plays", "period": "lifetime"}, token)
+                values = (payload.get("data") or [{}])[0].get("values") or []
+                value = values[-1].get("value") if values else None
+                if isinstance(value, (int, float)) and value >= 0:
+                    post["view_count"] = int(value)
+            except AutoCommentPageAccessError:
+                # Insight permissions/metrics are optional display metadata.
+                continue
+        return posts
+
     def _verify_page_token(self, page_id: str, token: str) -> None:
         payload = self._graph_get(page_id, {"fields": "id"}, token)
         if str(payload.get("id") or "") != page_id:
@@ -257,7 +278,7 @@ class AutoCommentService:
     def _read_edge(self, page_id: str, token: str, edge: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
         # A Reel ID is not a Post ID.  Request the distinct identifiers returned
         # by Graph so the resolver can validate each candidate read-only.
-        fields = "id,video_id,post_id,created_time" if edge == "video_reels" else "id,created_time"
+        fields = "id,video_id,post_id,title,description,created_time" if edge == "video_reels" else "id,message,created_time"
         until = (date.fromisoformat(end_date) + timedelta(days=1)).isoformat()
         params = {"fields": fields, "since": start_date, "until": until, "limit": "100"}
         rows: list[dict[str, Any]] = []
@@ -299,16 +320,17 @@ class AutoCommentService:
                 if not reel_id:
                     continue
                 planner_id = source_post_id or f"reel:{reel_id}"
+                title = str(row.get("title") or row.get("description") or "")
                 record = {"post_id": planner_id, "source_post_id": source_post_id, "video_id": video_id,
                           "reel_id": reel_id, "comment_target_id": source_post_id,
-                          "published_at": published_at, "post_type": "Reel"}
+                          "published_at": published_at, "post_type": "Reel", "title": title, "view_count": None}
             else:
                 source_post_id = str(row.get("source_post_id") or row.get("post_id") or row.get("id") or "")
                 if not source_post_id:
                     continue
                 record = {"post_id": source_post_id, "source_post_id": source_post_id, "video_id": None,
                           "reel_id": None, "comment_target_id": source_post_id,
-                          "published_at": published_at, "post_type": "Post"}
+                          "published_at": published_at, "post_type": "Post", "title": str(row.get("message") or ""), "view_count": None}
             unique.setdefault(record["post_id"], record)
         return sorted(unique.values(), key=lambda item: (item["published_at"], item["post_id"]), reverse=True)
 
