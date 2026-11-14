@@ -18,3 +18,6 @@ class TemplateTests(unittest.TestCase):
   with self.assertRaises(TemplateError): self.s.create_template("p","a","x","{bad}")
   self.s.create_template("p","a","x","nội dung")
   with self.assertRaises(TemplateError): self.s.create_template("p","a","x","khác")
+ def test_atomic_batch_rolls_back_duplicate(self):
+  with self.assertRaises(TemplateError): self.s.create_templates("p","a",[{"name":"a","body_text":"x"},{"name":"a","body_text":"y"}])
+  self.assertEqual(self.s.list_templates("p","a"),[])

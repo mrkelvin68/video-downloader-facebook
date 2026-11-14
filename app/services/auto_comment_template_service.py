@@ -33,3 +33,12 @@ class AutoCommentTemplateService:
         if cur.rowcount!=1: raise TemplateError("Không tìm thấy mẫu trong Fanpage đang chọn.")
     def set_template_enabled(self,project_id,page_id,template_id,enabled):
         row=self.get_template(project_id,page_id,template_id);self.update_template(project_id,page_id,template_id,row["name"],row["body_text"],row["category"],enabled)
+ def create_templates(self,project_id,page_id,templates):
+  """Atomic batch create; validation/conflicts roll back every selected draft."""
+  ids=[];now=_now()
+  try:
+   with self.database.connection:
+    for item in templates:
+     _validate(item['name'],item['body_text']);tid=str(uuid.uuid4());self.database.connection.execute("INSERT INTO auto_comment_templates VALUES (?,?,?,?,?,?,?,?,?)",(tid,project_id,page_id,item['name'].strip(),item['body_text'],item.get('category') or None,int(item.get('enabled',True)),now,now));ids.append(tid)
+  except Exception as exc: raise TemplateError("Không thể lưu mẫu: tên mẫu trùng hoặc dữ liệu không hợp lệ.") from exc
+  return ids

@@ -61,4 +61,15 @@ class CommentTemplateLibraryWidget(QWidget):
    def fail(msg):status.setText(msg)
    def done():go.set_loading(False);worker.deleteLater()
    worker.succeeded.connect(ok);worker.failed.connect(fail);worker.finished.connect(done);worker.start()
-  go.clicked.connect(run);close=QPushButton("Đóng");close.clicked.connect(d.reject);layout.addWidget(go);layout.addWidget(results,1);layout.addWidget(status);layout.addWidget(close);d.exec()
+  def save():
+   selected=[]
+   for r in range(results.rowCount()):
+    if results.item(r,0).checkState()==Qt.CheckState.Checked:selected.append({'id':results.item(r,0).data(Qt.ItemDataRole.UserRole),'name':results.item(r,1).text(),'category':results.item(r,2).text(),'body_text':results.item(r,3).text(),'enabled':True})
+   if not selected:status.setText("Hãy chọn ít nhất một mẫu để lưu.");return
+   try:
+    self.service.create_templates(self.project_id,self.page_id,selected)
+    for r in range(results.rowCount()):
+     if results.item(r,0).checkState()==Qt.CheckState.Checked:results.item(r,0).setCheckState(Qt.CheckState.Unchecked);results.item(r,0).setFlags(Qt.ItemFlag.NoItemFlags)
+    self.reload();status.setText(f"Đã lưu {len(selected)} mẫu.")
+   except TemplateError as exc:status.setText(str(exc))
+  save_button=QPushButton("Lưu mẫu đã chọn");save_button.clicked.connect(save);go.clicked.connect(run);close=QPushButton("Đóng");close.clicked.connect(d.reject);layout.addWidget(go);layout.addWidget(results,1);layout.addWidget(save_button);layout.addWidget(status);layout.addWidget(close);d.exec()
