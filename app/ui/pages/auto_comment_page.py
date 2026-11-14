@@ -3,7 +3,10 @@ from datetime import date
 import uuid
 from pathlib import Path
 from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtWidgets import QApplication, QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDateEdit, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDateEdit, QDialog, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtCore import QSettings
+from app.services.logging_service import SETTINGS_APPLICATION, SETTINGS_ORGANIZATION
+from app.services.credential_service import get_ai_provider_key
 from app.database.connection import Database
 from app.services.auto_comment_comment_service import AutoCommentCommentService
 from app.services.auto_comment_service import AutoCommentService, AutoCommentValidationError, CommentItem, parse_comment_csv, select_comments
@@ -66,7 +69,7 @@ class AutoCommentPage(QWidget):
         w=QWidget();l=QVBoxLayout(w);l.addWidget(QLabel("Bước 2 · Import CSV hoặc chỉnh sửa thư viện cục bộ. Thay đổi chưa lưu vẫn được giữ khi chuyển bước."));r=QHBoxLayout();self.library_picker=QComboBox();self.library_picker.currentIndexChanged.connect(self.open_library);self.library_name=QLineEdit("Thư viện comment");self.search=QLineEdit(placeholderText="Tìm comment…");self.search.textChanged.connect(self._filter)
         for x in (self.library_picker,self.library_name,self.search):r.addWidget(x,1)
         l.addLayout(r);r=QHBoxLayout()
-        for text,fn in (("Import CSV",self.import_csv),("Thêm dòng",self.add_row),("Xóa đã chọn",self.delete_rows),("Lưu thư viện",self.save_library),("Xóa import",self.clear_rows)):x=QPushButton(text);x.clicked.connect(fn);r.addWidget(x)
+        for text,fn in (("✨ AI tạo comment",self.open_ai_comment_generator),("Import CSV",self.import_csv),("Thêm dòng",self.add_row),("Xóa đã chọn",self.delete_rows),("Lưu thư viện",self.save_library),("Xóa import",self.clear_rows)):x=QPushButton(text);x.clicked.connect(fn);r.addWidget(x)
         self.csv_status=QLabel();r.addWidget(self.csv_status,1);l.addLayout(r);self.comments=self._table(["Bật","ID","Comment"],"autoCommentCommentsTable",editable=True);self.comments.setColumnWidth(0,58);self.comments.setColumnWidth(1,100);self.comments.itemChanged.connect(self._changed);l.addWidget(self.comments,1);l.addWidget(QLabel("CSV gốc không bị thay đổi. Chỉ comment bật và hợp lệ được đưa vào preview."));return w
     def _campaign(self):
         w=QWidget();l=QVBoxLayout(w);box=QGroupBox("Bước 3 · Cấu hình & xem trước");f=QFormLayout(box);self.campaign_name=QLineEdit("Auto Comment draft");self.summary=QLabel()
@@ -200,6 +203,13 @@ class AutoCommentPage(QWidget):
         for it in items:r=self.comments.rowCount();self.comments.insertRow(r);self.comments.setItem(r,0,self._check_item(it.enabled));self.comments.setItem(r,1,QTableWidgetItem(it.source_row_id or ""));self.comments.setItem(r,2,QTableWidgetItem(it.comment_text))
         self.comments.blockSignals(False);self._changed()
     def items(self):return [CommentItem(self.comments.item(r,2).text(),self.comments.item(r,0).checkState()==Qt.CheckState.Checked,self.comments.item(r,1).text() or None,r) for r in range(self.comments.rowCount())]
+    def open_ai_comment_generator(self):
+        settings=QSettings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION)
+        if not settings.value("ai/model", "", type=str) or not (get_ai_provider_key() or settings.value("ai/provider", "", type=str)=="Ollama local"):
+            QMessageBox.information(self,"Cấu hình AI","Chưa cấu hình AI. Vui lòng vào Cài đặt → Cấu hình AI.");return
+        dialog=QDialog(self);dialog.setWindowTitle("✨ AI tạo comment");layout=QVBoxLayout(dialog);form=QFormLayout();context=QLineEdit();url=QLineEdit();style=QComboBox();style.addItems(["Tự nhiên","Thân thiện","Ngắn gọn"]);count=QComboBox();count.addItems(["3","5","10"])
+        for label,field in (("Ngữ cảnh Reel/sản phẩm",context),("Affiliate URL (tùy chọn)",url),("Phong cách",style),("Số mẫu",count)):form.addRow(label,field)
+        layout.addLayout(form);layout.addWidget(QLabel("Draft AI chỉ để xem xét; không tự duyệt hoặc đăng Facebook."));close=QPushButton("Đóng");close.clicked.connect(dialog.reject);layout.addWidget(close);dialog.exec()
     def import_csv(self):
         p,_=QFileDialog.getOpenFileName(self,"Chọn CSV comment","","CSV (*.csv)")
         if p:self.load_csv(Path(p))
