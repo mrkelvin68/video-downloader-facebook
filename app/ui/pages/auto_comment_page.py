@@ -3,7 +3,7 @@ from datetime import date
 import uuid
 from pathlib import Path
 from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtWidgets import QApplication, QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDateEdit, QDialog, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDateEdit, QDialog, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget
 from PySide6.QtCore import QSettings
 from app.services.logging_service import SETTINGS_APPLICATION, SETTINGS_ORGANIZATION
 from app.services.credential_service import get_ai_provider_key
@@ -66,7 +66,7 @@ class AutoCommentPage(QWidget):
     def _posts(self):
         w=QWidget();l=QVBoxLayout(w);box=QGroupBox("Bước 1 · Chọn Fanpage & bài viết");f=QFormLayout(box);self.page=QComboBox();self.page.currentIndexChanged.connect(self._page_changed);manage=QPushButton("Quản lý Fanpage");manage.clicked.connect(self.pageManagementRequested.emit);pr=QHBoxLayout();pr.addWidget(self.page,1);pr.addWidget(manage);self.start_date,self.end_date=QDateEdit(),QDateEdit()
         for x in (self.start_date,self.end_date):x.setCalendarPopup(True);x.setDisplayFormat("yyyy-MM-dd");x.dateChanged.connect(self._invalidate)
-        self.start_date.setDate(date.today().replace(day=1));self.end_date.setDate(date.today());self.content_type=QComboBox();self.content_type.addItems(["Tất cả","Reels","Bài viết thường"]);self.content_type.currentIndexChanged.connect(self._invalidate);self.load_posts_button=LoadingButton("Tải bài viết");self.load_posts_button.setObjectName("primary");self.load_posts_button.clicked.connect(self.load_posts);f.addRow("Fanpage",pr);f.addRow("Từ ngày",self.start_date);f.addRow("Đến ngày",self.end_date);f.addRow("Loại",self.content_type);f.addRow(self.load_posts_button);l.addWidget(box)
+        self.start_date.setDate(date.today().replace(day=1));self.end_date.setDate(date.today());self.content_type=QComboBox();self.content_type.addItems(["Tất cả","Reels","Bài viết thường"]);self.content_type.currentIndexChanged.connect(self._invalidate);self.post_limit=QSpinBox();self.post_limit.setRange(1,100);self.post_limit.setValue(10);self.post_limit.valueChanged.connect(self._invalidate);self.load_posts_button=LoadingButton("Tải bài viết");self.load_posts_button.setObjectName("primary");self.load_posts_button.clicked.connect(self.load_posts);f.addRow("Fanpage",pr);f.addRow("Từ ngày",self.start_date);f.addRow("Đến ngày",self.end_date);f.addRow("Loại",self.content_type);f.addRow("Giới hạn",self.post_limit);f.addRow(self.load_posts_button);l.addWidget(box)
         r=QHBoxLayout();self.select_all_posts=QPushButton("Chọn tất cả");self.select_all_posts.clicked.connect(lambda:self._all_posts(True));self.clear_all_posts=QPushButton("Bỏ chọn tất cả");self.clear_all_posts.clicked.connect(lambda:self._all_posts(False));self.post_sort=QComboBox();self.post_sort.addItems(["Ngày mới nhất","Ngày cũ nhất","Lượt xem cao nhất","Lượt xem thấp nhất"]);self.post_sort.currentIndexChanged.connect(self._sort_posts);verify=QPushButton("Xác minh target đã chọn");verify.clicked.connect(self.verify_selected_targets);self.post_status=QLabel("Chưa tải bài viết.");r.addWidget(self.select_all_posts);r.addWidget(self.clear_all_posts);r.addWidget(QLabel("Sắp xếp theo"));r.addWidget(self.post_sort);r.addWidget(verify);r.addWidget(self.post_status,1);l.addLayout(r);self.posts_table=self._table(["Chọn","Tiêu đề / Nội dung","Ngày đăng","Loại","Lượt xem","ID nguồn","Target"],"autoCommentPostsTable");self.posts_table.setColumnWidth(0,58);self.posts_table.setColumnWidth(1,320);self.posts_table.setColumnWidth(2,150);self.posts_table.setColumnWidth(3,75);self.posts_table.setColumnWidth(4,100);self.posts_table.setColumnWidth(5,220);self.posts_table.itemChanged.connect(self._post_changed);self.posts_table.viewport().installEventFilter(self);l.addWidget(self.posts_table,1)
         self.loading_container=QFrame(self.posts_table.viewport(),objectName="autoCommentLoading");o=QVBoxLayout(self.loading_container);o.setAlignment(Qt.AlignmentFlag.AlignCenter);card=QFrame(self.loading_container,objectName="autoCommentLoadingCard");c=QVBoxLayout(card);c.setContentsMargins(32,24,32,24);c.setSpacing(10);c.setAlignment(Qt.AlignmentFlag.AlignCenter);self.table_spinner=LoadingSpinner(32,card);c.addWidget(self.table_spinner,0,Qt.AlignmentFlag.AlignCenter);lt=QLabel("Đang tải dữ liệu từ Facebook...",card,objectName="autoCommentLoadingTitle");lt.setAlignment(Qt.AlignmentFlag.AlignCenter);c.addWidget(lt);ls=QLabel("Hệ thống đang đồng bộ bài viết và Reels, vui lòng đợi…",card,objectName="autoCommentLoadingSubtitle");ls.setAlignment(Qt.AlignmentFlag.AlignCenter);c.addWidget(ls);o.addWidget(card,0,Qt.AlignmentFlag.AlignCenter);self.table_overlay=self.loading_container;self.loading_container.hide();l.addWidget(QLabel("Reel chỉ trở thành target gửi được sau khi xác minh GET-only; không có ID nào được tự suy diễn."));return w
     def _library(self):
@@ -104,9 +104,11 @@ class AutoCommentPage(QWidget):
         for x in (self.history_page,self.history_type,self.history_status,self.history_from,self.history_to,refresh):filters.addWidget(x)
         h.addLayout(filters);self.history_table=self._table(["Thời gian","Fanpage","Loại","Nguồn","Target","Comment","Comment ID","Xuất bản","Lỗi","Link"],"autoCommentHistoryTable");self.history_table.setColumnWidth(0,145);self.history_table.setColumnWidth(1,150);self.history_table.setColumnWidth(3,145);self.history_table.setColumnWidth(4,145);self.history_table.setColumnWidth(5,220);self.history_table.setColumnWidth(6,210);h.addWidget(self.history_table,1);actions=QHBoxLayout();copy=QPushButton("Sao chép Comment ID");copy.clicked.connect(self.copy_history_comment_id);self.open_history_link=QPushButton("Không có liên kết trực tiếp");self.open_history_link.setEnabled(False);actions.addWidget(copy);actions.addWidget(self.open_history_link);actions.addStretch();h.addLayout(actions);l.addWidget(history,1);l.addWidget(self.test_status);return w
     def refresh_pages(self):
-        old=self.page.currentData();self.page.blockSignals(True);self.page.clear();self.page.addItem("Chọn Fanpage",None)
+        old=self.page.currentData();old_page_id=old[1] if old else None;self.page.blockSignals(True);self.page.clear();self.page.addItem("Chọn Fanpage",None)
         for p in self.service.list_pages():self.page.addItem(p["page_name"],(p["project_id"],p["page_id"]))
-        self.page.setCurrentIndex(max(0,self.page.findData(old)));self.page.blockSignals(False)
+        index=self.page.findData(old)
+        if index<0 and old_page_id:index=next((i for i in range(1,self.page.count()) if self.page.itemData(i)[1]==old_page_id),-1)
+        self.page.setCurrentIndex(max(0,index));self.page.blockSignals(False)
         if hasattr(self,"history_page"):
             current=self.history_page.currentData();self.history_page.blockSignals(True);self.history_page.clear();self.history_page.addItem("Tất cả Fanpage",None)
             for p in self.service.list_pages():self.history_page.addItem(f"{p['page_name']} · {p['page_id']}",(p["project_id"],p["page_id"]))
@@ -176,7 +178,7 @@ class AutoCommentPage(QWidget):
         def operation():
             db=Database(path)
             try:
-                service=AutoCommentService(db);posts=service.fetch_posts(project_id,page_id,self.start_date.text(),self.end_date.text(),kind)
+                service=AutoCommentService(db);posts=service.fetch_posts(project_id,page_id,self.start_date.text(),self.end_date.text(),kind,self.post_limit.value())
                 return service.fetch_reel_views(project_id,page_id,posts)
             finally:db.close()
         worker=FacebookRequestWorker(operation,self);self._posts_worker=worker
@@ -229,11 +231,11 @@ class AutoCommentPage(QWidget):
         worker.succeeded.connect(succeeded);worker.failed.connect(failed);worker.finished.connect(finished);worker.start()
     def set_items(self,items):
         self.comments.blockSignals(True);self.comments.setRowCount(0)
-        for it in items:r=self.comments.rowCount();self.comments.insertRow(r);self.comments.setItem(r,0,self._check_item(False));self.comments.setItem(r,1,self._check_item(it.enabled));self.comments.setItem(r,2,QTableWidgetItem(it.source_row_id or ""));self.comments.setItem(r,3,QTableWidgetItem(it.comment_text))
+        for it in items:r=self.comments.rowCount();self.comments.insertRow(r);self.comments.setItem(r,0,self._check_item(False));self.comments.setItem(r,1,self._check_item(it.enabled));self.comments.setItem(r,2,QTableWidgetItem(it.source_row_id or ""));comment=QTableWidgetItem(it.comment_text);comment.setData(Qt.ItemDataRole.UserRole,it.library_item_id);self.comments.setItem(r,3,comment)
         self.comments.blockSignals(False);self._changed()
     def _comment_item_changed(self,item):
         if item.column()!=0:self._changed()
-    def items(self):return [CommentItem(self.comments.item(r,3).text(),self.comments.item(r,1).checkState()==Qt.CheckState.Checked,self.comments.item(r,2).text() or None,r) for r in range(self.comments.rowCount())]
+    def items(self):return [CommentItem(self.comments.item(r,3).text(),self.comments.item(r,1).checkState()==Qt.CheckState.Checked,self.comments.item(r,2).text() or None,r,self.comments.item(r,3).data(Qt.ItemDataRole.UserRole)) for r in range(self.comments.rowCount())]
     def open_ai_comment_generator(self):
         settings=QSettings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION)
         if not settings.value("ai/model", "", type=str) or not (get_ai_provider_key() or settings.value("ai/provider", "", type=str)=="Ollama local"):
@@ -280,6 +282,10 @@ class AutoCommentPage(QWidget):
     def delete_rows(self):
         rows=sorted((r for r in range(self.comments.rowCount()) if self.comments.item(r,0).checkState()==Qt.CheckState.Checked),reverse=True)
         if rows and QMessageBox.question(self,"Xóa comment",f"Xóa {len(rows)} dòng?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No)==QMessageBox.StandardButton.Yes:
+            item_ids=[self.comments.item(r,3).data(Qt.ItemDataRole.UserRole) for r in rows]
+            if self.library_id and any(item_ids):
+                try:self.service.delete_library_items(self.library_id,item_ids)
+                except AutoCommentValidationError as exc:QMessageBox.warning(self,"Xóa comment",str(exc));return
             for r in rows:self.comments.removeRow(r)
             self._changed()
     def toggle_all_comment_rows(self):
@@ -288,20 +294,19 @@ class AutoCommentPage(QWidget):
         self.select_all_comments.setText("Bỏ chọn tất cả" if checked else "Chọn tất cả")
     def clear_rows(self):self.comments.setRowCount(0);self.library_id=None;self._changed()
     def clear_saved_library(self):
-        active=self.page.currentData()
-        if not self.library_id or not active:
-            QMessageBox.information(self,"Xóa thư viện","Hãy mở một thư viện của Fanpage trước khi xóa.");return
+        if not self.library_id:
+            QMessageBox.information(self,"Xóa thư viện","Hãy mở một thư viện comment trước khi xóa.");return
         count=self.comments.rowCount()
         if not count:return
         if QMessageBox.question(self,"Xóa toàn bộ thư viện",f"Xóa vĩnh viễn {count} comment trong thư viện này?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
         try:
-            deleted=self.service.clear_library_items(active[0],active[1],self.library_id);self.comments.setRowCount(0);self.csv_status.setText(f"Đã xóa {deleted} comment khỏi thư viện.");self.refresh_libraries();self._changed()
+            deleted=self.service.clear_library_items(self.library_id);self.comments.setRowCount(0);self.csv_status.setText(f"Đã xóa {deleted} comment khỏi thư viện.");self.refresh_libraries();self._changed()
         except AutoCommentValidationError as exc:
             QMessageBox.warning(self,"Xóa thư viện",str(exc))
     def save_library(self):
         try:
             active=self.page.currentData()
-            self.library_id=self.service.save_library(self.library_name.text(),self.items(),self.library_id,*(active or (None,None)))
+            self.library_id=self.service.save_library(self.library_name.text(),self.items(),self.library_id,*(active or (None,None)));self.set_items(self.service.load_library(self.library_id))
             self.refresh_libraries();self.csv_status.setText("Đã lưu thư viện.")
         except AutoCommentValidationError as e:self.csv_status.setText(f"Không thể lưu thư viện: {e}");QMessageBox.warning(self,"Thư viện",str(e))
     def open_library(self):

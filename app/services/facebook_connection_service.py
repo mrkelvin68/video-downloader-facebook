@@ -195,6 +195,46 @@ class FacebookConnectionService:
         self.client_factory = client_factory
         self.publishing = FacebookPublishingService(database)
 
+    def connect_central(self, token: str) -> list[dict[str, Any]]:
+        """Connect Pages at application scope, independently of any Project."""
+        pages = self.client_factory(token).validate_and_list_pages()
+        set_meta_token(token)
+        self.publishing.save_connected_pages(pages)
+        for page in pages:
+            if page.get("access_token"):
+                set_page_token(str(page["id"]), str(page["access_token"]))
+        return pages
+
+    def test_central(self) -> list[dict[str, Any]]:
+        validated: list[dict[str, Any]] = []
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        for page in self.publishing.list_connected_pages():
+            page_id = str(page["page_id"])
+            status, message = "UNKNOWN", None
+            token = get_page_token(page_id)
+            if not token:
+                status, message = "UNKNOWN", "Thiếu Page Access Token"
+            else:
+                try:
+                    result = self.client_factory(token).verify_page_read_access(page_id)
+                    validated.append(result); status = "VALID"
+                except FacebookConnectionError as exc:
+                    status = {"expired": "EXPIRED", "permission": "PERMISSION_MISSING"}.get(exc.category, "CHECK_FAILED")
+                    message = str(exc)
+            with self.database.connection:
+                self.database.connection.execute(
+                    """UPDATE facebook_page_connections SET token_status=?,last_validation_attempt_at=?,
+                       last_validated_at=CASE WHEN ?='VALID' THEN ? ELSE last_validated_at END,
+                       last_error_message=?,updated_at=? WHERE page_id=?""",
+                    (status, now, status, now, message, now, page_id),
+                )
+        return validated
+
+    def disconnect_central_page(self, page_id: str) -> None:
+        delete_page_token(page_id)
+        with self.database.connection:
+            self.database.connection.execute("DELETE FROM facebook_page_connections WHERE page_id=?", (page_id,))
+
     def connect(self, project_id: str, token: str) -> list[dict[str, Any]]:
         client = self.client_factory(token)
         pages = client.validate_and_list_pages()

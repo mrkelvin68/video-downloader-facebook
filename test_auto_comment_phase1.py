@@ -145,6 +145,21 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         self.assertIn("post_id", reel_request["fields"])
         self.assertTrue(all(row["owner_page_id"] == "page-1" for row in rows))
 
+    def test_post_fetch_limit_defaults_to_ten(self):
+        FacebookPublishingService(self.database).save_pages(self.project_id, [
+            {"id": "page-1", "name": "Page 1", "permissions": ["pages_read_engagement"]},
+        ])
+        self._grant_page_read()
+        source = [
+            {"id": f"post-{number}", "created_time": f"2026-01-{number:02d}T00:00:00+00:00"}
+            for number in range(1, 13)
+        ]
+        with patch("app.services.auto_comment_service.get_page_token", return_value="page-token"):
+            rows = AutoCommentService(self.database).fetch_posts(
+                self.project_id, "page-1", "2026-01-01", "2026-01-31", "posts", request=lambda *_args: source,
+            )
+        self.assertEqual(len(rows), 10)
+
     def test_live_sync_rejects_page_token_for_another_page(self):
         FacebookPublishingService(self.database).save_pages(self.project_id, [
             {"id": "page-1", "name": "Page 1", "permissions": ["pages_read_engagement"]},

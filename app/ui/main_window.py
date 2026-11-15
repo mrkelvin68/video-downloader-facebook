@@ -277,7 +277,6 @@ class MainWindow(QMainWindow):
         self.page_management_page.connectRequested.connect(self._page_management_connect)
         self.page_management_page.testRequested.connect(self._page_management_test)
         self.page_management_page.syncRequested.connect(self._page_management_sync)
-        self.page_management_page.defaultRequested.connect(self._page_management_default)
         self.page_management_page.disconnectRequested.connect(self._page_management_disconnect)
         self.sidebar.settingsRequested.connect(self.show_settings)
         self.viral_reels_page.findPagesRequested.connect(self.find_viral_pages)
@@ -650,6 +649,15 @@ class MainWindow(QMainWindow):
         finally:
             worker_database.close()
 
+    @staticmethod
+    def _facebook_connection_central_in_worker(database_path: str, token: str | None, action: str):
+        worker_database = Database(database_path)
+        try:
+            service = FacebookConnectionService(worker_database)
+            return service.connect_central(token or "") if action == "connect" else service.test_central()
+        finally:
+            worker_database.close()
+
     def _run_facebook_request(self, kind: str, button, operation, on_success) -> None:
         if kind in self._facebook_workers or self.current_project is None:
             return
@@ -986,7 +994,12 @@ class MainWindow(QMainWindow):
         worker.finished.connect(finished)
         worker.start()
 
-    def _page_management_connect(self, project_id: str, token: str) -> None:
+    def _page_management_connect(self, project_id: str, token: str | None = None) -> None:
+        if token is None:
+            token = project_id
+            database_path = self.database.path
+            self._run_page_management_request("page-management-connect", lambda: self._facebook_connection_central_in_worker(database_path, token or "", "connect"), self.page_management_page.set_verified)
+            return
         database_path = self.database.path
         self._run_page_management_request(
             "page-management-connect",
@@ -994,15 +1007,20 @@ class MainWindow(QMainWindow):
             lambda pages: self.page_management_page.set_verified(project_id, pages),
         )
 
-    def _page_management_test(self, project_id: str) -> None:
+    def _page_management_test(self, project_id: str | None = None) -> None:
         database_path = self.database.path
+        if project_id is None:
+            self._run_page_management_request("page-management-test", lambda: self._facebook_connection_central_in_worker(database_path, None, "test"), self.page_management_page.set_verified)
+            return
         self._run_page_management_request(
             "page-management-test",
             lambda: self._facebook_connection_in_worker(database_path, project_id, None, "test"),
             lambda pages: self.page_management_page.set_verified(project_id, pages),
         )
 
-    def _page_management_sync(self, project_id: str) -> None:
+    def _page_management_sync(self, project_id: str | None = None) -> None:
+        if project_id is None:
+            self._page_management_test(); return
         database_path = self.database.path
 
         def sync():
@@ -1027,7 +1045,15 @@ class MainWindow(QMainWindow):
         except FacebookConnectionError as exc:
             self.page_management_page.set_status(str(exc))
 
-    def _page_management_disconnect(self, project_id: str, page_id: str) -> None:
+    def _page_management_disconnect(self, project_id: str, page_id: str | None = None) -> None:
+        if page_id is None:
+            page_id = project_id
+            try:
+                self.facebook_connection.disconnect_central_page(page_id)
+                self.page_management_page.set_status("Đã ngắt kết nối Fanpage."); self.page_management_page.refresh_pages(); self.auto_comment_page.refresh_pages()
+            except FacebookConnectionError as exc:
+                self.page_management_page.set_status(str(exc))
+            return
         try:
             self.facebook_connection.disconnect_page(project_id, page_id)
             self.page_management_page.set_status("Đã ngắt kết nối Fanpage.")

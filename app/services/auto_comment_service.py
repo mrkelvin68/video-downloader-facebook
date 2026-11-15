@@ -29,6 +29,7 @@ class CommentItem:
     enabled: bool = True
     source_row_id: str | None = None
     sort_order: int = 0
+    library_item_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -138,14 +139,24 @@ class AutoCommentService:
         self._graph_get = graph_get or self._live_graph_get
 
     def list_pages(self) -> list[dict]:
-        return [dict(row) for row in self.database.connection.execute(
+        rows = self.database.connection.execute(
             """SELECT project_id, page_id, page_name, permissions_json
                FROM facebook_pages ORDER BY page_name COLLATE NOCASE, project_id"""
-        )]
+        )
+        pages: dict[str, dict] = {}
+        for row in rows:
+            page = dict(row)
+            if page["page_id"] not in pages:
+                pages[page["page_id"]] = page
+        return list(pages.values())
 
     def page_access(self, project_id: str, page_id: str) -> dict[str, Any]:
         row = self.database.connection.execute(
-            "SELECT permissions_json, read_access_status FROM facebook_pages WHERE project_id=? AND page_id=?",
+            """SELECT COALESCE(c.permissions_json,p.permissions_json) AS permissions_json,
+                      CASE WHEN c.token_status IS NULL OR c.token_status='UNKNOWN'
+                           THEN p.read_access_status ELSE c.token_status END AS read_access_status
+               FROM facebook_pages p LEFT JOIN facebook_page_connections c ON c.page_id=p.page_id
+               WHERE p.project_id=? AND p.page_id=?""",
             (project_id, page_id),
         ).fetchone()
         if row is None:
@@ -155,12 +166,13 @@ class AutoCommentService:
         except (TypeError, json.JSONDecodeError):
             permissions = set()
         has_token = bool(get_page_token(project_id, page_id))
+        status = str(row["read_access_status"] or "UNKNOWN")
         return {
             "has_token": has_token,
             "can_read_posts": REQUIRED_READ_PERMISSION in permissions,
             "can_manage_comments": REQUIRED_COMMENT_PERMISSION in permissions,
             "verified": bool(permissions),
-            "read_status": str(row["read_access_status"] or "UNVERIFIED"),
+            "read_status": {"VALID": "GRANTED", "EXPIRED": "TOKEN_EXPIRED", "PERMISSION_MISSING": "DENIED"}.get(status, status),
         }
 
     def _fetch_posts_single_page(
@@ -232,12 +244,14 @@ class AutoCommentService:
         ]
 
     def fetch_posts(
-        self, project_id: str, page_id: str, start_date: str, end_date: str, content_type: str,
+        self, project_id: str, page_id: str, start_date: str, end_date: str, content_type: str, limit: int = 10,
         *, request: Callable[[str, str, str, str], list[dict[str, Any]]] | None = None,
     ) -> list[dict[str, Any]]:
         """Read normal Page posts and Reels; this service never sends a Graph POST."""
         if content_type not in {"all", "posts", "reels"}:
             raise AutoCommentValidationError("Loại bài viết không hợp lệ.")
+        if not 1 <= limit <= 100:
+            raise AutoCommentValidationError("Giới hạn bài viết phải từ 1 đến 100.")
         access = self.page_access(project_id, page_id)
         if not access["has_token"]:
             raise AutoCommentPageAccessError("Fanpage chưa có Page Access Token; hãy kết nối hoặc đồng bộ lại Fanpage.")
@@ -249,10 +263,10 @@ class AutoCommentService:
             self._verify_page_token(page_id, token)
             rows = []
             if content_type in {"all", "posts"}:
-                rows.extend(self._read_edge(page_id, token, "posts", start_date, end_date))
+                rows.extend(self._read_edge(page_id, token, "posts", start_date, end_date, limit))
             if content_type in {"all", "reels"}:
-                rows.extend(self._read_edge(page_id, token, "video_reels", start_date, end_date))
-        normalized = self._normalise_posts(rows, start_date, end_date, content_type)
+                rows.extend(self._read_edge(page_id, token, "video_reels", start_date, end_date, limit))
+        normalized = self._normalise_posts(rows, start_date, end_date, content_type)[:limit]
         # This is evidence of Page ownership from the Page edge itself.  It is
         # not an assertion that a Reel/video ID is a comment target.
         for record in normalized:
@@ -300,12 +314,12 @@ class AutoCommentService:
         if status != "GRANTED":
             raise AutoCommentPageAccessError(messages.get(status, messages["UNVERIFIED"]))
 
-    def _read_edge(self, page_id: str, token: str, edge: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
+    def _read_edge(self, page_id: str, token: str, edge: str, start_date: str, end_date: str, limit: int) -> list[dict[str, Any]]:
         # A Reel ID is not a Post ID.  Request the distinct identifiers returned
         # by Graph so the resolver can validate each candidate read-only.
         fields = "id,video_id,post_id,title,description,created_time" if edge == "video_reels" else "id,message,created_time"
         until = (date.fromisoformat(end_date) + timedelta(days=1)).isoformat()
-        params = {"fields": fields, "since": start_date, "until": until, "limit": "100"}
+        params = {"fields": fields, "since": start_date, "until": until, "limit": str(limit)}
         rows: list[dict[str, Any]] = []
         seen_cursors: set[str] = set()
         while True:
@@ -316,6 +330,8 @@ class AutoCommentService:
             for item in data:
                 if isinstance(item, dict):
                     rows.append({**item, "_edge": edge})
+                    if len(rows) >= limit:
+                        return rows
             after = str(payload.get("paging", {}).get("cursors", {}).get("after") or "")
             if not after or after in seen_cursors:
                 break
@@ -521,18 +537,26 @@ class AutoCommentService:
         return library_id
 
     def load_library(self, library_id: str) -> list[CommentItem]:
-        return [CommentItem(str(row["comment_text"]), bool(row["enabled"]), row["source_row_id"], int(row["sort_order"]))
+        return [CommentItem(str(row["comment_text"]), bool(row["enabled"]), row["source_row_id"], int(row["sort_order"]), row["id"])
                 for row in self.database.connection.execute(
                     "SELECT * FROM auto_comment_library_items WHERE library_id=? ORDER BY sort_order,id", (library_id,))]
 
-    def clear_library_items(self, project_id: str, page_id: str, library_id: str) -> int:
-        """Delete only items in the explicitly opened, Page-owned library."""
+    def delete_library_items(self, library_id: str, item_ids: list[str]) -> int:
+        """Delete selected items from the explicitly opened library."""
+        clean_ids = list(dict.fromkeys(item_id for item_id in item_ids if item_id))
+        if not clean_ids:
+            return 0
         with self.database.connection:
-            library = self.database.connection.execute(
-                "SELECT project_id,page_id FROM auto_comment_libraries WHERE id=?", (library_id,)
-            ).fetchone()
-            if library is None or (library["project_id"], library["page_id"]) != (project_id, page_id):
-                raise AutoCommentValidationError("Thư viện comment không thuộc Fanpage đang chọn.")
+            placeholders = ",".join("?" for _ in clean_ids)
+            cursor = self.database.connection.execute(
+                f"DELETE FROM auto_comment_library_items WHERE library_id=? AND id IN ({placeholders})",
+                (library_id, *clean_ids),
+            )
+        return cursor.rowcount
+
+    def clear_library_items(self, library_id: str) -> int:
+        """Delete all items in the explicitly opened library."""
+        with self.database.connection:
             cursor = self.database.connection.execute(
                 "DELETE FROM auto_comment_library_items WHERE library_id=?", (library_id,)
             )

@@ -548,6 +548,12 @@ class TemplateTests(unittest.TestCase):
         with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No):
             page.clear_saved_library()
         self.assertEqual(len(page.service.load_library(library_id)), 2)
+        page.comments.item(0, 0).setCheckState(Qt.CheckState.Checked)
+        page.comments.item(1, 0).setCheckState(Qt.CheckState.Unchecked)
+        page.page.setCurrentIndex(0)
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+            page.delete_rows()
+        self.assertEqual([item.comment_text for item in page.service.load_library(library_id)], ["B"])
         with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
             page.clear_saved_library()
         self.assertEqual(page.service.load_library(library_id), [])

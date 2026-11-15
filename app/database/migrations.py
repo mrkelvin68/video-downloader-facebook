@@ -366,6 +366,16 @@ def _create_facebook_publishing_tables(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    connection.execute("""CREATE TABLE IF NOT EXISTS facebook_page_connections (
+        page_id TEXT PRIMARY KEY, page_name TEXT NOT NULL, page_url TEXT NOT NULL DEFAULT '',
+        permissions_json TEXT NOT NULL DEFAULT '[]', token_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+        token_expires_at TEXT, last_validated_at TEXT, last_validation_attempt_at TEXT,
+        last_error_code TEXT, last_error_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    connection.execute("""INSERT INTO facebook_page_connections
+        (page_id,page_name,page_url,permissions_json,created_at,updated_at)
+        SELECT page_id,MAX(page_name),MAX(page_url),MAX(permissions_json),MIN(created_at),MAX(updated_at)
+        FROM facebook_pages GROUP BY page_id
+        ON CONFLICT(page_id) DO NOTHING""")
     connection.execute(
         """CREATE UNIQUE INDEX IF NOT EXISTS uq_facebook_default_page
            ON facebook_pages(project_id) WHERE is_default=1"""
