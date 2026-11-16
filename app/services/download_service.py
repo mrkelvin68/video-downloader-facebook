@@ -80,9 +80,23 @@ def classify_download_error(message: str) -> tuple[str, bool]:
     if any(
         marker in normalized
         for marker in (
+            "private video",
+            "granted you access",
+            "sign in if you've been granted access",
+            "this video is private",
+            "members-only",
+            "join this channel to get access",
+        )
+    ):
+        return "private_access_denied", False
+    if any(
+        marker in normalized
+        for marker in (
             "login required",
             "log in",
             "login",
+            "please sign in",
+            "sign in to confirm",
             "authentication",
             "cookies",
             "checkpoint",
@@ -198,14 +212,20 @@ class DownloadService:
             with tempfile.TemporaryDirectory(prefix=".download-", dir=root) as work:
                 folder = Path(work)
                 ffmpeg_loc = self._find_ffmpeg()
-                cookies_file = self._find_cookies_file(
-                    platform=provider.platform.value if provider is not None else None
-                )
+                platform_key = provider.platform.value if provider is not None else None
+                cookie_info = self._resolve_cookie_state(platform=platform_key)
+                cookies_file = cookie_info["cookies_file"]
+                cookies_configured = cookie_info["cookies_configured"]
+                cookies_file_found = cookie_info["cookies_file_found"]
+                cookies_valid = cookie_info["cookies_valid"]
+                yt_dlp_ver = self._yt_dlp_version()
+
                 command = [
                     *self._yt_dlp_command(), "--no-playlist", "--playlist-items", "1",
                     "--no-overwrites", "--write-thumbnail", "--write-info-json", "--convert-thumbnails", "jpg",
                     "-f", "bv*+ba/b", "--merge-output-format", "mp4", "--remux-video", "mp4",
                 ]
+                cookies_applied = False
                 if provider is not None and provider.platform == VideoPlatform.YOUTUBE:
                     js_runtime = self._find_javascript_runtime()
                     if js_runtime:
@@ -213,6 +233,9 @@ class DownloadService:
                             "--js-runtimes", f"node:{js_runtime}",
                             "--remote-components", "ejs:github",
                         ])
+                    if cookies_file:
+                        command.extend(["--cookies", cookies_file])
+                        cookies_applied = True
                 if progress_callback is None:
                     command.append("--no-progress")
                 else:
@@ -234,11 +257,14 @@ class DownloadService:
                     "-o", str(folder / (video["video_code"] + ".%(ext)s")),
                     source_url,
                 ])
+                attempt_number = 1
                 log_download(
                     "Starting download: "
                     f"video_code={video['video_code']}, platform={provider_name}, "
                     f"video_id={external_id}, extractor={provider_name}, "
-                    f"yt_dlp={self._yt_dlp_version()}, strategy=canonical_url, url={source_url}"
+                    f"yt_dlp={yt_dlp_ver}, cookies_configured={cookies_configured}, "
+                    f"cookies_file_found={cookies_file_found}, cookies_applied={cookies_applied}, "
+                    f"attempt_number={attempt_number}, strategy=canonical_url, url={source_url}"
                 )
 
                 def run_ytdlp(candidate_command: list[str]):
@@ -290,52 +316,120 @@ class DownloadService:
                     and provider.platform in {VideoPlatform.FACEBOOK, VideoPlatform.YOUTUBE}
                     and self._requires_facebook_authentication(initial_reason)
                 )
-                if authentication_failure and cookies_file:
+                if authentication_failure and cookies_file and not cookies_applied:
+                    attempt_number = 2
+                    cookies_applied = True
+                    log_download(
+                        "Retrying download with configured cookies: "
+                        f"video_code={video['video_code']}, platform={provider_name}, "
+                        f"yt_dlp={yt_dlp_ver}, cookies_configured={cookies_configured}, "
+                        f"cookies_file_found={cookies_file_found}, cookies_applied={cookies_applied}, "
+                        f"attempt_number={attempt_number}"
+                    )
                     cookie_command = [
                         *command[:-1], "--cookies", cookies_file, command[-1]
                     ]
                     result = run_ytdlp(cookie_command)
                 if result.returncode != 0:
                     reason = (result.stderr or result.stdout or "Không rõ nguyên nhân").strip()
-                    if authentication_failure:
-                        if provider is not None and provider.platform == VideoPlatform.YOUTUBE:
+                    category, retryable = classify_download_error(reason)
+                    cookie_hint = ""
+                    if cookies_configured and not cookies_file_found:
+                        cookie_hint = " (File cookies đã cấu hình không tồn tại trên hệ thống; hãy kiểm tra lại trong Cài đặt → Xác thực tải video.)"
+                    elif cookies_configured and not cookies_valid:
+                        cookie_hint = " (File cookies đã cấu hình không hợp lệ hoặc không đúng định dạng Netscape; hãy xuất lại file cookies.txt.)"
+
+                    if provider is not None and provider.platform == VideoPlatform.YOUTUBE:
+                        if category == "private_access_denied":
+                            if cookies_applied:
+                                log_download(
+                                    f"Download error diagnostic: platform={provider_name}, yt_dlp={yt_dlp_ver}, "
+                                    f"cookies_configured={cookies_configured}, cookies_file_found={cookies_file_found}, "
+                                    f"cookies_applied={cookies_applied}, attempt_number={attempt_number}, "
+                                    "error_category=private_access_denied"
+                                )
+                                raise DownloadError(
+                                    "Video YouTube này ở chế độ Riêng tư (Private) và tài khoản trong file cookies hiện tại "
+                                    "chưa được chủ sở hữu cấp quyền xem, hoặc phiên đăng nhập đã hết hạn. "
+                                    "Hãy xuất lại cookies từ đúng tài khoản được cấp quyền truy cập video này."
+                                    f" ({reason[-300:]})",
+                                    category="private_access_denied",
+                                    retryable=False,
+                                )
+                            log_download(
+                                f"Download error diagnostic: platform={provider_name}, yt_dlp={yt_dlp_ver}, "
+                                f"cookies_configured={cookies_configured}, cookies_file_found={cookies_file_found}, "
+                                f"cookies_applied={cookies_applied}, attempt_number={attempt_number}, "
+                                "error_category=authentication"
+                            )
+                            raise DownloadError(
+                                "Video YouTube này ở chế độ Riêng tư (Private) và yêu cầu đăng nhập. "
+                                "Hãy cấu hình file cookies Netscape hợp lệ của tài khoản được cấp quyền trong Cài đặt → Xác thực tải video."
+                                f"{cookie_hint} ({reason[-300:]})",
+                                category="authentication",
+                                retryable=False,
+                            )
+                        if category == "forbidden":
+                            log_download(
+                                f"Download error diagnostic: platform={provider_name}, yt_dlp={yt_dlp_ver}, "
+                                f"cookies_configured={cookies_configured}, cookies_file_found={cookies_file_found}, "
+                                f"cookies_applied={cookies_applied}, attempt_number={attempt_number}, "
+                                "error_category=forbidden"
+                            )
+                            raise DownloadError(
+                                "YouTube từ chối tải media (HTTP 403). Hãy kiểm tra phiên/thiết lập hợp lệ hoặc thử lại sau; ứng dụng không vượt qua cơ chế hạn chế truy cập."
+                                f"{cookie_hint}",
+                                category="forbidden",
+                                retryable=False,
+                            )
+                        if authentication_failure or category == "authentication":
+                            log_download(
+                                f"Download error diagnostic: platform={provider_name}, yt_dlp={yt_dlp_ver}, "
+                                f"cookies_configured={cookies_configured}, cookies_file_found={cookies_file_found}, "
+                                f"cookies_applied={cookies_applied}, attempt_number={attempt_number}, "
+                                "error_category=authentication"
+                            )
                             raise DownloadError(
                                 "YouTube yêu cầu xác thực hoặc đang chặn yêu cầu từ môi trường này. "
                                 "Hãy đăng nhập hợp lệ/cấu hình cookie YouTube do bạn cho phép, "
                                 "hoặc thử lại sau."
-                                f" ({reason[-300:]})",
+                                f"{cookie_hint} ({reason[-300:]})",
                                 category="authentication",
                                 retryable=False,
                             )
+
+                    if authentication_failure:
+                        log_download(
+                            f"Download error diagnostic: platform={provider_name}, yt_dlp={yt_dlp_ver}, "
+                            f"cookies_configured={cookies_configured}, cookies_file_found={cookies_file_found}, "
+                            f"cookies_applied={cookies_applied}, attempt_number={attempt_number}, "
+                            "error_category=FACEBOOK_AUTH_REQUIRED"
+                        )
                         raise DownloadError(
                             "Video yêu cầu đăng nhập Facebook (ví dụ: nội dung tài trợ/affiliate hoặc giới hạn độ tuổi) "
                             "hoặc không khả dụng ở chế độ khách. Hãy cung cấp file cookies.txt do bạn chủ động xuất "
                             "tại ~/.video-downloader-facebook/cookies.txt rồi thử lại. "
-                            f"Ứng dụng không tự động đọc cookie trình duyệt. ({reason[-300:]})",
+                            f"Ứng dụng không tự động đọc cookie trình duyệt.{cookie_hint} ({reason[-300:]})",
                             category="FACEBOOK_AUTH_REQUIRED",
                             retryable=False,
                         )
-                    category, retryable = classify_download_error(reason)
                     if provider is not None and provider.platform == VideoPlatform.FACEBOOK:
                         category = {
                             "network": "FACEBOOK_NETWORK_ERROR",
                             "unavailable": "FACEBOOK_VIDEO_UNAVAILABLE",
+                            "private_access_denied": "FACEBOOK_VIDEO_UNAVAILABLE",
                             "FACEBOOK_EXTRACTOR_FAILED": "FACEBOOK_EXTRACTOR_FAILED",
                             "other": "FACEBOOK_DOWNLOAD_FAILED",
                             "unsupported": "FACEBOOK_DOWNLOAD_FAILED",
                             "forbidden": "FACEBOOK_DOWNLOAD_FAILED",
                             "blocked": "FACEBOOK_DOWNLOAD_FAILED",
                         }.get(category, category)
-                    if (
-                        provider is not None
-                        and provider.platform == VideoPlatform.YOUTUBE
-                        and category == "forbidden"
-                    ):
-                        raise DownloadError(
-                            "YouTube từ chối tải media (HTTP 403). Hãy kiểm tra phiên/thiết lập hợp lệ hoặc thử lại sau; ứng dụng không vượt qua cơ chế hạn chế truy cập.",
-                            category="forbidden",
-                            retryable=False,
-                        )
+                    log_download(
+                        f"Download error diagnostic: platform={provider_name}, yt_dlp={yt_dlp_ver}, "
+                        f"cookies_configured={cookies_configured}, cookies_file_found={cookies_file_found}, "
+                        f"cookies_applied={cookies_applied}, attempt_number={attempt_number}, "
+                        f"error_category={category}"
+                    )
                     raise DownloadError(
                         "yt-dlp thất bại: " + reason[-600:],
                         category=category,
@@ -564,15 +658,31 @@ class DownloadService:
         return [sys.executable, "-m", "yt_dlp"]
 
     @staticmethod
-    def _find_cookies_file(*, platform: str | None = None) -> str | None:
-        """Return only an explicitly configured session file for this platform."""
-        configured = (
-            os.environ.get(
-                f"YTDLP_{platform.upper()}_COOKIES_FILE", ""
-            ).strip()
-            if platform
-            else ""
+    def _is_valid_netscape_cookies_file(path: str | Path) -> bool:
+        """Validate cookie file existence, readability, and Netscape format without logging contents."""
+        try:
+            candidate = Path(path)
+            if not candidate.is_file() or candidate.stat().st_size <= 0:
+                return False
+            sample = candidate.read_text(encoding="utf-8", errors="ignore")[:8192]
+        except OSError:
+            return False
+        if "netscape http cookie file" in sample.casefold():
+            return True
+        return any(
+            len(line.split("\t")) >= 7
+            for line in sample.splitlines()
+            if line and not line.startswith("#")
         )
+
+    @staticmethod
+    def _configured_cookies_path(*, platform: str | None = None) -> str:
+        """Read configured cookie path from environment or QSettings without auto-discovering browser or repo files."""
+        if not platform:
+            return ""
+        configured = os.environ.get(
+            f"YTDLP_{platform.upper()}_COOKIES_FILE", ""
+        ).strip()
         if not configured:
             try:
                 from PySide6.QtCore import QSettings
@@ -585,9 +695,51 @@ class DownloadService:
                 ).strip()
             except Exception:
                 configured = ""
-        if configured and Path(configured).is_file():
+        return configured
+
+    @classmethod
+    def _find_cookies_file(cls, *, platform: str | None = None) -> str | None:
+        """Return only an explicitly configured, readable, valid Netscape session file for this platform."""
+        configured = cls._configured_cookies_path(platform=platform)
+        if configured and cls._is_valid_netscape_cookies_file(configured):
             return str(Path(configured).resolve())
         return None
+
+    def _resolve_cookie_state(self, *, platform: str | None = None) -> dict[str, object]:
+        """Inspect cookie configuration and file validity; honours test patches on _find_cookies_file."""
+        raw_configured = self._configured_cookies_path(platform=platform)
+        resolved = self._find_cookies_file(platform=platform)
+        if resolved:
+            found = Path(resolved).is_file()
+            valid = self._is_valid_netscape_cookies_file(resolved)
+            if not valid:
+                return {
+                    "cookies_configured": True,
+                    "cookies_file_found": found,
+                    "cookies_valid": False,
+                    "cookies_file": None,
+                }
+            return {
+                "cookies_configured": True,
+                "cookies_file_found": True,
+                "cookies_valid": True,
+                "cookies_file": str(Path(resolved).resolve()),
+            }
+        if raw_configured:
+            found = Path(raw_configured).is_file()
+            valid = found and self._is_valid_netscape_cookies_file(raw_configured)
+            return {
+                "cookies_configured": True,
+                "cookies_file_found": found,
+                "cookies_valid": valid,
+                "cookies_file": None,
+            }
+        return {
+            "cookies_configured": False,
+            "cookies_file_found": False,
+            "cookies_valid": False,
+            "cookies_file": None,
+        }
 
     @staticmethod
     def _yt_dlp_version() -> str:
@@ -621,6 +773,9 @@ class DownloadService:
                 "login required",
                 "log in to confirm",
                 "sign in to confirm",
+                "please sign in",
+                "private video",
+                "granted you access",
                 "cookies are needed",
             )
         )
