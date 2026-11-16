@@ -269,19 +269,35 @@ class FacebookPageManagementTests(unittest.TestCase):
             self.assertEqual(net_access["read_status"], "NETWORK_ERROR")
             self.assertNotEqual(net_access["connection_state"], "TOKEN_EXPIRED")
 
-            # 3. Confirmed token expiration -> Page still displayed in dropdown, but action requiring token is blocked with clear message
-            FacebookConnectionService(self.database, _ExpiredClient).test_central()
+            # 3. Confirmed token expiration on Dino Review (104934391155107) -> filtered out from Auto Comment dropdown, while valid Quỳnh Béo (1458043644054753) remains
+            class _SelectiveExpiredClient:
+                def __init__(self, token):
+                    self.token = token
+
+                def verify_page_read_access(self, page_id):
+                    if page_id == "104934391155107":
+                        raise FacebookConnectionError("expired", category="expired")
+                    return {
+                        "id": page_id,
+                        "name": "Quỳnh Béo",
+                        "url": "",
+                        "permissions": ["pages_read_engagement"],
+                        "access_token": self.token,
+                    }
+
+            FacebookConnectionService(self.database, _SelectiveExpiredClient).test_central()
             auto_page.refresh_pages()
-            self.assertIn(
-                "1458043644054753",
-                [auto_page.page.itemData(i)[1] for i in range(1, auto_page.page.count())],
-            )
-            exp_access = ac_service.page_access(selected_project, "1458043644054753")
+            dropdown_ids_after_expire = [
+                auto_page.page.itemData(i)[1] for i in range(1, auto_page.page.count())
+            ]
+            self.assertIn("1458043644054753", dropdown_ids_after_expire)
+            self.assertNotIn("104934391155107", dropdown_ids_after_expire)
+            exp_access = ac_service.page_access(selected_project, "104934391155107")
             self.assertEqual(exp_access["connection_state"], "TOKEN_EXPIRED")
             with self.assertRaisesRegex(AutoCommentPageAccessError, "hết hạn"):
-                ac_service.fetch_posts(selected_project, "1458043644054753", "2026-11-01", "2026-11-16", "all")
+                ac_service.fetch_posts(selected_project, "104934391155107", "2026-11-01", "2026-11-16", "all")
 
-            # 4. Disconnect Dino Review -> removed, Quỳnh Béo stays; then disconnect Quỳnh Béo -> dropdown updates
+            # 4. Disconnect Dino Review and Quỳnh Béo -> dropdown updates
             conn_service.disconnect_central_page("104934391155107")
             auto_page.refresh_pages()
             self.assertEqual(
@@ -297,6 +313,7 @@ class FacebookPageManagementTests(unittest.TestCase):
 
             # 5. Reconnect -> automatically refreshes and shows Quỳnh Béo again
             conn_service.connect_central("user-token")
+            conn_service.test_central()
             auto_page.refresh_pages()
             self.assertIn(
                 "1458043644054753",

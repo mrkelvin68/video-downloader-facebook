@@ -208,6 +208,8 @@ class AutoCommentService:
                 "DENIED": "PERMISSION_MISSING",
                 "TOKEN_MISSING": "DISCONNECTED",
             }.get(raw_token_status, "CONNECTED" if has_token and raw_token_status == "UNKNOWN" else "UNKNOWN")
+            if connection_state in {"TOKEN_EXPIRED", "DISCONNECTED"}:
+                continue
             page["connection_state"] = connection_state
             pages[pid] = page
 

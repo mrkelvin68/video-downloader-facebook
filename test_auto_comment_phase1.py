@@ -454,6 +454,32 @@ class AutoCommentPhase1Tests(unittest.TestCase):
         self.assertEqual(page.load_posts_button.text(), "Tải bài viết")
         self.assertTrue(page.loading_container.isHidden())
 
+    def test_verify_selected_targets_button_shows_loading_spinner_and_restores_state(self):
+        _ManualFacebookWorker.instances.clear()
+        page = AutoCommentPage(self.database)
+        page.page.setCurrentIndex(1)
+        page.posts = [{"post_id": "post-1", "post_type": "Post", "published_at": "2026-01-01T00:00:00+00:00", "comment_target_id": "post-1"}]
+        page.selected_post_ids = {"post-1"}
+        page._render_posts()
+        self.assertEqual(page.verify_targets_button.text(), "Xác minh target đã chọn")
+        self.assertFalse(page.verify_targets_button.is_loading)
+        with patch("app.ui.pages.auto_comment_page.FacebookRequestWorker", _ManualFacebookWorker):
+            page.verify_selected_targets()
+            page.verify_selected_targets()  # duplicate click ignored while busy
+            self.assertEqual(len(_ManualFacebookWorker.instances), 1)
+            worker = _ManualFacebookWorker.instances[0]
+            self.assertTrue(page.verify_targets_button.is_loading)
+            self.assertFalse(page.verify_targets_button.isEnabled())
+            self.assertFalse(page.verify_targets_button._spinner.isHidden())
+            self.assertIn("Đang xác minh", page.verify_targets_button.text())
+            worker.succeeded.emit([{"source_id": "post-1", "target_id": "post-1", "status": "READY"}])
+            worker.finished.emit()
+        self.assertFalse(page.verify_targets_button.is_loading)
+        self.assertTrue(page.verify_targets_button.isEnabled())
+        self.assertTrue(page.verify_targets_button._spinner.isHidden())
+        self.assertEqual(page.verify_targets_button.text(), "Xác minh target đã chọn")
+        page.close()
+
     def test_target_resolver_requires_page_owned_readable_target_and_persists_evidence(self):
         self._grant_page_read()
         calls = []

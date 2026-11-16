@@ -67,7 +67,7 @@ class AutoCommentPage(QWidget):
         w=QWidget();l=QVBoxLayout(w);box=QGroupBox("Bước 1 · Chọn Fanpage & bài viết");f=QFormLayout(box);self.page=QComboBox();self.page.currentIndexChanged.connect(self._page_changed);manage=QPushButton("Quản lý Fanpage");manage.clicked.connect(self.pageManagementRequested.emit);pr=QHBoxLayout();pr.addWidget(self.page,1);pr.addWidget(manage);self.start_date,self.end_date=QDateEdit(),QDateEdit()
         for x in (self.start_date,self.end_date):x.setCalendarPopup(True);x.setDisplayFormat("yyyy-MM-dd");x.dateChanged.connect(self._invalidate)
         self.start_date.setDate(date.today().replace(day=1));self.end_date.setDate(date.today());self.content_type=QComboBox();self.content_type.addItems(["Tất cả","Reels","Bài viết thường"]);self.content_type.currentIndexChanged.connect(self._invalidate);self.post_limit=QSpinBox();self.post_limit.setRange(1,100);self.post_limit.setValue(10);self.post_limit.valueChanged.connect(self._invalidate);self.load_posts_button=LoadingButton("Tải bài viết");self.load_posts_button.setObjectName("primary");self.load_posts_button.clicked.connect(self.load_posts);f.addRow("Fanpage",pr);f.addRow("Từ ngày",self.start_date);f.addRow("Đến ngày",self.end_date);f.addRow("Loại",self.content_type);f.addRow("Giới hạn",self.post_limit);f.addRow(self.load_posts_button);l.addWidget(box)
-        r=QHBoxLayout();self.select_all_posts=QPushButton("Chọn tất cả");self.select_all_posts.clicked.connect(lambda:self._all_posts(True));self.clear_all_posts=QPushButton("Bỏ chọn tất cả");self.clear_all_posts.clicked.connect(lambda:self._all_posts(False));self.post_sort=QComboBox();self.post_sort.addItems(["Ngày mới nhất","Ngày cũ nhất","Lượt xem cao nhất","Lượt xem thấp nhất"]);self.post_sort.currentIndexChanged.connect(self._sort_posts);verify=QPushButton("Xác minh target đã chọn");verify.clicked.connect(self.verify_selected_targets);self.post_status=QLabel("Chưa tải bài viết.");r.addWidget(self.select_all_posts);r.addWidget(self.clear_all_posts);r.addWidget(QLabel("Sắp xếp theo"));r.addWidget(self.post_sort);r.addWidget(verify);r.addWidget(self.post_status,1);l.addLayout(r);self.posts_table=self._table(["Chọn","Tiêu đề / Nội dung","Ngày đăng","Loại","Lượt xem","ID nguồn","Target"],"autoCommentPostsTable");self.posts_table.setColumnWidth(0,58);self.posts_table.setColumnWidth(1,320);self.posts_table.setColumnWidth(2,150);self.posts_table.setColumnWidth(3,75);self.posts_table.setColumnWidth(4,100);self.posts_table.setColumnWidth(5,220);self.posts_table.itemChanged.connect(self._post_changed);self.posts_table.viewport().installEventFilter(self);l.addWidget(self.posts_table,1)
+        r=QHBoxLayout();self.select_all_posts=QPushButton("Chọn tất cả");self.select_all_posts.clicked.connect(lambda:self._all_posts(True));self.clear_all_posts=QPushButton("Bỏ chọn tất cả");self.clear_all_posts.clicked.connect(lambda:self._all_posts(False));self.post_sort=QComboBox();self.post_sort.addItems(["Ngày mới nhất","Ngày cũ nhất","Lượt xem cao nhất","Lượt xem thấp nhất"]);self.post_sort.currentIndexChanged.connect(self._sort_posts);self.verify_targets_button=LoadingButton("Xác minh target đã chọn");self.verify_targets_button.setMinimumWidth(210);self.verify_targets_button.clicked.connect(self.verify_selected_targets);self.post_status=QLabel("Chưa tải bài viết.");r.addWidget(self.select_all_posts);r.addWidget(self.clear_all_posts);r.addWidget(QLabel("Sắp xếp theo"));r.addWidget(self.post_sort);r.addWidget(self.verify_targets_button);r.addWidget(self.post_status,1);l.addLayout(r);self.posts_table=self._table(["Chọn","Tiêu đề / Nội dung","Ngày đăng","Loại","Lượt xem","ID nguồn","Target"],"autoCommentPostsTable");self.posts_table.setColumnWidth(0,58);self.posts_table.setColumnWidth(1,320);self.posts_table.setColumnWidth(2,150);self.posts_table.setColumnWidth(3,75);self.posts_table.setColumnWidth(4,100);self.posts_table.setColumnWidth(5,220);self.posts_table.itemChanged.connect(self._post_changed);self.posts_table.viewport().installEventFilter(self);l.addWidget(self.posts_table,1)
         self.loading_container=QFrame(self.posts_table.viewport(),objectName="autoCommentLoading");o=QVBoxLayout(self.loading_container);o.setAlignment(Qt.AlignmentFlag.AlignCenter);card=QFrame(self.loading_container,objectName="autoCommentLoadingCard");c=QVBoxLayout(card);c.setContentsMargins(32,24,32,24);c.setSpacing(10);c.setAlignment(Qt.AlignmentFlag.AlignCenter);self.table_spinner=LoadingSpinner(32,card);c.addWidget(self.table_spinner,0,Qt.AlignmentFlag.AlignCenter);lt=QLabel("Đang tải dữ liệu từ Facebook...",card,objectName="autoCommentLoadingTitle");lt.setAlignment(Qt.AlignmentFlag.AlignCenter);c.addWidget(lt);ls=QLabel("Hệ thống đang đồng bộ bài viết và Reels, vui lòng đợi…",card,objectName="autoCommentLoadingSubtitle");ls.setAlignment(Qt.AlignmentFlag.AlignCenter);c.addWidget(ls);o.addWidget(card,0,Qt.AlignmentFlag.AlignCenter);self.table_overlay=self.loading_container;self.loading_container.hide();l.addWidget(QLabel("Reel chỉ trở thành target gửi được sau khi xác minh GET-only; không có ID nào được tự suy diễn."));return w
     def _library(self):
         w=QWidget();l=QVBoxLayout(w);l.addWidget(QLabel("Bước 2 · Import CSV hoặc chỉnh sửa thư viện cục bộ. Thay đổi chưa lưu vẫn được giữ khi chuyển bước."));r=QHBoxLayout();self.library_picker=QComboBox();self.library_picker.currentIndexChanged.connect(self.open_library);self.library_name=QLineEdit("Thư viện comment");self.search=QLineEdit(placeholderText="Tìm comment…");self.search.textChanged.connect(self._filter)
@@ -223,6 +223,8 @@ class AutoCommentPage(QWidget):
         if not selected or not posts:self.post_status.setText("Hãy chọn Fanpage và ít nhất một bài viết để xác minh target.");return
         if self._target_worker is not None:return
         project_id,page_id=selected;path=self.database.path
+        self.verify_targets_button.setText("   Đang xác minh...")
+        self.verify_targets_button.set_loading(True)
         def operation():
             db=Database(path)
             try:return [AutoCommentCommentService(db).resolve_target(project_id,page_id,p) for p in posts]
@@ -231,7 +233,10 @@ class AutoCommentPage(QWidget):
         def succeeded(results):self.target_states.update({x["source_id"]:x for x in results});self._render_posts();self._refresh_execution();self.post_status.setText(f"Đã xác minh {sum(x['status']=='READY' for x in results)}/{len(results)} target có thể comment.")
         def failed(message):self.post_status.setText(f"Không xác minh được target: {message}")
         def finished():
-            if self._target_worker is worker:self._target_worker=None
+            if self._target_worker is worker:
+                self._target_worker=None
+                self.verify_targets_button.set_loading(False)
+                self.verify_targets_button.setText("Xác minh target đã chọn")
             worker.deleteLater()
         worker.succeeded.connect(succeeded);worker.failed.connect(failed);worker.finished.connect(finished);worker.start()
     def set_items(self,items):
@@ -481,6 +486,9 @@ class AutoCommentPage(QWidget):
         worker.succeeded.connect(succeeded);worker.failed.connect(failed);worker.finished.connect(finished);worker.start()
     def closeEvent(self,event):
         self._set_posts_loading(False)
+        if hasattr(self,"verify_targets_button"):
+            self.verify_targets_button.set_loading(False)
+            self.verify_targets_button.setText("Xác minh target đã chọn")
         if hasattr(self,"table_spinner"):self.table_spinner.set_running(False)
         for name in ("_posts_worker","_target_worker","_publish_worker"):
             worker=getattr(self,name);setattr(self,name,None)

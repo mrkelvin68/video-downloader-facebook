@@ -110,10 +110,8 @@ class LoadingButton(QPushButton):
             if effective_loading_text:
                 self._original_text = self.text()
                 self.setText(effective_loading_text)
-                self._spinner.set_running(False)
-            else:
-                self._position_spinner()
-                self._spinner.set_running(True)
+            self._position_spinner()
+            self._spinner.set_running(True)
         else:
             self._loading = False
             self._spinner.set_running(False)
