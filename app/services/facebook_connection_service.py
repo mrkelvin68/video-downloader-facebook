@@ -113,6 +113,20 @@ class MetaFacebookConnectionClient:
         return {"id": page_id, "name": str(page.get("name") or page_id), "url": str(page.get("link") or ""),
                 "permissions": [], "access_token": self.token}
 
+    def revoke_token(self) -> bool:
+        """Best-effort revoke of the current token on Meta Graph API (/me/permissions)."""
+        request = Request(
+            f"{self.base_url}/me/permissions?{urlencode({'access_token': self.token})}",
+            method="DELETE",
+            headers={"Accept": "application/json"},
+        )
+        try:
+            with urlopen(request, timeout=10.0) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+                return bool(payload.get("success", True))
+        except Exception:
+            return False
+
     def _get(self, path: str, **params: Any) -> dict[str, Any]:
         start_time = time.perf_counter()
         query = {**params, "access_token": self.token}
@@ -213,13 +227,24 @@ class FacebookConnectionService:
             status, message = "UNKNOWN", None
             token = get_page_token(page_id)
             if not token:
+                legacy = self.database.connection.execute(
+                    "SELECT project_id FROM facebook_pages WHERE page_id=? LIMIT 1",
+                    (page_id,),
+                ).fetchone()
+                if legacy:
+                    token = get_page_token(str(legacy["project_id"]), page_id)
+            if not token:
                 status, message = "UNKNOWN", "Thiếu Page Access Token"
             else:
                 try:
                     result = self.client_factory(token).verify_page_read_access(page_id)
                     validated.append(result); status = "VALID"
                 except FacebookConnectionError as exc:
-                    status = {"expired": "EXPIRED", "permission": "PERMISSION_MISSING"}.get(exc.category, "CHECK_FAILED")
+                    status = {
+                        "expired": "EXPIRED",
+                        "permission": "PERMISSION_MISSING",
+                        "network": "NETWORK_ERROR",
+                    }.get(exc.category, "CHECK_FAILED")
                     message = str(exc)
             with self.database.connection:
                 self.database.connection.execute(
@@ -230,10 +255,64 @@ class FacebookConnectionService:
                 )
         return validated
 
-    def disconnect_central_page(self, page_id: str) -> None:
-        delete_page_token(page_id)
+    def disconnect_central_page(self, page_id: str, *, revoke_remote: bool = False) -> None:
+        clean_id = str(page_id or "").strip()
+        if not clean_id:
+            return
+        legacy_projects = [
+            str(row["project_id"])
+            for row in self.database.connection.execute(
+                "SELECT DISTINCT project_id FROM facebook_pages WHERE page_id=?",
+                (clean_id,),
+            ).fetchall()
+        ]
+        token = get_page_token(clean_id)
+        if not token:
+            for pid in legacy_projects:
+                token = get_page_token(pid, clean_id)
+                if token:
+                    break
+        if revoke_remote and token:
+            try:
+                client = self.client_factory(token)
+                if hasattr(client, "revoke_token"):
+                    client.revoke_token()
+            except Exception:
+                pass
+        delete_page_token(clean_id)
+        for pid in legacy_projects:
+            delete_page_token(pid, clean_id)
         with self.database.connection:
-            self.database.connection.execute("DELETE FROM facebook_page_connections WHERE page_id=?", (page_id,))
+            self.database.connection.execute(
+                "UPDATE facebook_drafts SET page_id=NULL WHERE page_id=?",
+                (clean_id,),
+            )
+            self.database.connection.execute(
+                "DELETE FROM facebook_publishing_jobs WHERE page_id=?",
+                (clean_id,),
+            )
+            for table in (
+                "auto_comment_targets",
+                "auto_comment_templates",
+                "auto_comment_affiliate_links",
+            ):
+                self.database.connection.execute(
+                    f"DELETE FROM {table} WHERE page_id=?",
+                    (clean_id,),
+                )
+            self.database.connection.execute(
+                "DELETE FROM facebook_pages WHERE page_id=?",
+                (clean_id,),
+            )
+            self.database.connection.execute(
+                "DELETE FROM facebook_page_connections WHERE page_id=?",
+                (clean_id,),
+            )
+            remaining = self.database.connection.execute(
+                "SELECT COUNT(*) FROM facebook_page_connections"
+            ).fetchone()[0]
+        if remaining == 0:
+            delete_meta_token()
 
     def connect(self, project_id: str, token: str) -> list[dict[str, Any]]:
         client = self.client_factory(token)
@@ -266,6 +345,9 @@ class FacebookConnectionService:
                 first_error = first_error or exc
                 continue
             self._mark_read_access(project_id, stored["page_id"], "GRANTED")
+            perms = json.loads(stored.get("permissions_json") or "[]")
+            if perms and not page.get("permissions"):
+                page = {**page, "permissions": perms}
             validated.append(page)
         if validated:
             default_page_id = next((row["page_id"] for row in stored_pages if row["is_default"]), None)
@@ -284,11 +366,23 @@ class FacebookConnectionService:
 
     def _mark_read_access(self, project_id: str, page_id: str, status: str) -> None:
         now = datetime.now(UTC).isoformat(timespec="seconds")
+        token_status = {
+            "GRANTED": "VALID",
+            "TOKEN_EXPIRED": "EXPIRED",
+            "DENIED": "PERMISSION_MISSING",
+            "TOKEN_MISSING": "UNKNOWN",
+        }.get(status, "CHECK_FAILED")
         with self.database.connection:
             self.database.connection.execute(
                 """UPDATE facebook_pages SET read_access_status=?, read_access_verified_at=?, updated_at=?
                    WHERE project_id=? AND page_id=?""",
                 (status, now, now, project_id, page_id),
+            )
+            self.database.connection.execute(
+                """UPDATE facebook_page_connections SET token_status=?, last_validation_attempt_at=?,
+                   last_validated_at=CASE WHEN ?='VALID' THEN ? ELSE last_validated_at END,
+                   updated_at=? WHERE page_id=?""",
+                (token_status, now, token_status, now, now, page_id),
             )
 
     @staticmethod
@@ -337,5 +431,20 @@ class FacebookConnectionService:
         delete_page_token(project_id, page_id)
         with self.database.connection:
             self.database.connection.execute(
+                "UPDATE facebook_drafts SET page_id=NULL WHERE project_id=? AND page_id=?",
+                (project_id, page_id),
+            )
+            self.database.connection.execute(
+                "DELETE FROM facebook_publishing_jobs WHERE project_id=? AND page_id=?",
+                (project_id, page_id),
+            )
+            self.database.connection.execute(
                 "DELETE FROM facebook_pages WHERE project_id=? AND page_id=?", (project_id, page_id)
             )
+            still_used = self.database.connection.execute(
+                "SELECT 1 FROM facebook_pages WHERE page_id=? LIMIT 1", (page_id,)
+            ).fetchone()
+            if still_used is None:
+                self.database.connection.execute(
+                    "DELETE FROM facebook_page_connections WHERE page_id=?", (page_id,)
+                )

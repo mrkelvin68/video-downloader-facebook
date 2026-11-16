@@ -50,7 +50,7 @@ class AutoCommentCommentService:
         if not access["has_token"]:
             raise AutoCommentTargetError("TOKEN_MISSING", "Fanpage chưa có Page Access Token.")
         AutoCommentService._require_verified_read_access(access)
-        token = get_page_token(project_id, page_id)
+        token = get_page_token(project_id, page_id) or get_page_token(page_id)
         identity = self._graph_get(page_id, {"fields": "id"}, token)
         if str(identity.get("id") or "") != page_id:
             raise AutoCommentTargetError("WRONG_PAGE", "Page Access Token không thuộc Fanpage đang chọn.")
@@ -225,8 +225,9 @@ class AutoCommentCommentService:
         rows = self.database.connection.execute(
             f"""SELECT a.created_at,a.project_id,a.page_id,a.source_id,a.target_id,a.comment_text,
                        a.remote_comment_id,a.status,a.verification_status,a.error_category,a.error_message,
-                       p.page_name,COALESCE(t.target_type,'') AS target_type
+                       COALESCE(c.page_name, p.page_name) AS page_name,COALESCE(t.target_type,'') AS target_type
                 FROM auto_comment_submission_attempts a
+                LEFT JOIN facebook_page_connections c ON c.page_id=a.page_id
                 LEFT JOIN facebook_pages p ON p.project_id=a.project_id AND p.page_id=a.page_id
                 LEFT JOIN auto_comment_targets t ON t.project_id=a.project_id AND t.page_id=a.page_id
                     AND t.source_id=a.source_id
@@ -256,7 +257,7 @@ class AutoCommentCommentService:
                 (str(uuid.uuid4()), operation_id, project_id, page_id, source_id, target_id, comment_text, now, now),
             )
         try:
-            token = get_page_token(project_id, page_id)
+            token = get_page_token(project_id, page_id) or get_page_token(page_id)
             if not token:
                 raise AutoCommentTargetError("TOKEN_MISSING", "Fanpage chưa có Page Access Token.")
             payload = self._graph_post(f"{target_id}/comments", {"message": comment_text}, token)

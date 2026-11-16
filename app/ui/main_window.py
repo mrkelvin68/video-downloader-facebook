@@ -278,6 +278,7 @@ class MainWindow(QMainWindow):
         self.page_management_page.testRequested.connect(self._page_management_test)
         self.page_management_page.syncRequested.connect(self._page_management_sync)
         self.page_management_page.disconnectRequested.connect(self._page_management_disconnect)
+        self.page_management_page.deleteRequested.connect(self._page_management_delete)
         self.sidebar.settingsRequested.connect(self.show_settings)
         self.viral_reels_page.findPagesRequested.connect(self.find_viral_pages)
         self.viral_reels_page.providerRequested.connect(self.configure_viral_provider)
@@ -984,6 +985,8 @@ class MainWindow(QMainWindow):
 
         def failed(message: str) -> None:
             self.page_management_page.set_status(f"Không thể xác minh Facebook: {message}")
+            self.page_management_page.refresh_projects()
+            self.auto_comment_page.refresh_pages()
 
         def finished() -> None:
             self._facebook_workers.pop(key, None)
@@ -1049,8 +1052,12 @@ class MainWindow(QMainWindow):
         if page_id is None:
             page_id = project_id
             try:
-                self.facebook_connection.disconnect_central_page(page_id)
-                self.page_management_page.set_status("Đã ngắt kết nối Fanpage."); self.page_management_page.refresh_pages(); self.auto_comment_page.refresh_pages()
+                self.facebook_connection.disconnect_central_page(page_id, revoke_remote=True)
+                self.page_management_page.set_status("Đã ngắt kết nối, thu hồi token và xóa Fanpage khỏi cơ sở dữ liệu.")
+                self.page_management_page.refresh_pages()
+                self.auto_comment_page.refresh_pages()
+                if self.current_project is not None:
+                    self._refresh_facebook()
             except FacebookConnectionError as exc:
                 self.page_management_page.set_status(str(exc))
             return
@@ -1060,6 +1067,17 @@ class MainWindow(QMainWindow):
             self.page_management_page.refresh_pages()
             self.auto_comment_page.refresh_pages()
             if self.current_project is not None and self.current_project.uuid == project_id:
+                self._refresh_facebook()
+        except FacebookConnectionError as exc:
+            self.page_management_page.set_status(str(exc))
+
+    def _page_management_delete(self, page_id: str) -> None:
+        try:
+            self.facebook_connection.disconnect_central_page(page_id, revoke_remote=False)
+            self.page_management_page.set_status("Đã xóa vĩnh viễn Fanpage và token khỏi cơ sở dữ liệu.")
+            self.page_management_page.refresh_pages()
+            self.auto_comment_page.refresh_pages()
+            if self.current_project is not None:
                 self._refresh_facebook()
         except FacebookConnectionError as exc:
             self.page_management_page.set_status(str(exc))

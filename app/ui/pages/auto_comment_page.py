@@ -105,14 +105,19 @@ class AutoCommentPage(QWidget):
         h.addLayout(filters);self.history_table=self._table(["Thời gian","Fanpage","Loại","Nguồn","Target","Comment","Comment ID","Xuất bản","Lỗi","Link"],"autoCommentHistoryTable");self.history_table.setColumnWidth(0,145);self.history_table.setColumnWidth(1,150);self.history_table.setColumnWidth(3,145);self.history_table.setColumnWidth(4,145);self.history_table.setColumnWidth(5,220);self.history_table.setColumnWidth(6,210);h.addWidget(self.history_table,1);actions=QHBoxLayout();copy=QPushButton("Sao chép Comment ID");copy.clicked.connect(self.copy_history_comment_id);self.open_history_link=QPushButton("Không có liên kết trực tiếp");self.open_history_link.setEnabled(False);actions.addWidget(copy);actions.addWidget(self.open_history_link);actions.addStretch();h.addLayout(actions);l.addWidget(history,1);l.addWidget(self.test_status);return w
     def refresh_pages(self):
         old=self.page.currentData();old_page_id=old[1] if old else None;self.page.blockSignals(True);self.page.clear();self.page.addItem("Chọn Fanpage",None)
-        for p in self.service.list_pages():self.page.addItem(p["page_name"],(p["project_id"],p["page_id"]))
-        index=self.page.findData(old)
-        if index<0 and old_page_id:index=next((i for i in range(1,self.page.count()) if self.page.itemData(i)[1]==old_page_id),-1)
+        pages=self.service.list_pages()
+        for p in pages:self.page.addItem(p["page_name"],(p["project_id"],p["page_id"]))
+        index=-1
+        if old_page_id:
+            index=next((i for i in range(1,self.page.count()) if (self.page.itemData(i) or (None,None))[1]==old_page_id),-1)
         self.page.setCurrentIndex(max(0,index));self.page.blockSignals(False)
+        if old_page_id and index<0:
+            self._page_changed()
         if hasattr(self,"history_page"):
-            current=self.history_page.currentData();self.history_page.blockSignals(True);self.history_page.clear();self.history_page.addItem("Tất cả Fanpage",None)
-            for p in self.service.list_pages():self.history_page.addItem(f"{p['page_name']} · {p['page_id']}",(p["project_id"],p["page_id"]))
-            self.history_page.setCurrentIndex(max(0,self.history_page.findData(current)));self.history_page.blockSignals(False);self.refresh_history()
+            current=self.history_page.currentData();current_page_id=current[1] if current else None;self.history_page.blockSignals(True);self.history_page.clear();self.history_page.addItem("Tất cả Fanpage",None)
+            for p in pages:self.history_page.addItem(f"{p['page_name']} · {p['page_id']}",(p["project_id"],p["page_id"]))
+            h_idx=next((i for i in range(1,self.history_page.count()) if (self.history_page.itemData(i) or (None,None))[1]==current_page_id),-1) if current_page_id else 0
+            self.history_page.setCurrentIndex(max(0,h_idx));self.history_page.blockSignals(False);self.refresh_history()
         self._summary()
     def refresh_libraries(self):
         if not hasattr(self,"open_template_library_button"):

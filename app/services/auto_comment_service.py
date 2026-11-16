@@ -138,26 +138,105 @@ class AutoCommentService:
         self.database = database
         self._graph_get = graph_get or self._live_graph_get
 
+    def _page_exists(self, project_id: str, page_id: str) -> bool:
+        row = self.database.connection.execute(
+            """SELECT 1 FROM facebook_page_connections WHERE page_id=?
+               UNION
+               SELECT 1 FROM facebook_pages WHERE project_id=? AND page_id=?
+               LIMIT 1""",
+            (page_id, project_id, page_id),
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _resolve_page_token(project_id: str, page_id: str) -> str:
+        token = get_page_token(project_id, page_id)
+        if not token:
+            token = get_page_token(page_id)
+        return token
+
     def list_pages(self) -> list[dict]:
+        """Return all saved Pages from centralized Fanpage Management (with fallback to legacy project rows), keyed by Page ID."""
+        default_project_row = self.database.connection.execute(
+            "SELECT uuid FROM projects ORDER BY created_at, uuid LIMIT 1"
+        ).fetchone()
+        fallback_project_id = str(default_project_row["uuid"]) if default_project_row else "central"
+
         rows = self.database.connection.execute(
-            """SELECT project_id, page_id, page_name, permissions_json
-               FROM facebook_pages ORDER BY page_name COLLATE NOCASE, project_id"""
-        )
+            """SELECT
+                   c.page_id AS page_id,
+                   c.page_name AS page_name,
+                   c.permissions_json AS permissions_json,
+                   c.token_status AS token_status,
+                   COALESCE(
+                       (SELECT p.project_id FROM facebook_pages p WHERE p.page_id=c.page_id ORDER BY p.updated_at DESC, p.project_id LIMIT 1),
+                       ?
+                   ) AS project_id,
+                   (SELECT p.read_access_status FROM facebook_pages p WHERE p.page_id=c.page_id ORDER BY p.updated_at DESC LIMIT 1) AS legacy_read_status
+               FROM facebook_page_connections c
+               UNION ALL
+               SELECT
+                   p.page_id AS page_id,
+                   p.page_name AS page_name,
+                   p.permissions_json AS permissions_json,
+                   'UNKNOWN' AS token_status,
+                   p.project_id AS project_id,
+                   p.read_access_status AS legacy_read_status
+               FROM facebook_pages p
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM facebook_page_connections c WHERE c.page_id=p.page_id
+               )""",
+            (fallback_project_id,),
+        ).fetchall()
+
         pages: dict[str, dict] = {}
         for row in rows:
             page = dict(row)
-            if page["page_id"] not in pages:
-                pages[page["page_id"]] = page
-        return list(pages.values())
+            pid = str(page["page_id"])
+            if pid in pages:
+                continue
+            raw_token_status = str(page.get("token_status") or "UNKNOWN")
+            if raw_token_status == "UNKNOWN" and page.get("legacy_read_status"):
+                raw_token_status = str(page["legacy_read_status"])
+            has_token = bool(self._resolve_page_token(str(page["project_id"]), pid))
+            connection_state = {
+                "VALID": "CONNECTED",
+                "GRANTED": "CONNECTED",
+                "EXPIRED": "TOKEN_EXPIRED",
+                "TOKEN_EXPIRED": "TOKEN_EXPIRED",
+                "PERMISSION_MISSING": "PERMISSION_MISSING",
+                "DENIED": "PERMISSION_MISSING",
+                "TOKEN_MISSING": "DISCONNECTED",
+            }.get(raw_token_status, "CONNECTED" if has_token and raw_token_status == "UNKNOWN" else "UNKNOWN")
+            page["connection_state"] = connection_state
+            pages[pid] = page
+
+        return sorted(
+            pages.values(),
+            key=lambda item: (str(item.get("page_name") or "").casefold(), str(item.get("page_id") or "")),
+        )
 
     def page_access(self, project_id: str, page_id: str) -> dict[str, Any]:
         row = self.database.connection.execute(
-            """SELECT COALESCE(c.permissions_json,p.permissions_json) AS permissions_json,
-                      CASE WHEN c.token_status IS NULL OR c.token_status='UNKNOWN'
-                           THEN p.read_access_status ELSE c.token_status END AS read_access_status
-               FROM facebook_pages p LEFT JOIN facebook_page_connections c ON c.page_id=p.page_id
-               WHERE p.project_id=? AND p.page_id=?""",
-            (project_id, page_id),
+            """SELECT
+                   COALESCE(c.permissions_json, p.permissions_json, '[]') AS permissions_json,
+                   CASE
+                       WHEN c.token_status IS NOT NULL AND c.token_status <> 'UNKNOWN' THEN c.token_status
+                       WHEN p.read_access_status IS NOT NULL THEN p.read_access_status
+                       ELSE COALESCE(c.token_status, 'UNKNOWN')
+                   END AS read_access_status
+               FROM facebook_page_connections c
+               LEFT JOIN facebook_pages p ON p.page_id=c.page_id AND p.project_id=?
+               WHERE c.page_id=?
+               UNION ALL
+               SELECT
+                   p.permissions_json AS permissions_json,
+                   p.read_access_status AS read_access_status
+               FROM facebook_pages p
+               WHERE p.project_id=? AND p.page_id=?
+                 AND NOT EXISTS (SELECT 1 FROM facebook_page_connections c WHERE c.page_id=p.page_id)
+               LIMIT 1""",
+            (project_id, page_id, project_id, page_id),
         ).fetchone()
         if row is None:
             raise AutoCommentPageAccessError("Không tìm thấy Fanpage đã lưu.")
@@ -165,14 +244,27 @@ class AutoCommentService:
             permissions = {str(value) for value in json.loads(row["permissions_json"] or "[]")}
         except (TypeError, json.JSONDecodeError):
             permissions = set()
-        has_token = bool(get_page_token(project_id, page_id))
+        has_token = bool(self._resolve_page_token(project_id, page_id))
         status = str(row["read_access_status"] or "UNKNOWN")
+        mapped_read_status = {
+            "VALID": "GRANTED",
+            "EXPIRED": "TOKEN_EXPIRED",
+            "PERMISSION_MISSING": "DENIED",
+            "CHECK_FAILED": "API_ERROR",
+        }.get(status, status)
+        connection_state = {
+            "GRANTED": "CONNECTED",
+            "TOKEN_EXPIRED": "TOKEN_EXPIRED",
+            "DENIED": "PERMISSION_MISSING",
+            "TOKEN_MISSING": "DISCONNECTED",
+        }.get(mapped_read_status, "DISCONNECTED" if not has_token else "UNKNOWN")
         return {
             "has_token": has_token,
-            "can_read_posts": REQUIRED_READ_PERMISSION in permissions,
+            "can_read_posts": REQUIRED_READ_PERMISSION in permissions or mapped_read_status == "GRANTED",
             "can_manage_comments": REQUIRED_COMMENT_PERMISSION in permissions,
-            "verified": bool(permissions),
-            "read_status": {"VALID": "GRANTED", "EXPIRED": "TOKEN_EXPIRED", "PERMISSION_MISSING": "DENIED"}.get(status, status),
+            "verified": bool(permissions) or mapped_read_status == "GRANTED",
+            "read_status": mapped_read_status,
+            "connection_state": connection_state,
         }
 
     def _fetch_posts_single_page(
@@ -184,7 +276,7 @@ class AutoCommentService:
         if not access["has_token"]:
             raise AutoCommentPageAccessError("Fanpage chưa có Page Access Token; hãy kết nối hoặc đồng bộ lại Fanpage.")
         self._require_verified_read_access(access)
-        token = get_page_token(project_id, page_id)
+        token = self._resolve_page_token(project_id, page_id)
         loader = request or self._graph_posts_single_page
         rows = loader(page_id, token, start_date, end_date)
         wanted = {"all", "posts", "reels"}
@@ -256,7 +348,7 @@ class AutoCommentService:
         if not access["has_token"]:
             raise AutoCommentPageAccessError("Fanpage chưa có Page Access Token; hãy kết nối hoặc đồng bộ lại Fanpage.")
         self._require_verified_read_access(access)
-        token = get_page_token(project_id, page_id)
+        token = self._resolve_page_token(project_id, page_id)
         if request is not None:  # Compatibility seam for existing local callers/tests.
             rows = request(page_id, token, start_date, end_date)
         else:
@@ -278,7 +370,7 @@ class AutoCommentService:
         access = self.page_access(project_id, page_id)
         if not access["has_token"]:
             return posts
-        token = get_page_token(project_id, page_id)
+        token = self._resolve_page_token(project_id, page_id)
         for post in posts:
             video_id = str(post.get("video_id") or "")
             if not video_id:
@@ -468,11 +560,9 @@ class AutoCommentService:
             raise AutoCommentValidationError("Hãy chọn thư viện và nhập nội dung comment hợp lệ.")
         try:
             with self.database.connection:
-                if self.database.connection.execute("SELECT 1 FROM projects WHERE uuid=?", (clean_project,)).fetchone() is None:
+                if clean_project != "central" and self.database.connection.execute("SELECT 1 FROM projects WHERE uuid=?", (clean_project,)).fetchone() is None:
                     raise AutoCommentValidationError("Dự án đang chọn không còn tồn tại.")
-                if self.database.connection.execute(
-                    "SELECT 1 FROM facebook_pages WHERE project_id=? AND page_id=?", (clean_project, clean_page)
-                ).fetchone() is None:
+                if not self._page_exists(clean_project, clean_page):
                     raise AutoCommentValidationError("Fanpage đang chọn không còn tồn tại trong Dự án.")
                 library = self.database.connection.execute(
                     "SELECT project_id,page_id FROM auto_comment_libraries WHERE id=?", (clean_library,)
@@ -506,7 +596,7 @@ class AutoCommentService:
         clean_project, clean_page, clean_library = str(project_id or "").strip(), str(page_id or "").strip(), str(library_id or "").strip()
         try:
             with self.database.connection:
-                if not self.database.connection.execute("SELECT 1 FROM projects WHERE uuid=?", (clean_project,)).fetchone() or not self.database.connection.execute("SELECT 1 FROM facebook_pages WHERE project_id=? AND page_id=?", (clean_project, clean_page)).fetchone():
+                if (clean_project != "central" and not self.database.connection.execute("SELECT 1 FROM projects WHERE uuid=?", (clean_project,)).fetchone()) or not self._page_exists(clean_project, clean_page):
                     raise AutoCommentValidationError("Dự án hoặc Fanpage đang chọn không còn hợp lệ.")
                 library = self.database.connection.execute("SELECT project_id,page_id FROM auto_comment_libraries WHERE id=?", (clean_library,)).fetchone()
                 if library is None or not library["project_id"] or not library["page_id"]:
@@ -531,7 +621,7 @@ class AutoCommentService:
         clean_name = str(name or "").strip() or "Thư viện comment mới"
         library_id, now = str(uuid.uuid4()), _now()
         with self.database.connection:
-            if not self.database.connection.execute("SELECT 1 FROM facebook_pages WHERE project_id=? AND page_id=?", (project_id, page_id)).fetchone():
+            if not self._page_exists(project_id, page_id):
                 raise AutoCommentValidationError("Fanpage đang chọn không còn hợp lệ.")
             self.database.connection.execute("INSERT INTO auto_comment_libraries(id,name,project_id,page_id,created_at,updated_at) VALUES (?,?,?,?,?,?)", (library_id, clean_name, project_id, page_id, now, now))
         return library_id
