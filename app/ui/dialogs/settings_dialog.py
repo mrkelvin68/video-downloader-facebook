@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import datetime
+import json
 from pathlib import Path
+from urllib.parse import urljoin
+from urllib.request import Request, urlopen
 
 from PySide6.QtCore import QSettings, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -18,6 +21,9 @@ from app.services.logging_service import (
     logging_service,
     validate_log_dir_writable,
 )
+from app.services.credential_service import get_ai_provider_key, set_ai_provider_key
+from app.ui.facebook_worker import FacebookRequestWorker
+from app.ui.widgets.loading_button import LoadingButton
 
 PLATFORMS = ("youtube", "facebook", "instagram")
 PLATFORM_LABELS = {"youtube": "YouTube", "facebook": "Facebook", "instagram": "Instagram"}
@@ -62,6 +68,7 @@ class SettingsDialog(QDialog):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_auth_tab(), "Xác thực tải video")
         self.tabs.addTab(self._build_log_management_tab(), "Quản lý Log")
+        self.tabs.addTab(self._build_ai_tab(), "Cấu hình AI")
         main_layout.addWidget(self.tabs)
 
         self.buttons = QDialogButtonBox(
@@ -72,6 +79,44 @@ class SettingsDialog(QDialog):
         main_layout.addWidget(self.buttons)
 
         self._refresh_dir_size()
+
+    def _build_ai_tab(self) -> QWidget:
+        container = QWidget(); layout = QVBoxLayout(container)
+        layout.addWidget(QLabel("<b>Cấu hình AI</b><br>API key chỉ được lưu trong Windows Credential Manager."))
+        self.ai_provider = QComboBox(); self.ai_provider.addItems(["OpenAI-compatible", "Ollama local"])
+        self.ai_provider.setCurrentText(self.settings.value("ai/provider", "OpenAI-compatible", type=str))
+        self.ai_base_url = QLineEdit(self.settings.value("ai/base_url", "http://localhost:20128/v1", type=str))
+        self.ai_key = QLineEdit(); self.ai_key.setEchoMode(QLineEdit.EchoMode.Password); self.ai_key.setPlaceholderText("Để trống để giữ API key đã lưu")
+        self.ai_model = QComboBox(); self.ai_model.setEditable(True); saved_model=self.settings.value("ai/model", "", type=str)
+        if saved_model: self.ai_model.addItem(saved_model); self.ai_model.setCurrentText(saved_model)
+        self.load_ai_models = LoadingButton("Tải danh sách model"); self.load_ai_models.clicked.connect(self._load_ai_models); self._ai_models_worker = None
+        self.ai_timeout = QSpinBox(); self.ai_timeout.setRange(1, 300); self.ai_timeout.setValue(self.settings.value("ai/timeout", 30, type=int))
+        for label, widget in (("Provider", self.ai_provider), ("Base URL", self.ai_base_url), ("API Key", self.ai_key), ("Model", self.ai_model), ("Timeout (giây)", self.ai_timeout)):
+            row = QHBoxLayout(); row.addWidget(QLabel(label)); row.addWidget(widget, 1); layout.addLayout(row)
+        layout.addWidget(self.load_ai_models)
+        self.ai_status = QLabel("Đã lưu" if get_ai_provider_key() else "Chưa cấu hình"); layout.addWidget(self.ai_status); layout.addStretch(); return container
+
+    def _load_ai_models(self) -> None:
+        if self._ai_models_worker is not None: return
+        key = self.ai_key.text().strip() or get_ai_provider_key()
+        base = self.ai_base_url.text().strip().rstrip("/") + "/models"
+        self.ai_status.setText("Đang tải danh sách model…"); self.load_ai_models.set_loading(True); self.load_ai_models.setEnabled(False)
+        def operation():
+            headers = {"Accept": "application/json"}
+            if key: headers["Authorization"] = f"Bearer {key}"
+            with urlopen(Request(base, headers=headers), timeout=self.ai_timeout.value()) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            return [str(item.get("id")) for item in payload.get("data", []) if isinstance(item, dict) and item.get("id")]
+        worker=FacebookRequestWorker(operation,self);self._ai_models_worker=worker
+        def succeeded(models):
+            current = self.ai_model.currentText(); self.ai_model.clear(); self.ai_model.addItems(models)
+            self.ai_model.setCurrentText(current if current else (models[0] if models else ""))
+            self.ai_status.setText(f"Đã tải {len(models)} model." if models else "Gateway không trả về model nào.")
+        def failed(_message):
+            self.ai_status.setText("Không thể tải model. Kiểm tra Base URL, API key và kết nối.")
+        def finished():
+            self._ai_models_worker=None;self.load_ai_models.set_loading(False);self.load_ai_models.setEnabled(True);worker.deleteLater()
+        worker.succeeded.connect(succeeded);worker.failed.connect(failed);worker.finished.connect(finished);worker.start()
 
     # --- TAB 1: Authentication ---
     def _build_auth_tab(self) -> QWidget:
@@ -370,6 +415,8 @@ class SettingsDialog(QDialog):
         logging_service.set_level(self.log_level_combo.currentText())
         logging_service.set_max_size_mb(self.max_size_spin.value())
         logging_service.set_retention_days(self.retention_spin.value())
+        self.settings.setValue("ai/provider", self.ai_provider.currentText()); self.settings.setValue("ai/base_url", self.ai_base_url.text().strip()); self.settings.setValue("ai/model", self.ai_model.currentText().strip()); self.settings.setValue("ai/timeout", self.ai_timeout.value())
+        if self.ai_key.text().strip(): set_ai_provider_key(self.ai_key.text())
 
         self.settings.sync()
         self.accept()

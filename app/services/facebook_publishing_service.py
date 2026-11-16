@@ -253,7 +253,28 @@ class FacebookPublishingService:
         self.database = database
         self.client = client
 
+    def save_connected_pages(self, pages: list[dict[str, Any]]) -> None:
+        """Upsert application-scoped Page identities; credentials are keyed by page ID."""
+        now = _now()
+        with self.database.connection:
+            for page in pages:
+                self.database.connection.execute(
+                    """INSERT INTO facebook_page_connections
+                       (page_id,page_name,page_url,permissions_json,created_at,updated_at)
+                       VALUES (?,?,?,?,?,?) ON CONFLICT(page_id) DO UPDATE SET
+                       page_name=excluded.page_name,page_url=excluded.page_url,
+                       permissions_json=excluded.permissions_json,updated_at=excluded.updated_at""",
+                    (str(page["id"]), str(page.get("name", "")), str(page.get("url", page.get("link", ""))),
+                     json.dumps(page.get("permissions", []), ensure_ascii=False), now, now),
+                )
+
+    def list_connected_pages(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.database.connection.execute(
+            "SELECT * FROM facebook_page_connections ORDER BY page_name COLLATE NOCASE"
+        )]
+
     def save_pages(self, project_id: str, pages: list[dict[str, Any]], default_page_id: str | None = None) -> None:
+        self.save_connected_pages(pages)
         now = _now()
         connection = self.database.connection
         with connection:

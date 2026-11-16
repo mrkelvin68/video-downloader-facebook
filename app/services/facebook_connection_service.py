@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import UTC, datetime
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -103,6 +104,15 @@ class MetaFacebookConnectionClient:
             page_id, fields="id,name,link,tasks,perms"
         )
 
+    def verify_page_read_access(self, page_id: str) -> dict[str, Any]:
+        """Confirm this Page token's identity and read access with supported GET requests."""
+        page = self._get(page_id, fields="id,name,link")
+        if str(page.get("id") or "") != page_id:
+            raise FacebookConnectionError("Page Access Token không thuộc Fanpage đang chọn.", category="wrong_page")
+        self._get(f"{page_id}/feed", fields="id", limit=1)
+        return {"id": page_id, "name": str(page.get("name") or page_id), "url": str(page.get("link") or ""),
+                "permissions": [], "access_token": self.token}
+
     def _get(self, path: str, **params: Any) -> dict[str, Any]:
         start_time = time.perf_counter()
         query = {**params, "access_token": self.token}
@@ -185,6 +195,46 @@ class FacebookConnectionService:
         self.client_factory = client_factory
         self.publishing = FacebookPublishingService(database)
 
+    def connect_central(self, token: str) -> list[dict[str, Any]]:
+        """Connect Pages at application scope, independently of any Project."""
+        pages = self.client_factory(token).validate_and_list_pages()
+        set_meta_token(token)
+        self.publishing.save_connected_pages(pages)
+        for page in pages:
+            if page.get("access_token"):
+                set_page_token(str(page["id"]), str(page["access_token"]))
+        return pages
+
+    def test_central(self) -> list[dict[str, Any]]:
+        validated: list[dict[str, Any]] = []
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        for page in self.publishing.list_connected_pages():
+            page_id = str(page["page_id"])
+            status, message = "UNKNOWN", None
+            token = get_page_token(page_id)
+            if not token:
+                status, message = "UNKNOWN", "Thiếu Page Access Token"
+            else:
+                try:
+                    result = self.client_factory(token).verify_page_read_access(page_id)
+                    validated.append(result); status = "VALID"
+                except FacebookConnectionError as exc:
+                    status = {"expired": "EXPIRED", "permission": "PERMISSION_MISSING"}.get(exc.category, "CHECK_FAILED")
+                    message = str(exc)
+            with self.database.connection:
+                self.database.connection.execute(
+                    """UPDATE facebook_page_connections SET token_status=?,last_validation_attempt_at=?,
+                       last_validated_at=CASE WHEN ?='VALID' THEN ? ELSE last_validated_at END,
+                       last_error_message=?,updated_at=? WHERE page_id=?""",
+                    (status, now, status, now, message, now, page_id),
+                )
+        return validated
+
+    def disconnect_central_page(self, page_id: str) -> None:
+        delete_page_token(page_id)
+        with self.database.connection:
+            self.database.connection.execute("DELETE FROM facebook_page_connections WHERE page_id=?", (page_id,))
+
     def connect(self, project_id: str, token: str) -> list[dict[str, Any]]:
         client = self.client_factory(token)
         pages = client.validate_and_list_pages()
@@ -203,19 +253,66 @@ class FacebookConnectionService:
                 raise FacebookConnectionError("Chưa lưu thông tin kết nối Facebook.")
             return self.client_factory(token).validate_and_list_pages()
         validated: list[dict[str, Any]] = []
+        first_error: FacebookConnectionError | None = None
         for stored in stored_pages:
             token = get_page_token(project_id, stored["page_id"])
-            if token:
-                page = self.client_factory(token)._get_page_identity(stored["page_id"], raise_errors=True)
-                if page is None:
-                    raise FacebookConnectionError("Không thể xác thực Facebook. Vui lòng xem chi tiết lỗi API.", category="api")
-                validated.append(page)
+            if not token:
+                self._mark_read_access(project_id, stored["page_id"], "TOKEN_MISSING")
+                continue
+            try:
+                page = self.client_factory(token).verify_page_read_access(stored["page_id"])
+            except FacebookConnectionError as exc:
+                self._mark_read_access(project_id, stored["page_id"], self._read_status_for_error(exc))
+                first_error = first_error or exc
+                continue
+            self._mark_read_access(project_id, stored["page_id"], "GRANTED")
+            validated.append(page)
         if validated:
+            default_page_id = next((row["page_id"] for row in stored_pages if row["is_default"]), None)
+            self.publishing.save_pages(project_id, validated, default_page_id)
             return validated
+        if first_error is not None:
+            raise first_error
+        if stored_pages:
+            raise FacebookConnectionError("Fanpage chưa có Page Access Token.", category="missing")
         token = get_meta_token()
         if not token:
             raise FacebookConnectionError("Chưa lưu thông tin kết nối Facebook.")
-        return self.client_factory(token).validate_and_list_pages()
+        pages = self.client_factory(token).validate_and_list_pages()
+        self.publishing.save_pages(project_id, pages)
+        return pages
+
+    def _mark_read_access(self, project_id: str, page_id: str, status: str) -> None:
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        with self.database.connection:
+            self.database.connection.execute(
+                """UPDATE facebook_pages SET read_access_status=?, read_access_verified_at=?, updated_at=?
+                   WHERE project_id=? AND page_id=?""",
+                (status, now, now, project_id, page_id),
+            )
+
+    @staticmethod
+    def _read_status_for_error(error: FacebookConnectionError) -> str:
+        return {
+            "expired": "TOKEN_EXPIRED", "permission": "DENIED", "wrong_page": "WRONG_PAGE",
+            "network": "NETWORK_ERROR", "missing": "TOKEN_MISSING",
+        }.get(error.category, "API_ERROR")
+
+    def sync_pages(self, project_id: str) -> list[dict[str, Any]]:
+        """Refresh locally stored Page metadata using the existing Meta token."""
+        token = get_meta_token()
+        if not token:
+            raise FacebookConnectionError("Chưa lưu thông tin kết nối Facebook.")
+        pages = self.client_factory(token).validate_and_list_pages()
+        current = self.publishing.list_pages(project_id)
+        default_page_id = next((row["page_id"] for row in current if row["is_default"]), None)
+        if default_page_id not in {str(page["id"]) for page in pages}:
+            default_page_id = None
+        self.publishing.save_pages(project_id, pages, default_page_id)
+        for page in pages:
+            if page.get("access_token"):
+                set_page_token(project_id, page["id"], page["access_token"])
+        return pages
 
     def set_default_page(self, project_id: str, page_id: str) -> None:
         pages = self.publishing.list_pages(project_id)
@@ -229,3 +326,16 @@ class FacebookConnectionService:
         with self.database.connection:
             self.database.connection.execute("DELETE FROM facebook_pages WHERE project_id=?", (project_id,))
         delete_meta_token()
+
+    def disconnect_page(self, project_id: str, page_id: str) -> None:
+        """Remove one project Page and only its Credential Manager secret."""
+        page = self.database.connection.execute(
+            "SELECT 1 FROM facebook_pages WHERE project_id=? AND page_id=?", (project_id, page_id)
+        ).fetchone()
+        if page is None:
+            raise FacebookConnectionError("Không tìm thấy Fanpage cần ngắt kết nối.")
+        delete_page_token(project_id, page_id)
+        with self.database.connection:
+            self.database.connection.execute(
+                "DELETE FROM facebook_pages WHERE project_id=? AND page_id=?", (project_id, page_id)
+            )
