@@ -1,4 +1,4 @@
-from PySide6.QtCore import QSize, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -24,6 +24,7 @@ class Sidebar(QFrame):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._projects_expanded: bool = False
         self.setObjectName("sidebar")
         self.setFixedWidth(240)
         layout = QVBoxLayout(self)
@@ -48,7 +49,7 @@ class Sidebar(QFrame):
         for text, icon, active, available in (
             ("Dashboard", QStyle.StandardPixmap.SP_ComputerIcon, False, False),
             ("Quản lý dự án", QStyle.StandardPixmap.SP_FileDialogContentsView, True, True),
-            ("Hàng đợi tải video", QStyle.StandardPixmap.SP_ArrowDown, False, True),
+            ("Hàng đợi tải video", QStyle.StandardPixmap.SP_FileDialogListView, False, True),
             ("🔥 Viral Reels Finder", QStyle.StandardPixmap.SP_DialogYesButton, False, True),
             ("Auto Comment", QStyle.StandardPixmap.SP_MessageBoxInformation, False, True),
             ("Quản lý Fanpage", QStyle.StandardPixmap.SP_DriveNetIcon, False, True),
@@ -71,9 +72,24 @@ class Sidebar(QFrame):
             elif text == "Quản lý dự án":
                 self.projects_button = button
                 button.clicked.connect(self.projectsRequested.emit)
+                dropdown_layout = QHBoxLayout(button)
+                dropdown_layout.setContentsMargins(0, 0, 6, 0)
+                dropdown_layout.addStretch()
+                self.projects_dropdown_button = QPushButton(button)
+                self.projects_dropdown_button.setObjectName("sidebarDropdownBtn")
+                self.projects_dropdown_button.setCursor(Qt.CursorShape.PointingHandCursor)
+                self.projects_dropdown_button.setIcon(
+                    button_icon(self, QStyle.StandardPixmap.SP_ArrowRight)
+                )
+                self.projects_dropdown_button.setIconSize(QSize(12, 12))
+                self.projects_dropdown_button.setToolTip("Mở rộng hàng đợi")
+                self.projects_dropdown_button.clicked.connect(self.toggle_projects_dropdown)
+                dropdown_layout.addWidget(self.projects_dropdown_button)
             elif text == "Hàng đợi tải video":
                 self.queue_button = button
+                button.setObjectName("sidebarQueueButton")
                 button.clicked.connect(self.queueRequested.emit)
+                button.setVisible(False)
             elif text == "🔥 Viral Reels Finder":
                 self.viral_reels_button = button
                 button.clicked.connect(self.viralReelsRequested.emit)
@@ -93,7 +109,30 @@ class Sidebar(QFrame):
         status_layout.addWidget(QLabel("Phase 1–3.2 · Quản lý tải video"))
         layout.addWidget(status)
 
+    def is_projects_expanded(self) -> bool:
+        return self._projects_expanded
+
+    def set_projects_expanded(self, expanded: bool) -> None:
+        self._projects_expanded = bool(expanded)
+        self.queue_button.setVisible(self._projects_expanded)
+        self.projects_dropdown_button.setIcon(
+            button_icon(
+                self,
+                QStyle.StandardPixmap.SP_ArrowDown
+                if self._projects_expanded
+                else QStyle.StandardPixmap.SP_ArrowRight,
+            )
+        )
+        self.projects_dropdown_button.setToolTip(
+            "Thu gọn hàng đợi" if self._projects_expanded else "Mở rộng hàng đợi"
+        )
+
+    def toggle_projects_dropdown(self) -> None:
+        self.set_projects_expanded(not self._projects_expanded)
+
     def set_active(self, section: str) -> None:
+        if section == "queue":
+            self.set_projects_expanded(True)
         self.projects_button.setProperty("active", section == "projects")
         self.queue_button.setProperty("active", section == "queue")
         self.viral_reels_button.setProperty("active", section == "viral-reels")

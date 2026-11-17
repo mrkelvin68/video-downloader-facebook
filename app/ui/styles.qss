@@ -8,6 +8,11 @@ QWidget { background:#0d1526; color:#d7e0ef; font-family:"Segoe UI"; font-size:1
 #sidebar QPushButton[active="true"] { background:#1d4ed8; color:#fff; font-weight:600; }
 #sidebar QPushButton:disabled { color:#63738c; }
 #sidebar QPushButton[comingSoon="true"]:disabled { border:1px solid #17263d; }
+#sidebar QPushButton#sidebarDropdownBtn { min-height:20px; max-height:20px; min-width:20px; max-width:20px; padding:0px; border:none; background:transparent; border-radius:4px; text-align:center; }
+#sidebar QPushButton#sidebarDropdownBtn:hover { background:rgba(255, 255, 255, 0.2); }
+#sidebar QPushButton#sidebarQueueButton { margin-left:12px; font-size:13px; color:#94a3b8; }
+#sidebar QPushButton#sidebarQueueButton:hover:enabled { background:#13223a; color:#f8fafc; }
+#sidebar QPushButton#sidebarQueueButton[active="true"] { background:#1d4ed8; color:#ffffff; font-weight:600; }
 #storageStatus { background:#101c30; border:1px solid #1d304b; border-radius:9px; color:#71829d; }
 #storageTitle { color:#34d399; font-weight:600; }
 #header { background:#101a2c; border-bottom:1px solid #1d2b43; }

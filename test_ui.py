@@ -881,6 +881,28 @@ class ProjectCsvUiTests(unittest.TestCase):
         self.assertTrue(window.isVisible())
         self.assertIn("cookies", window.queue_page.queue_status.text().lower())
         schedule_next.assert_not_called()
+    def test_sidebar_projects_dropdown_toggle_and_queue_visibility(self):
+        window = MainWindow(self.database)
+        sidebar = window.sidebar
+
+        # Collapsed by default
+        self.assertFalse(sidebar.is_projects_expanded())
+        self.assertTrue(sidebar.queue_button.isHidden())
+
+        # Click dropdown to open
+        sidebar.projects_dropdown_button.click()
+        self.assertTrue(sidebar.is_projects_expanded())
+        self.assertFalse(sidebar.queue_button.isHidden())
+
+        # Click dropdown to collapse
+        sidebar.projects_dropdown_button.click()
+        self.assertFalse(sidebar.is_projects_expanded())
+        self.assertTrue(sidebar.queue_button.isHidden())
+
+        # set_active('queue') automatically expands
+        sidebar.set_active("queue")
+        self.assertTrue(sidebar.is_projects_expanded())
+        self.assertFalse(sidebar.queue_button.isHidden())
         window.close()
 
 
