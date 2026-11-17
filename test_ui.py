@@ -852,6 +852,37 @@ class ProjectCsvUiTests(unittest.TestCase):
         self.assertIn("database is locked", window.queue_page.queue_status.text())
         window.close()
 
+    def test_youtube_authentication_failure_stops_batch_without_closing_window(self):
+        VideoService(self.database).import_csv(
+            self.project_id,
+            "stt,title,url\n1,Video,https://www.youtube.com/watch?v=jNQXAC9IVRw\n",
+        )
+        video = self.database.list_videos(self.project_id)[0]
+        job_id = DownloadQueueService(self.database).enqueue(
+            self.project_id, [video["id"]]
+        )[0]
+        queue = DownloadQueueService(self.database)
+        queue.claim(job_id)
+        queue.finish(job_id, status="failed", error_message="[authentication] login required")
+        window = MainWindow(self.database)
+        window.show()
+        self.application.processEvents()
+
+        class FinishedWorker:
+            def wait(self):
+                return True
+
+        window.queue_workers[job_id] = FinishedWorker()
+        window.queue_running = True
+        with patch("app.ui.main_window.QTimer.singleShot") as schedule_next:
+            window._queue_job_finished(job_id, False, "[authentication] login required")
+
+        self.assertFalse(window.queue_running)
+        self.assertTrue(window.isVisible())
+        self.assertIn("cookies", window.queue_page.queue_status.text().lower())
+        schedule_next.assert_not_called()
+        window.close()
+
 
 if __name__ == "__main__":
     unittest.main()

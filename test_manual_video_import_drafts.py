@@ -369,6 +369,29 @@ class ManualVideoImportDraftTests(unittest.TestCase):
         self.assertNotEqual(dialog.result(), dialog.DialogCode.Accepted)
         dialog.reject()
 
+    def test_duplicate_import_highlights_both_input_rows(self):
+        dialog = self.dialog(
+            rows=[
+                {"ten_video": "Video 1", "url": "https://youtu.be/jNQXAC9IVRw"},
+                {"ten_video": "Video 2", "url": "https://www.youtube.com/watch?v=jNQXAC9IVRw"},
+            ]
+        )
+        dialog._highlight_error_rows(
+            [
+                "Lỗi import video\n"
+                "Dòng nhập: 2\n"
+                "Trùng với dòng nhập: 1"
+            ]
+        )
+        for row in (0, 1):
+            for column in range(dialog.COLUMN_COUNT):
+                self.assertEqual(
+                    dialog.table.item(row, column).background().color().name(),
+                    "#5b1d2b",
+                    f"row={row}, column={column}",
+                )
+        dialog.reject()
+
     def test_corrupt_draft_does_not_crash_or_delete_file(self):
         path = self.directory / "manual-video-drafts" / "project-a.json"
         path.parent.mkdir(parents=True)

@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from PySide6.QtCore import QIODevice, QSaveFile, QSignalBlocker, QStandardPaths, QTimer, Qt
-from PySide6.QtGui import QColor, QKeySequence, QShortcut
+from PySide6.QtGui import QBrush, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -169,14 +169,28 @@ class ManualVideoImportDialog(QDialog):
         QMessageBox.information(self, "Bản nháp", "Đã khôi phục bản nháp chưa lưu.")
 
     def _highlight_error_rows(self, errors: list[str]) -> None:
-        import re
-
-        rows = {int(value) - 1 for error in errors for value in re.findall(r"Dòng nhập: (\d+)", error)}
-        color = QColor("#ffe1e1")
-        for row in rows:
-            if 0 <= row < self.table.rowCount():
-                for column in range(self.COLUMN_COUNT):
-                    self._ensure_cell_item(row, column).setBackground(color)
+        # Highlight both the rejected row and the earlier row it duplicates.
+        # The latter is part of the editable input only for in-list duplicates;
+        # saved-video duplicates have no corresponding row in this table.
+        rows: set[int] = set()
+        for error in errors:
+            for line in error.splitlines():
+                label, separator, value = line.partition(":")
+                if (
+                    separator
+                    and "nhập" in label
+                    and value.strip().isdigit()
+                ):
+                    rows.add(int(value.strip()) - 1)
+        color = QColor("#5b1d2b")
+        text_color = QColor("#ffe4e6")
+        with QSignalBlocker(self.table):
+            for row in rows:
+                if 0 <= row < self.table.rowCount():
+                    for column in range(self.COLUMN_COUNT):
+                        item = self._ensure_cell_item(row, column)
+                        item.setBackground(QBrush(color))
+                        item.setForeground(QBrush(text_color))
 
     def _show_import_errors(self, errors: list[str]) -> None:
         dialog = QDialog(self)
@@ -280,7 +294,9 @@ class ManualVideoImportDialog(QDialog):
         self._normalize_trailing_empty_rows()
         with QSignalBlocker(self.table):
             for column in range(self.COLUMN_COUNT):
-                self._ensure_cell_item(_item.row(), column).setBackground(QColor("transparent"))
+                item = self._ensure_cell_item(_item.row(), column)
+                item.setBackground(QColor("transparent"))
+                item.setForeground(QBrush())
         self._schedule_draft_save()
 
     def _edit_item(self, item: QTableWidgetItem) -> None:

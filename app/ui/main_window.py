@@ -200,6 +200,7 @@ class MainWindow(QMainWindow):
         self.queue_error: str | None = None
         self._queue_run_errors: list[str] = []
         self._queue_run_succeeded: int = 0
+        self._queue_authentication_failed = False
         self.pending_project_delete: tuple[str, bool] | None = None
         self.pending_queue_delete: tuple[list[str], str] | None = None
         self.download_queue.recover_interrupted()
@@ -2130,6 +2131,7 @@ class MainWindow(QMainWindow):
         self.pause_after_current = False
         self._queue_run_errors.clear()
         self._queue_run_succeeded = 0
+        self._queue_authentication_failed = False
         self.queue_page.queue_status.setText(
             f"Đang chạy hàng đợi ({self.queue_concurrency} luồng song song)."
         )
@@ -2293,6 +2295,11 @@ class MainWindow(QMainWindow):
             return True
         return False
 
+    @staticmethod
+    def _is_download_authentication_error(message: str) -> bool:
+        """Authentication failures affect the whole batch, so do not fan them out."""
+        return message.lstrip().startswith("[authentication]")
+
     def _queue_job_finished(self, job_id: str, succeeded: bool, message: str) -> None:
         worker = self.queue_workers.get(job_id)
         if worker is None:
@@ -2304,6 +2311,12 @@ class MainWindow(QMainWindow):
             self._queue_run_errors.append(message)
         else:
             self._queue_run_succeeded += 1
+        authentication_failed = (
+            not succeeded and self._is_download_authentication_error(message)
+        )
+        if authentication_failed:
+            self._queue_authentication_failed = True
+            self.pause_after_current = True
         can_continue = True
         if not succeeded:
             try:
@@ -2335,9 +2348,14 @@ class MainWindow(QMainWindow):
                 self.pause_after_current = False
                 self.queue_running = False
                 self._set_queue_loading(False)
-                self.queue_page.queue_status.setText(
-                    "Đã tạm dừng sau video hiện tại."
+                status = (
+                    "Đã dừng hàng đợi: YouTube yêu cầu xác thực. "
+                    "Hãy cấu hình cookies trong Cài đặt → Xác thực tải video rồi thử lại."
+                    if self._queue_authentication_failed
+                    else "Đã tạm dừng sau video hiện tại."
                 )
+                self.queue_page.queue_status.setText(status)
+                self.detail_page.queue_status.setText(status)
             return
         if can_continue:
             QTimer.singleShot(0, self._start_next_queue_job)
