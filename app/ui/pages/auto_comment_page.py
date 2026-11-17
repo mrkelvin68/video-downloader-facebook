@@ -347,7 +347,17 @@ class AutoCommentPage(QWidget):
         approved=set(self.approved_preview_assignments)
         if not approved:self.preview_status.setText("Hãy xác nhận ít nhất một assignment bằng checkbox trước khi lưu.");return
         approved_posts={pid for pid,_ in approved};posts=[p for p in posts if p["post_id"] in approved_posts];approved_comments={pid:[comment for order,comment in enumerate(self.preview_comments[pid],start=1) if (pid,order) in approved] for pid in approved_posts}
-        v={"name":self.campaign_name.text() or "Auto Comment draft","project_id":selected[0],"page_id":selected[1],"targets_by_post":self.target_states,"start_date":self.start_date.text(),"end_date":self.end_date.text(),"content_type":self.content_type.currentText(),"selection_mode":"sequential" if self.sequential_mode.isChecked() else "random","count":3 if self.three.isChecked() else 1,"prevent_duplicates":self.prevent_duplicates.isChecked()};self.campaign_id=self.service.save_preview(v,posts,approved_comments,self.campaign_id,approved_posts);self.refresh_libraries();self.campaign_picker.blockSignals(True);self.campaign_picker.setCurrentIndex(self.campaign_picker.findData(self.campaign_id));self.campaign_picker.blockSignals(False);self._refresh_execution();self.preview_status.setText("Đã lưu đúng snapshot assignment được duyệt. Chưa đăng Facebook.")
+        v={"name":self.campaign_name.text() or "Auto Comment draft","project_id":selected[0],"page_id":selected[1],"targets_by_post":self.target_states,"start_date":self.start_date.text(),"end_date":self.end_date.text(),"content_type":self.content_type.currentText(),"selection_mode":"sequential" if self.sequential_mode.isChecked() else "random","count":3 if self.three.isChecked() else 1,"prevent_duplicates":self.prevent_duplicates.isChecked()}
+        try:
+            self.campaign_id=self.service.save_preview(v,posts,approved_comments,self.campaign_id,approved_posts)
+        except AutoCommentValidationError as exc:
+            self.campaign_id=None
+            self.campaign_picker.blockSignals(True);self.campaign_picker.setCurrentIndex(0);self.campaign_picker.blockSignals(False)
+            message=f"{exc} Bản nháp hiện tại chưa được lưu; nhấn Lưu campaign lần nữa để tạo campaign mới."
+            self.preview_status.setText(message);QMessageBox.information(self,"Tạo campaign mới",message)
+            self._refresh_execution()
+            return
+        self.refresh_libraries();self.campaign_picker.blockSignals(True);self.campaign_picker.setCurrentIndex(self.campaign_picker.findData(self.campaign_id));self.campaign_picker.blockSignals(False);self._refresh_execution();self.preview_status.setText("Đã lưu đúng snapshot assignment được duyệt. Chưa đăng Facebook.")
     def open_campaign(self):
         i=self.campaign_picker.currentData()
         if not i:return

@@ -697,6 +697,12 @@ class AutoCommentService:
         campaign_id = campaign_id or str(uuid.uuid4())
         now = _now()
         with self.database.connection:
+            executed = self.database.connection.execute(
+                "SELECT 1 FROM auto_comment_campaign_executions WHERE campaign_id=?",
+                (campaign_id,),
+            ).fetchone()
+            if executed:
+                raise AutoCommentValidationError("Campaign đã có lịch sử thực hiện; snapshot được giữ nguyên và không thể ghi đè.")
             self.database.connection.execute(
                 """INSERT INTO auto_comment_campaigns
                    (id,name,page_id,post_start_date,post_end_date,content_type,selection_mode,comments_per_post,prevent_duplicates,status,created_at,updated_at)
@@ -709,12 +715,6 @@ class AutoCommentService:
                 (campaign_id, values["name"], values["page_id"], values["start_date"], values["end_date"],
                  values["content_type"], values["selection_mode"], values["count"], int(values["prevent_duplicates"]), now, now),
             )
-            executed = self.database.connection.execute(
-                "SELECT 1 FROM auto_comment_campaign_executions WHERE campaign_id=?",
-                (campaign_id,),
-            ).fetchone()
-            if executed:
-                raise AutoCommentValidationError("Campaign đã có lịch sử thực hiện; snapshot được giữ nguyên và không thể ghi đè.")
             self.database.connection.execute("DELETE FROM auto_comment_preview_items WHERE campaign_id=?", (campaign_id,))
             preview_rows = []
             targets = values.get("targets_by_post", {})

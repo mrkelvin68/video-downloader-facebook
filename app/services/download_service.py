@@ -233,6 +233,7 @@ class DownloadService:
                             "--js-runtimes", f"node:{js_runtime}",
                             "--remote-components", "ejs:github",
                         ])
+                if provider is not None and provider.platform in {VideoPlatform.FACEBOOK, VideoPlatform.YOUTUBE}:
                     if cookies_file:
                         command.extend(["--cookies", cookies_file])
                         cookies_applied = True

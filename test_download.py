@@ -207,13 +207,15 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertNotIn("--cookies-from-browser", calls[0])
 
-    def test_cookies_file_is_not_sent_for_public_download(self):
+    def test_facebook_valid_cookies_are_sent_on_first_attempt(self):
         cookies_path = self.root / "cookies.txt"
         cookies_path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
         service = DownloadService(self.db, runner=self._runner)
         with patch.object(service, "_find_cookies_file", return_value=str(cookies_path)):
             service.download(self.project, self.video["id"])
-        self.assertNotIn("--cookies", self._download_command)
+        self.assertIn("--cookies", self._download_command)
+        cookie_idx = self._download_command.index("--cookies")
+        self.assertEqual(self._download_command[cookie_idx + 1], str(cookies_path.resolve()))
 
     def test_youtube_does_not_auto_discover_repository_cookie_file(self):
         with patch.dict("os.environ", {"YTDLP_YOUTUBE_COOKIES_FILE": "", "YTDLP_COOKIES_FILE": ""}, clear=False):
