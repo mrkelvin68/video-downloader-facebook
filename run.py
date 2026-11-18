@@ -67,9 +67,19 @@ def main() -> int:
         return 1
 
     if result.returncode:
+        error_code = result.returncode & 0xFFFFFFFF
+        if error_code == 0xC0000409:
+            print(
+                "Ứng dụng bị dừng bởi lỗi native của Windows/Qt (0xC0000409), "
+                "không phải lỗi database. Không thể tiếp tục chạy an toàn sau lỗi này; "
+                "hãy gửi log/stack trace để xác định thành phần gây lỗi.",
+                file=sys.stderr,
+            )
+            return result.returncode
         print(
-            f"Ứng dụng kết thúc với mã lỗi {result.returncode}. "
-            "Kiểm tra database/quyền truy cập và thử lại.",
+            f"Ứng dụng kết thúc với mã lỗi {result.returncode} "
+            f"(0x{error_code:08X}). Xem thông báo trong ứng dụng hoặc log "
+            "để biết nguyên nhân.",
             file=sys.stderr,
         )
     return result.returncode

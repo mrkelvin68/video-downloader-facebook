@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -96,6 +97,34 @@ class SystemTrayAndAutoResumeTests(unittest.TestCase):
 
         application.setQuitOnLastWindowClosed.assert_called_once_with(True)
         main_window_cls.assert_called_once_with(database, auto_resume=True, enable_tray=False)
+        window.show.assert_called_once_with()
+        database.close.assert_called_once_with()
+
+    def test_main_retries_database_startup_error_without_exiting(self):
+        application = MagicMock()
+        application.exec.return_value = 0
+        database = MagicMock()
+        window = MagicMock()
+
+        with (
+            patch.object(main_window, "acquire_single_instance", return_value=True),
+            patch.object(main_window, "QApplication", return_value=application),
+            patch.object(
+                main_window,
+                "Database",
+                side_effect=[sqlite3.OperationalError("database is locked"), database],
+            ) as database_cls,
+            patch.object(
+                main_window.QMessageBox,
+                "critical",
+                return_value=main_window.QMessageBox.StandardButton.Retry,
+            ) as critical,
+            patch.object(main_window, "MainWindow", return_value=window),
+        ):
+            self.assertEqual(main_window.main(), 0)
+
+        self.assertEqual(database_cls.call_count, 2)
+        critical.assert_called_once()
         window.show.assert_called_once_with()
         database.close.assert_called_once_with()
 

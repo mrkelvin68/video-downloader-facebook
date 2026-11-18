@@ -2725,7 +2725,22 @@ def main() -> int:
     application.setApplicationName("VideoDownloaderFacebook")
     style_path = Path(__file__).with_name("styles.qss")
     application.setStyleSheet(style_path.read_text(encoding="utf-8"))
-    database = Database(DB_PATH)
+    database = None
+    while database is None:
+        try:
+            database = Database(DB_PATH)
+        except (OSError, sqlite3.Error) as exc:
+            answer = QMessageBox.critical(
+                None,
+                "Không thể mở cơ sở dữ liệu",
+                "Không thể mở dữ liệu ứng dụng. Hãy kiểm tra quyền truy cập hoặc "
+                "đóng chương trình khác đang dùng database.\n\n"
+                f"Chi tiết: {exc}",
+                QMessageBox.StandardButton.Retry | QMessageBox.StandardButton.Close,
+                QMessageBox.StandardButton.Retry,
+            )
+            if answer != QMessageBox.StandardButton.Retry:
+                return 1
     try:
         window = MainWindow(database, auto_resume=True, enable_tray=False)
         window.show()
